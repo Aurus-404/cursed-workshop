@@ -1,0 +1,38 @@
+__pycache__/
+*.pyc
+node_modules/
+.venv/
+build/
+.build-deps/
+data/
+outputs/
+dist/
+workshop/web/assets/*.map
+dist_new/
+# local builds and test outputs
+builds/
+dist_bugfix/
+generated/
+.claude/
+# third-party material kept only locally (original Workshop mod 3808336045 and its analysis)
+3808336045/
+3808336045.rar
+analisis_y_evidencias.zip
+analysis/evidence/
+
+# graphify knowledge-graph output (local tool)
+graphify-out/
+
+# Player reports and attachments received through Codex (kept locally, never committed)
+.codex-remote-attachments/
+
+# Credentials, private signing keys and local editor state
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.pfx
+*.p12
+.vscode/
+.idea/

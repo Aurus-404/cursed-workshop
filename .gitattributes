@@ -1,0 +1,5 @@
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+# The generated three.js bundle contains upstream GLSL template whitespace.
+workshop/web/assets/app.js -whitespace

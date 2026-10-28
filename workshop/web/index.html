@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="es">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Cursed Workshop</title><link rel="stylesheet" href="/assets/style.css"></head>
+<body>
+<header class="appbar">
+  <div class="brand"><span class="brand-mark">CW</span><div><strong>CURSED WORKSHOP <span class="version" title="Versión de Cursed Workshop">v</span></strong><small>GATES OF HELL · TALLER DE CAMPAÑA</small></div></div>
+  <div class="top-center"><span class="status-dot" id="game-dot"></span><span id="game-status">Comprobando juego…</span></div>
+  <div class="top-actions"><button id="inspector-button" class="subtle" title="Muestra u oculta el panel de ajuste de posición">Ajustes XYZ</button><button id="repair-button" class="subtle" title="Actualiza únicamente los vehículos de la partida abierta">Actualizar vehículos</button><button id="portraits-button" class="subtle" title="Vuelve a fotografiar los modelos armados de todos tus vehículos del taller, sin cambiar tu partida ni el editor">Regenerar retratos</button><button id="shop-button" class="subtle" title="Elegí qué vehículos del taller se venden en la tienda de la Conquista">Tienda</button><button id="diagnostic-button" class="subtle">Diagnóstico</button><button id="settings-button" class="subtle" title="Carpeta del juego y mods que se leen">Configuración</button><select id="lang-select" class="lang-select" title="Idioma / Language" aria-label="Idioma"><option value="es">Español</option><option value="en">English</option><option value="zh-CN">简体中文</option></select><button id="help-button" class="subtle" aria-label="Ayuda y atajos">?</button><button id="close-button" class="subtle" title="Cierra el taller">Salir</button></div>
+</header>
+<main class="workspace">
+  <aside class="library">
+    <div class="panel-heading"><span class="eyebrow">01 / CAMPAÑA</span><button id="open-save" class="icon-button" title="Abrir una partida desde otra carpeta">＋</button></div>
+    <div class="campaign-picker"><select id="save-select" aria-label="Partida guardada"><option value="">Elegir una partida…</option></select><button id="load-save" class="primary small" title="Lee la partida elegida y muestra tus unidades">Abrir</button></div>
+    <div class="campaign-summary"><strong id="campaign-name">Sin campaña abierta</strong><span id="campaign-summary">Abrí una partida para ver tus unidades.</span></div>
+    <div class="library-tabs"><button class="active" data-tab="campaign" title="Vehículos de tu partida"><span class="tab-label">Unidades</span><span class="tab-count" id="unit-count">0</span></button><button data-tab="depot" title="Chasis y torretas que sobraron de vehículos anteriores"><span class="tab-label">Depósito</span><span class="tab-count" id="depot-count">0</span></button><button data-tab="storage" title="Vehículos completos compartidos entre tus campañas"><span class="tab-label">Almacén</span><span class="tab-count" id="storage-count">0</span></button><button data-tab="catalog" title="Todos los vehículos del juego, solo para mirar"><span class="tab-label">Catálogo</span></button></div>
+    <div class="search-box"><span>⌕</span><input id="unit-search" placeholder="Buscar vehículo o pieza…" aria-label="Buscar unidades"></div><div id="creative-bar" class="creative-bar hidden"><label class="toggle" title="Usá cualquier vehículo del catálogo como chasis, torreta o cañón, sin gastar unidades. Con un chasis de tu partida, el vehículo cambia en tu partida; con un chasis del catálogo, se vende en la tienda de la Conquista."><input type="checkbox" id="creative-mode"> Modo creativo</label><select id="catalog-nation" aria-label="Nación"><option value="">Todas las naciones</option></select><select id="catalog-kind" aria-label="Tipo"><option value="">Todos los tipos</option></select></div>
+
+    <div class="selection-mode"><span>Al hacer clic, usar como</span><button id="pick-hull" class="active" title="El vehículo que toques pone el chasis (movilidad y casco)">Chasis</button><button id="pick-turret" title="El vehículo que toques pone la torreta y sus armas">Torreta</button><button id="pick-edit" title="Abre el vehículo que toques para corregir su montaje, sin usar otro vehículo">Editar</button><button id="pick-delete" title="Guarda el vehículo completo y su tripulación en el Almacén, fuera de la campaña">Quitar de la campaña</button></div>
+    <div id="unit-list" class="unit-list"><div class="library-empty">Las unidades de tu partida aparecerán aquí.</div></div>
+    <div class="library-footer"><span id="source-count">Recursos sin cargar</span><button id="sources-button" class="text-button">Ver mods activos ↗</button></div>
+  </aside>
+
+  <section class="editor">
+    <div class="editor-top"><h1>Ensamblaje</h1></div>
+    <div id="addon-readiness" class="addon-readiness hidden" role="status" aria-live="polite"><div class="addon-readiness-bar"><span id="addon-readiness-summary"></span><button id="check-addon" class="small">Comprobar carga del mod</button><button id="addon-readiness-toggle" class="small subtle" aria-controls="addon-readiness-details" aria-expanded="false">Detalles</button></div><div id="addon-readiness-details" class="hidden"><p id="addon-readiness-message"></p></div></div>
+
+    <div class="assembly-strip">
+      <div class="part-card hull"><span class="part-symbol">▰</span><div><small id="hull-kind">CHASIS</small><strong id="hull-name">Elegí un vehículo</strong><span id="hull-detail">Movilidad · protección del casco</span></div><button id="clear-hull" class="icon-button" title="Quitar el chasis">×</button></div>
+      <span class="combine-symbol">＋</span>
+      <div class="part-card turret"><span class="part-symbol">▱</span><div><small id="module-kind">TORRETA</small><strong id="turret-name">Elegí un vehículo</strong><span id="turret-detail">Armamento · protección de la torreta</span></div><button id="clear-turret" class="icon-button" title="Quitar la torreta">×</button></div>
+    </div>
+    <div class="viewport" id="viewport">
+      <div id="viewport-empty" class="viewport-empty"><div class="empty-emblem">⌖</div><h2>Armá tu próximo vehículo</h2><p>Elegí un chasis y una torreta de tus unidades o del depósito.<br>Después podés mover y orientar la torreta en tres ejes.</p></div>
+      <div class="viewport-toolbar"><div class="segmented"><button id="mode-move" class="active" title="Arrastrá las flechas para mover la parte elegida">Mover</button><button id="mode-rotate" title="Arrastrá los anillos para girar la parte elegida">Girar</button></div><button id="fit-view" title="Centra la cámara en el vehículo">Encuadrar</button><button id="wireframe" title="Muestra el modelo como malla de alambre">Malla</button><button id="axes" title="Muestra los ejes X (rojo), Y (verde) y Z (azul)">Ejes</button><div class="view-menu"><button id="view-button" aria-expanded="false" aria-controls="view-panel" title="Qué se muestra en la vista 3D">Ver ▾</button><div id="view-panel" class="view-panel hidden"><label title="Usa las texturas del juego en lugar de colores lisos (la primera vez tarda unos segundos)"><input type="checkbox" data-show="textures"> Texturas originales</label><label title="Muestra dónde va cada tripulante (los que van dentro del vehículo no tienen asiento visible)"><input type="checkbox" data-show="crew"> Tripulación</label><label title="Muestra los asientos de pasajeros"><input type="checkbox" data-show="passengers"> Pasajeros</label><label><input type="checkbox" data-show="hull" checked> Chasis</label><label><input type="checkbox" data-show="turret" checked> Torreta / arma</label><label><input type="checkbox" data-show="grid" checked> Grilla del suelo</label><label title="Muestra hasta dónde gira y apunta cada arma. Arrastrá los círculos para mover la torreta o el cañón y ver cómo queda en cada ángulo (solo vista: no cambia el diseño)"><input type="checkbox" data-show="arcs"> Ángulos de las armas</label><label title="Muestra los volúmenes de blindaje del juego coloreados por espesor. Pasá el mouse por el vehículo para ver el espesor de esa cara en mm, el efectivo según el ángulo y su equivalente RHA"><input type="checkbox" data-show="armor"> Blindaje (mm)</label><button id="reset-weapon-pose" type="button" class="subtle" title="Vuelve a poner todas las armas en su posición de reposo">Resetear posición de las armas</button></div></div><button id="capture" title="Guarda una imagen de la vista 3D en la carpeta Imágenes, Cursed Workshop">Captura</button></div>
+      <div class="view-buttons"><button data-view="perspective" title="Vista en perspectiva">3D</button><button data-view="front" title="Vista de frente">F</button><button data-view="side" title="Vista lateral">L</button><button data-view="top" title="Vista desde arriba (superior)">S</button></div>
+      <div class="viewport-legend"><span><i class="hull-dot"></i>Chasis</span><span><i class="turret-dot"></i>Torreta</span><span id="legend-crew" class="hidden"><i class="crew-dot"></i>Tripulación</span><span id="legend-passengers" class="hidden"><i class="passenger-dot"></i>Pasajeros</span><span id="legend-internal" class="hidden"></span></div>
+      <div class="viewport-info"><span id="mesh-info">Vista 3D</span><span>Arrastrar: órbita · rueda: zoom · botón derecho: desplazar</span></div>
+      <div id="busy-overlay" class="busy-overlay hidden"><span class="spinner" aria-hidden="true"></span><strong id="busy-label" role="status">Cargando…</strong><progress id="busy-progress" aria-label="Progreso por etapas"></progress><span id="busy-detail">La operación sigue en curso.</span><span id="busy-elapsed">Tiempo transcurrido: 00:00</span><button id="cancel-operation" type="button" class="hidden">Cancelar operación</button></div>
+    </div>
+    <div class="editor-bottom"><span class="operation-count" id="operation-count">2 piezas <span>→</span> 1 vehículo</span><span id="assembly-policy">El vehículo nuevo reemplaza a los usados en esta partida. Los veteranos se conservan y las piezas que sobran van al Depósito.</span></div>
+  </section>
+
+  <aside class="inspector">
+    <div class="inspector-scroll">
+    <div class="panel-heading"><span class="eyebrow">03 / AJUSTE</span><span class="mini-label">XYZ</span></div>
+    <div class="inspector-tabs" aria-label="Parte del vehículo"><button id="edit-hull" class="active" title="Ajustar el chasis">Chasis</button><button id="edit-turret" title="Ajustar la torreta">Torreta</button></div>
+    <div id="inspector-home" class="inspector-home"></div>
+    <section id="inspector-tool" class="hidden" aria-labelledby="inspector-tool-title">
+    <div class="inspector-tool-heading"><div><small id="inspector-context">Chasis</small><h2 id="inspector-tool-title" tabindex="-1">Ajustes</h2></div><button id="inspector-finish" type="button" class="primary" title="Conserva los ajustes del diseño y vuelve al menú. No modifica la partida.">Volver al menú</button><button id="inspector-cancel" type="button" class="hidden">Cancelar operación</button></div>
+    <div id="inspector-progress" class="inspector-progress hidden">
+      <span id="inspector-progress-label" role="status" aria-live="polite">Procesando ajustes…</span>
+      <progress id="inspector-progress-bar" aria-label="Progreso de los ajustes"></progress>
+      <small id="inspector-progress-elapsed">Tiempo transcurrido: 00:00</small>
+    </div>
+    <div id="working-target-slot" class="working-target-slot" aria-label="Parte que estás editando"></div>
+    <div id="inspector-tool-content">
+    <div class="field" id="operation-controls"><label for="operation-select">Operación</label><select id="operation-select"><option value="turret">Cambiar torreta / montaje libre</option><option value="gun">Cambiar cañón</option><option value="support">Convertir a vehículo de apoyo</option></select><p id="assembly-step" role="status"></p><button id="check-again" type="button">Revisar compatibilidad</button><div id="turret-fields" class="hidden"><label for="turret-target">Torreta del chasis</label><select id="turret-target"></select><div id="assembly-scope-field" class="hidden"><label for="assembly-scope">Conjunto del donante</label><select id="assembly-scope"><option value="module">Montaje de armamento</option><option value="complete">Artillería completa con cureña</option></select><small>El conjunto completo conserva ruedas y patas como geometría pasiva. Requiere artillería con una raíz verificable; aceptación en batalla pendiente.</small></div></div><div id="turret-removed-fields" class="hidden"><label for="turret-removed">Torretas retiradas</label><select id="turret-removed"></select><button id="turret-undo-removal" type="button">Deshacer retirada</button></div><button id="design-save-turret" type="button" class="hidden">Guardar cambio de torreta</button><div id="turret-saved-fields"><label for="turret-saved">Torretas guardadas</label><select id="turret-saved" size="3"></select><div class="inspector-actions"><button id="design-edit-turret" type="button" class="hidden">Editar torreta guardada</button><button id="turret-remove-change" type="button">Quitar cambio de torreta</button></div></div><div id="gun-fields" class="hidden"><label for="gun-recipient">Cañón del receptor</label><select id="gun-recipient"></select><label for="gun-donor">Cañón del donante</label><select id="gun-donor"></select><label class="toggle" title="La recámara, la cuna y el escudo de un emplazamiento o cañón remolcado sobresalen de una torreta: se dejan afuera y queda sólo el tubo"><input type="checkbox" id="gun-barrel-only"> Sólo el tubo del cañón</label><label class="toggle" title="Cuando el cañón original comparte el mantelete con una ametralladora coaxial, ese mantelete puede quedarse alrededor del cañón nuevo o quitarse"><input type="checkbox" id="gun-keep-mantlet" checked> Conservar el mantelete original</label><small>Cada cambio conserva su donante. Las unidades usadas se consumen una sola vez al construir.</small><button id="gun-save" type="button">Guardar cambio de arma</button><button id="gun-discard" type="button">Descartar cambio actual</button><small>Guarda el cambio en el diseño, sin construir ni modificar la partida. Después podés elegir otro donante para el siguiente cambio. Cada unidad se consume una sola vez.</small><label for="gun-saved">Cambios de arma guardados</label><select id="gun-saved" size="3"></select><div class="inspector-actions"><button id="gun-edit-change" type="button">Editar cambio</button><button id="gun-remove-change" type="button">Quitar cambio</button></div><button id="gun-clear-changes" type="button">Quitar todos los cambios</button><small id="gun-note"></small><small id="gun-blocked"></small><small>Experimental: compilación y vista previa no equivalen a una prueba en batalla.</small></div><div id="turret-removal-actions" class="field"><button id="turret-retire" type="button">Retirar torreta del vehículo</button><small>Guarda en el depósito la torreta seleccionada con todas sus armas instaladas al construir.</small></div></div>
+    <div class="field hidden" id="support-fields">
+      <label for="support-kind">Servicio de apoyo</label><select id="support-kind"><option value="ammo">Munición</option><option value="engineer">Ingeniería</option><option value="fuel">Combustible</option></select>
+      <label for="support-profile">Paquete de suministro</label><select id="support-profile"></select><small id="support-summary"></small>
+      <small>La capacidad procede de un perfil nativo. No es una cantidad de proyectiles. Agregar cajas no aumenta el suministro.</small>
+      <label for="cargo-asset">Accesorio visual</label><select id="cargo-asset"></select><button id="cargo-add" type="button">Agregar accesorio</button>
+      <label for="cargo-list">Carga colocada</label><select id="cargo-list" size="4"></select>
+      <div class="inspector-actions"><button id="cargo-duplicate" type="button">Duplicar accesorio</button><button id="cargo-remove" type="button">Quitar accesorio</button></div>
+      <small>Elegí una caja de la lista y usá Mover, Girar o los campos XYZ para colocarla. Son visuales: no agregan blindaje ni inventarios independientes.</small>
+      <small>La torreta se retira. Las cajas son accesorios visuales.</small><small>Experimental: el suministro y su persistencia requieren una prueba en batalla.</small>
+    </div>
+    <div class="field" id="towing-section">
+      <strong>Remolque</strong>
+      <label for="towing-option">Puede remolcar</label><select id="towing-option"><option value="">Sin cambios</option><option value="light">Piezas livianas</option><option value="medium">Piezas medianas</option><option value="heavy">Piezas pesadas</option></select>
+      <div id="towing-parent-field" class="hidden"><label for="towing-parent">Fijar el enganche a</label><select id="towing-parent"></select>
+        <small>El punto es el enganche: movelo con Mover, Girar o XYZ. La flecha apunta hacia donde queda la pieza remolcada.</small>
+        <div class="inspector-actions"><button id="towing-edit" type="button">Ubicar</button><button id="towing-remove" type="button">Quitar</button></div></div>
+      <small>Usa el remolque del juego: el vehículo pasa a ser tractor del peso elegido. Reemplaza el enganche que tuviera.</small>
+      <small>Experimental: comportamiento en batalla pendiente de prueba.</small>
+    </div>
+    <div class="field" id="charge-section">
+      <strong>Carga explosiva</strong>
+      <label for="charge-option">Carga</label><select id="charge-option"><option value="">Sin carga</option><option value="60kg">Carga de Goliath (60 kg)</option><option value="100kg">Carga de Goliath (100 kg)</option></select>
+      <div id="charge-parent-field" class="hidden"><label for="charge-parent">Fijar la carga a</label><select id="charge-parent"></select>
+        <small>El punto es desde donde detona: movelo con Mover, Girar o XYZ. La flecha apunta hacia adelante.</small>
+        <div class="inspector-actions"><button id="charge-edit" type="button">Ubicar</button><button id="charge-remove" type="button">Quitar</button></div></div>
+      <small>Usa la carga del Goliath: el conductor la detona como un arma más, a pocos metros, y el vehículo explota con ella.</small>
+      <small>Experimental: comportamiento en batalla pendiente de prueba.</small>
+    </div>
+    <div class="field" id="smoke-section">
+      <strong>Lanzadores de humo</strong>
+      <button id="smoke-load" type="button">Elegir lanzador de humo</button>
+      <div id="smoke-fields" class="hidden">
+        <label for="smoke-tubes">Modelo del lanzador</label><select id="smoke-tubes"><option value="1">Lanzador de humo simple</option><option value="2">Lanzador de humo doble</option><option value="3">Lanzador de humo triple</option></select>
+        <label for="smoke-parent">Fijar lanzador al vehículo</label><select id="smoke-parent"></select>
+        <small>La pieza verde es una vista previa. Agregala y usá Mover, Girar o XYZ. Las flechas muestran la dirección de lanzamiento.</small>
+        <button id="smoke-add" type="button">Agregar lanzador</button>
+        <label for="smoke-list">Lanzadores colocados</label><select id="smoke-list" size="3"></select>
+        <div class="inspector-actions"><button id="smoke-duplicate" type="button">Duplicar lanzador</button><button id="smoke-remove" type="button">Quitar lanzador</button></div><button id="smoke-edit" type="button">Ubicar lanzador</button>
+        <small>Gris mate fijo, sin camuflaje automático. La primera instalación agrega 3 cargas; mover o duplicar no repone munición.</small>
+        <small>Todos los tubos añadidos disparan con la acción nativa de humo. Conserva los lanzadores originales compatibles y su munición. No agrega tripulantes.</small>
+        <small>Experimental: disparo, consumo de cargas y guardado pendientes de prueba en batalla.</small>
+      </div>
+    </div>
+    <div class="field" id="rider-section">
+      <strong>MG de pasajero</strong>
+      <small>Una ametralladora que usa quien suba al vehículo, un soldado o un tripulante, como la .50 de los Stuart. La tripulación sigue con sus tareas.</small>
+      <button id="rider-load" type="button">Elegir MG de pasajero</button>
+      <small id="rider-dlc-note" role="status"></small>
+      <div id="rider-fields" class="hidden">
+        <label for="rider-support">Soporte o trípode</label><select id="rider-support"></select>
+        <label for="rider-pose">Postura del operador</label><select id="rider-pose"></select>
+        <label for="rider-item">Ametralladora</label><select id="rider-item"></select>
+        <label for="rider-parent">Fijar MG al vehículo</label><select id="rider-parent"></select>
+        <small>La pieza verde es una vista previa. Agregala y usá Mover, Girar o XYZ.</small>
+        <button id="rider-add" type="button">Agregar MG</button>
+        <label for="rider-list">MG colocadas</label><select id="rider-list" size="3"></select>
+        <div class="inspector-actions"><button id="rider-duplicate" type="button">Duplicar MG</button><button id="rider-remove" type="button">Quitar MG</button></div><button id="rider-edit" type="button">Ubicar MG</button>
+        <label>Lugar del operador (X, Y, Z)</label>
+        <div class="inspector-actions"><input id="rider-seat-0" type="number" step="1" aria-label="Operador X"><input id="rider-seat-1" type="number" step="1" aria-label="Operador Y"><input id="rider-seat-2" type="number" step="1" aria-label="Operador Z"></div>
+        <small>Movelo hasta que sus manos queden en la MG.</small>
+        <label>Giro (mín., máx.)</label>
+        <div class="inspector-actions"><input id="rider-yaw-0" type="number" step="1" aria-label="Giro mínimo"><input id="rider-yaw-1" type="number" step="1" aria-label="Giro máximo"></div>
+        <label>Elevación (mín., máx.)</label>
+        <div class="inspector-actions"><input id="rider-pitch-0" type="number" step="1" aria-label="Elevación mínima"><input id="rider-pitch-1" type="number" step="1" aria-label="Elevación máxima"></div>
+        <small>Se sube por las puertas del vehículo. Sin nadie arriba, la MG no dispara.</small>
+        <small>Experimental: postura, IA y guardado pendientes de prueba en batalla.</small>
+      </div>
+    </div>
+    <div class="field" id="passenger-section">
+      <strong>Pasajeros</strong>
+      <small>Agregá asientos donde quieras, o cambiá la pose y el lugar de los que ya tiene el vehículo.</small>
+      <button id="passenger-load" type="button">Editar pasajeros</button>
+      <div id="passenger-fields" class="hidden">
+        <small id="passenger-count" role="status"></small>
+        <label for="passenger-list">Asientos del vehículo</label><select id="passenger-list" size="6"></select>
+        <label for="passenger-pose">Postura</label><select id="passenger-pose"></select>
+        <div id="passenger-parent-field"><label for="passenger-parent">Fijar asiento al vehículo</label><select id="passenger-parent"></select></div>
+        <div class="inspector-actions"><button id="passenger-add" type="button">Agregar asiento</button><button id="passenger-duplicate" type="button">Duplicar asiento</button><button id="passenger-remove" type="button">Quitar asiento</button></div>
+        <button id="passenger-edit" type="button">Ubicar asiento</button>
+        <label>Agregar fila (cantidad, separación, eje)</label>
+        <div class="row-builder"><input id="passenger-row-count" type="number" min="1" step="1" value="4" aria-label="Cantidad de asientos"><input id="passenger-row-gap" type="number" step="1" value="20" aria-label="Separación entre asientos"><select id="passenger-row-axis" aria-label="Eje de la fila"><option value="0">X</option><option value="1" selected>Y</option><option value="2">Z</option></select><button id="passenger-row-add" type="button">Agregar fila</button></div>
+        <div id="passenger-offset-field"><label>Mover asiento original (X, Y, Z)</label>
+        <div class="inspector-actions"><input id="passenger-offset-0" type="number" step="1" aria-label="Asiento X"><input id="passenger-offset-1" type="number" step="1" aria-label="Asiento Y"><input id="passenger-offset-2" type="number" step="1" aria-label="Asiento Z"></div>
+        <button id="passenger-reset" type="button">Restablecer asiento original</button></div>
+        <small>Los asientos nuevos se mueven con Mover, Girar o XYZ. Se sube por las puertas del vehículo.</small>
+        <small>Experimental: subida, poses e IA pendientes de prueba en batalla.</small>
+      </div>
+    </div>
+    <div class="field" id="armor-section">
+      <strong>Blindaje extra</strong><small>Para blindar una unidad sin cambiar sus piezas, abrila con Editar.</small>
+      <button id="armor-load" type="button">Elegir blindaje extra</button>
+      <div id="armor-fields" class="hidden">
+        <label for="armor-kind">Tipo de protección</label><select id="armor-kind"><option value="">Todos los blindajes</option><option value="tracks">Orugas de repuesto</option><option value="sandbags">Sacos de arena</option><option value="plates">Placas y faldones</option><option value="wood">Madera</option></select>
+        <label for="armor-asset">Pieza disponible</label><select id="armor-asset"></select><small id="armor-info"></small>
+        <label for="armor-parent">Fijar blindaje al vehículo</label><select id="armor-parent"></select>
+        <small>Mové la vista previa con las flechas y agregala. Para moverla otra vez, tocá su nombre en Blindaje colocado.</small>
+        <button id="armor-add" type="button">Agregar blindaje</button>
+        <label for="armor-list">Blindaje colocado</label><select id="armor-list" size="4"></select>
+        <div class="inspector-actions"><button id="armor-duplicate" type="button">Duplicar blindaje</button><button id="armor-remove" type="button">Quitar blindaje</button></div><button id="armor-edit" type="button">Ubicar blindaje</button>
+        <small>Seleccioná una pieza colocada y usá Mover, Girar o XYZ. Las fijadas a la torreta giran con ella.</small>
+        <small>Conserva material, espesor y resistencia nativos. Arena, madera y orugas no equivalen a ese espesor de acero. No aumenta el blindaje de todo el casco.</small>
+        <small>Experimental: penetración, daño y persistencia pendientes de prueba en batalla. La masa y movilidad del chasis se conservan.</small>
+      </div>
+    </div>
+    <div class="field toggle-field" id="commander-field">
+      <input type="checkbox" id="cmd-enabled" class="hidden" aria-hidden="true" tabindex="-1">
+      <button id="cmd-add" type="button">Agregar arma del comandante</button><small id="cmd-availability" role="status"></small>
+      <button id="cmd-remove" type="button" class="hidden">Quitar arma del comandante</button>
+      <button id="edit-commander" type="button" class="hidden" disabled>Montura</button>
+      <div id="cmd-fields" class="hidden">
+        <label for="cmd-support">Soporte</label><select id="cmd-support"></select>
+        <label for="cmd-item">Arma inicial · juego y DLC disponibles</label><select id="cmd-item"></select>
+        <small id="cmd-dlc-note" role="status"></small>
+        <label for="cmd-parent">Fijar al vehículo</label><select id="cmd-parent"></select>
+        <label>Giro horizontal · mínimo / máximo</label><div class="axis-fields"><input type="number" id="cmd-yaw-0" min="-180" max="180" aria-label="Giro horizontal mínimo"><input type="number" id="cmd-yaw-1" min="-180" max="180" aria-label="Giro horizontal máximo"></div>
+        <label>Elevación · mínimo / máximo</label><div class="axis-fields"><input type="number" id="cmd-pitch-0" min="-90" max="90" aria-label="Elevación mínima"><input type="number" id="cmd-pitch-1" min="-90" max="90" aria-label="Elevación máxima"></div>
+        <small>Solo el comandante. No agrega tripulantes. Mové su pivote con las flechas o los campos XYZ.</small>
+        <small id="cmd-warning">Experimental: la escotilla, el intercambio de armas y la IA se probarán en batalla.</small>
+      </div>
+    </div>
+    <div id="design-module-crew-field" class="field hidden"><label for="design-module-crew">Parte que estás editando</label><select id="design-module-crew"></select></div>
+    <div id="design-turret-pos-field" class="field hidden"><label for="design-turret-pos">Torreta a ajustar</label><select id="design-turret-pos"></select></div>
+    <div id="design-turret-limits-field" class="field hidden"><label for="design-turret-limits">Torreta a ajustar</label><select id="design-turret-limits"></select></div>
+    <div class="field"><label for="mount-select" title="Parte del modelo que se intercambia (normalmente la torreta)">Punto de montaje</label><select id="mount-select"><option value="">Principal</option></select></div>
+    <div id="weapon-joints" class="field hidden"><label for="joint-select">Límites de torreta y cañón</label><select id="joint-select"></select><small>Elegí una articulación del arma. El arco muestra sus límites en los ejes nativos del modelo.</small><div class="joint-limits"><label>Mínimo<input id="joint-min" type="number" min="-180" max="180" step="1"></label><label>Máximo<input id="joint-max" type="number" min="-180" max="180" step="1"></label></div><button id="joint-reset" class="small">Restablecer límites nativos</button><small id="joint-message" role="status"></small></div>
+    <div class="field hidden" id="crew-pending-field"><p>Aplicá el montaje para editar los puestos definitivos de sus tripulantes. Se guarda en el diseño, sin construir ni modificar tu partida.</p><button type="button" id="crew-apply-mount">Aplicar montaje y editar tripulantes</button></div>
+    <div class="field hidden" id="crew-visibility-field"><label>Ocultar tripulantes al embarcar</label><div id="crew-visibility-list" class="crew-list"></div><small>Marcá cada puesto que quieras ocultar. Conserva al tripulante y su función; destildarlo restaura su aspecto original. Los puestos que ya son internos no se pueden hacer visibles desde aquí. Experimental: falta comprobar desembarque y combate en el juego.</small></div>
+    <div class="field toggle-field hidden" id="crew-static-field"><label class="toggle" title="Los cargadores y el comandante del arma quedan fijos dentro del vehículo en vez de girar con el cañón (el tirador siempre gira con el arma para apuntar)"><input type="checkbox" id="crew-static" checked> Tripulantes del arma fijos en el vehículo</label><small>Evita que los cargadores queden colgando por fuera al girar el cañón.</small></div><div class="field crew-field hidden" id="crew-field"><label>Tripulantes del arma</label><div id="crew-list" class="crew-list"></div><small>Podés ubicar a todos los tripulantes visibles del arma, incluidos los artilleros, con o sin «Fijos». Tocá «Ubicar» o el maniquí y movelo con las flechas. Usá la casilla «Fijar al chasis» de cada tripulante para elegir quién permanece en el chasis y quién sigue al arma. Destildá a los que querés dejar en reserva.</small></div>
+    </div>
+    <div id="inspector-transforms"><button id="gun-save-position" type="button" class="hidden">Guardar cambio de arma</button>
+    <div class="inspector-actions"><button id="pose-move" type="button" aria-pressed="true">Mover pieza</button><button id="pose-rotate" type="button" aria-pressed="false">Girar pieza</button></div>
+    <button id="pose-pivot" type="button" aria-pressed="false">Mover pivote</button>
+    <p class="pose-help">Mover el pivote conserva la pieza en su lugar. Girar usa el nuevo centro.</p>
+    <fieldset id="pivot-fields"><legend>Pivote de giro</legend><div class="axis-fields">
+      <label>Pivote X <input id="pivot-0" type="number" step="0.1" value="0" aria-label="Pivote X"></label>
+      <label>Pivote Y <input id="pivot-1" type="number" step="0.1" value="0" aria-label="Pivote Y"></label>
+      <label>Pivote Z <input id="pivot-2" type="number" step="0.1" value="0" aria-label="Pivote Z"></label>
+    </div><button id="pivot-reset" type="button">Restablecer pivote</button></fieldset>
+    <p class="pose-help">Girar pieza muestra los aros de colores. Arrastrá un aro o usá los campos de orientación.</p>
+    <div class="transform-section"><div class="section-title"><strong>Posición</strong><span>unidades del modelo</span></div><div id="position-fields" class="axis-fields"></div></div>
+    <div class="transform-section"><div class="section-title"><strong>Orientación</strong><span>grados</span></div><div id="rotation-fields" class="axis-fields"></div></div>
+    <div class="inspector-actions"><button id="align-button" title="Vuelve a apoyar la torreta automáticamente sobre el aro del chasis">Apoyar torreta</button><button id="reset-transform" title="Pone en cero la posición y orientación de la parte que estás ajustando">Restablecer posición</button></div>
+    </div>
+    <div id="inspector-history" class="inspector-actions"><button id="undo-button" title="Deshace el último ajuste (Ctrl+Z)">↶ Deshacer</button><button id="redo-button" title="Rehace el ajuste deshecho (Ctrl+Y)">↷ Rehacer</button></div>
+    <p class="inspector-note">Volver al menú conserva el diseño. Para guardarlo en la campaña, usá Construir vehículo.</p>
+    </section>
+    <div id="inspector-overview">
+    <p class="inspector-note">Elegí una herramienta. Terminá ese ajuste antes de abrir otra.</p>
+    <details class="inspector-details"><summary>Herencia del vehículo</summary>
+    <div class="inheritance"><div><i class="hull-dot"></i><span>Chasis</span><p>Movimiento, motor, ruedas u orugas y protección del cuerpo.</p></div><div><i class="turret-dot"></i><span>Torreta</span><p id="module-inheritance">Armas, munición, giro, miras, tripulantes de la torreta y su blindaje.</p></div></div>
+    </details>
+    <div id="model-diagnostics" class="diagnostics"></div>
+    </div>
+    </div>
+    <div class="build-panel" id="inspector-build"><label for="vehicle-name">Nombre del vehículo</label><input id="vehicle-name" placeholder="Mi vehículo modificado" maxlength="100"><button id="design-retry" type="button" class="hidden" title="Vuelve a pedir la vista previa del diseño que se detuvo">Reintentar vista previa</button><button id="apply-pending" type="button" class="hidden" title="Guarda el cambio de torreta o de arma que estás ajustando, sin buscar su botón en cada herramienta">Aplicar cambios</button><button id="discard-pending" type="button" class="hidden" title="Quita la torreta o el arma que elegiste y no guardaste. Los cambios guardados se conservan.">Descartar cambio</button><button id="build-button" class="primary" disabled>Construir vehículo <span>↗</span></button><small id="build-hint" role="status">Elegí un chasis y una torreta.</small></div>
+  </aside>
+</main>
+<div id="completion-notice" class="completion-notice hidden" role="status" aria-live="polite"></div>
+<footer class="statusbar"><span id="status-message" role="status" aria-live="polite">Taller listo</span><button id="cancel-check" type="button" class="hidden">Cancelar revisión</button><span id="stats-message">Todo se procesa en esta PC</span></footer>
+<dialog id="settings-dialog"><div class="dialog-heading"><div><span class="eyebrow">FUENTES DE RECURSOS</span><h2>Juego y mods activos</h2></div><button data-close="settings-dialog" class="icon-button">×</button></div><p>Seleccioná los mods usados por la campaña. Los últimos de la lista tienen prioridad.</p><label for="game-path">Carpeta de Gates of Hell</label><div class="path-row"><input id="game-path"><button id="browse-game">Buscar</button></div><fieldset id="appearance-settings"><legend>Apariencia y accesibilidad</legend><div class="preference-grid"><label for="theme-select">Tema de colores<select id="theme-select"></select></label><label for="text-size">Tamaño del texto<select id="text-size"><option value="normal">Normal</option><option value="large">Grande</option></select></label></div><label class="sound-setting"><input id="reduce-motion" type="checkbox"> Reducir animaciones</label><label class="sound-setting"><input id="show-help" type="checkbox" checked> Mostrar ayudas al pasar el mouse o enfocar un control</label><small>Los cambios de apariencia se guardan automáticamente en este dispositivo. No cambian el vehículo.</small><button id="appearance-reset" type="button">Restablecer apariencia</button></fieldset><div id="mod-list" class="mod-list"></div><label class="sound-setting"><input id="completion-sound" type="checkbox" checked> Aviso sonoro al terminar de construir o cargar un vehículo</label><div class="dialog-footer"><button data-close="settings-dialog">Cancelar</button><button id="apply-settings" class="primary">Leer recursos</button></div></dialog>
+<dialog id="result-dialog"><div class="dialog-heading"><div><span class="eyebrow">CONFIRMAR</span><h2>Construir vehículo</h2></div><button data-close="result-dialog" class="icon-button">×</button></div><div id="result-content"></div><label class="toggle" title="Se vende en la tienda de su ejército en todas las campañas que usan el mod del taller"><input type="checkbox" id="build-shop"> Vender también en la tienda de la Conquista</label><small>Precio: 75 % de lo que cuestan sus partes. Aparece al llegar a la etapa de investigación más alta entre ellas.</small><div class="dialog-footer"><button data-close="result-dialog">Cancelar</button><button id="install-button" class="primary">Construir</button></div></dialog>
+<dialog id="delete-dialog"><div class="dialog-heading"><h2>Quitar de la campaña</h2><button data-close="delete-dialog" class="icon-button" aria-label="Cerrar">×</button></div><p><strong id="delete-name"></strong></p><p>El vehículo y toda su tripulación saldrán de la campaña y quedarán en el Almacén del editor.</p><p>Se conservan sus niveles, estadísticas, inventarios y modificaciones. Podés incorporarlos a esta u otra campaña, incluso de otra nación.</p><div class="dialog-footer"><button data-close="delete-dialog">Cancelar</button><button id="delete-confirm" class="primary">Guardar en el Almacén</button></div></dialog>
+<dialog id="storage-dialog"><div class="dialog-heading"><h2>Almacén</h2><button data-close="storage-dialog" class="icon-button" aria-label="Cerrar">×</button></div><p><strong id="storage-name"></strong></p><p><span>Campaña de origen:</span> <strong id="storage-origin"></strong></p><p><span>Campaña de destino:</span> <strong id="storage-destination"></strong></p><p><span>Tripulantes guardados:</span> <strong id="storage-crew-count"></strong></p><p>Se conservan el estado del vehículo, sus modificaciones y todos los inventarios, niveles y estadísticas de su tripulación.</p><p>Devolverlo lo coloca en la reserva de esta campaña, con sus recursos tal como estaban al guardarlo.</p><p id="storage-pending" class="hidden">Se interrumpió un traslado. Recuperalo para volver al estado anterior sin duplicar el vehículo.</p><p id="storage-other-campaign" class="hidden"><span>Para recuperar el traslado, abrí esta partida:</span> <strong id="storage-recovery-campaign"></strong></p><div class="dialog-footer"><button data-close="storage-dialog">Cerrar</button><button id="storage-restore" class="primary">Devolver a la campaña</button><button id="storage-recover" class="primary hidden">Recuperar traslado</button></div></dialog>
+<dialog id="error-dialog"><div class="dialog-heading"><h2 id="error-title">No se pudo completar</h2><button data-close="error-dialog" class="icon-button">×</button></div><p id="error-message"></p><div class="dialog-footer"><button id="error-diagnostic">Copiar diagnóstico</button><button data-close="error-dialog" class="primary">Entendido</button></div></dialog>
+<dialog id="shop-dialog"><div class="dialog-heading"><h2>Tienda de la Conquista</h2><button data-close="shop-dialog" class="icon-button" aria-label="Cerrar">×</button></div><p>Los vehículos marcados se venden en la tienda de su ejército, en todas las campañas que usan el mod del taller. Precio: 75 % de lo que cuestan sus partes. Aparecen al llegar a la etapa de investigación más alta entre ellas. Tu partida no cambia.</p><div id="shop-list" class="shop-list"></div><p id="shop-status" role="status"></p><div class="dialog-footer"><button data-close="shop-dialog">Cancelar</button><button id="shop-apply" class="primary">Aplicar</button></div></dialog><dialog id="diagnostic-dialog"><div class="dialog-heading"><h2>Diagnóstico para soporte</h2><button data-close="diagnostic-dialog" class="icon-button">×</button></div><label for="diagnostic-text">Diagnóstico</label><textarea id="diagnostic-text" readonly spellcheck="false" lang="en"></textarea><p id="diagnostic-status" role="status"></p><div class="dialog-footer"><button id="diagnostic-save" title="Guarda un .zip con todo lo necesario para encontrar un error: este informe, el log del juego y sus cierres, tu partida y cómo se armó cada vehículo. Listo para subir a Discord">Generar .zip de diagnóstico</button><button id="diagnostic-copy" class="primary">Copiar todo</button></div></dialog>
+<dialog id="help-dialog"><div class="dialog-heading"><h2>Ayuda y atajos</h2><button data-close="help-dialog" class="icon-button" aria-label="Cerrar">×</button></div><div class="help-content"><p>Buscar unidades: Ctrl+F. Recorrer tarjetas: flechas. Elegir: Enter o Espacio.</p><p>Deshacer: Ctrl+Z. Rehacer: Ctrl+Y o Ctrl+Mayús+Z. En un campo de texto, estos atajos editan ese texto.</p><p>Vista 3D: arrastrar para orbitar, rueda para acercar y botón derecho para desplazar. Los campos XYZ permiten ajustar sin arrastrar.</p><p>Abrí una herramienta desde Chasis o Torreta. Volver al menú conserva el diseño; Construir vehículo lo guarda en la campaña.</p><p>El catálogo es solo de consulta. Construir consume las unidades indicadas; Editar modifica una sola. Revisá siempre la confirmación.</p><p>La partida se respalda antes de guardar. Si el juego está abierto, seguí las instrucciones para recargar el mod desde Extras.</p><p>El diagnóstico se copia como texto en inglés. No se envía nada automáticamente.</p><p>El taller instala un único mod local compartido por tus campañas en mods/modular_workshop. No se crea otro al empezar una partida. Conservalo mientras uses sus vehículos.</p><p>Los recursos del juego y de los mods conservan sus nombres originales.</p></div><div class="dialog-footer"><button data-close="help-dialog" class="primary">Entendido</button></div></dialog>
+<script type="module" src="/assets/app.js"></script>
+</body></html>

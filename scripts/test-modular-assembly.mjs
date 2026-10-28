@@ -1,0 +1,58 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import {latestTask} from '../frontend/latest-task.js';
+globalThis.localStorage={getItem:()=> 'es'};
+globalThis.Option=class{constructor(text,value){this.text=text;this.value=value;}};
+const {vehicleDesign}=await import('../frontend/vehicle-design.js');
+const nodes=new Map(),$=id=>{if(!nodes.has(id))nodes.set(id,{value:'',classList:{toggle(){}},replaceChildren(...o){this.options=o;if(!o.some(x=>x.value===this.value))this.value=o[0]?.value||'';}});return nodes.get(id);};
+const hull={eid:'1',template:'receiver'},donor={eid:'2',template:'artillery'};
+const state={busy:false,hull,campaign:{units:[hull,donor]},transform:{hull:{},turret:{}}};
+let allow=true,fail=false;const requests=[];
+const design=vehicleDesign({state,$,confirm:()=>allow,job:async(path,body)=>{
+  if(path==='/api/preview')return {anchor_name:'turret',mounts:['turret','aux','@free'],bones:[{name:'body',parent:null},{name:'turret',parent:'body'},{name:'aux',parent:'body'}]};
+  requests.push(structuredClone(body));if(fail)throw Error('Protected chassis');
+  return {hull:{},turret:{anchor_name:body.pending?.assembly_scope==='complete'?'basis':'turret'}};
+},displayPart(){},updateSelection(){},remember(){},reportError(e){throw e;}});
+$('operation-select').value='turret';await design.switchMode('turret');
+state.transform.assembly_draft.guns=[{donor_template:'existing'}];
+allow=false;await $('turret-retire').onclick();assert.equal(design.draft().removals,undefined);
+allow=true;await $('turret-retire').onclick();assert.deepEqual(design.draft().removals,[{mount:'turret'}]);assert.deepEqual(design.draft().guns,[{donor_template:'existing'}]);
+assert.equal(state.hull.eid,'1');assert.ok(state.turret.designPlaceholder);
+assert.equal(requests.at(-1).transform.assembly_draft.turrets.length,0,'removal needs no donor');
+design.controls();$('turret-removed').value='turret';await $('turret-undo-removal').onclick();assert.deepEqual(design.draft().removals,[]);
+const before=structuredClone(state.transform);fail=true;await assert.rejects($('turret-retire').onclick(),/Protected/);assert.deepEqual(state.transform,before,'rejected cut restores the design');fail=false;
+await design.select(donor,'turret');$('assembly-scope').value='complete';await $('assembly-scope').onchange();
+assert.equal(requests.at(-1).pending.assembly_scope,'complete');await design.saveTurret();
+assert.equal(design.turrets()[0].assembly_scope,'complete');assert.equal(design.turrets()[0].donor_mount,'basis');
+await design.editTurret('turret');$('assembly-scope').value='module';await $('assembly-scope').onchange();assert.equal(state.pendingTurret.assembly_scope,undefined);
+await design.saveTurret();assert.equal(design.turrets()[0].donor_mount,'turret');
+state.designTarget='@free';design.controls();assert.equal($('turret-retire').disabled,true);
+console.log('Module removal: no donor, confirmation, undo, protected-cut rollback and complete scope persistence passed.');
+const app=fs.readFileSync('frontend/app.js','utf8');
+const anchorCode=app.slice(app.indexOf('const freeAnchorTask='),app.indexOf('function moduleBase()'));
+const anchorState={hull, turret:donor, mounts:{hull:'@free',turret:'basis'},previews:{hull:{free_anchor:[1,2,30]}}};
+let applied=0;
+const refreshAnchor=new Function('latestTask','quickJob','state','hullIsFree','applyTransforms','status','draftEditor',anchorCode+'return refreshFreeAnchor;')(
+  latestTask,()=>{throw Error('Original vehicle must not decide the deck height');},anchorState,()=>true,()=>applied++,()=>{},{active:()=>true});
+await refreshAnchor();assert.deepEqual(anchorState.freeAnchor,[1,2,30]);assert.equal(applied,1);
+console.log('Removed-design deck anchor reaches the viewer without querying the original turret roof.');
+
+const nativeState={busy:false,hull,campaign:{units:[hull]},transform:{hull:{},turret:{}}};
+const nativeRequests=[];
+const native=vehicleDesign({state:nativeState,$,confirm:()=>true,job:async(path,body)=>{
+  if(path==='/api/preview')return {anchor_name:'turret',mounts:['turret','aux_turret1','@free'],bones:[{name:'body',parent:null},{name:'turret',parent:'body'},{name:'aux_turret1',parent:'body'}]};
+  nativeRequests.push(structuredClone(body));return {hull:{},turret:{anchor_name:body.pending?.recipient_mount||''}};
+},displayPart(){},updateSelection(){},remember(){},reportError(e){throw e;}});
+await native.switchMode('turret');await native.loadChassis();native.controls();
+assert.deepEqual($('design-turret-pos').options.map(o=>o.value).filter(Boolean),['@hull','turret','aux_turret1'],'unmodified native turrets are selectable');
+assert.equal($('design-turret-pos').value,'','with nothing loaded the list asks which part to adjust');
+$('design-turret-pos').value='aux_turret1';await $('design-turret-pos').onchange();
+assert.equal(nativeState.pendingTurret.kind,'native');nativeState.transform.turret.position=[2,3,4];
+assert.deepEqual(native.transform().assembly_draft.turrets[0].pose.position,[2,3,4]);
+assert.equal(native.transform().assembly_draft.turrets[0].donor_eid,undefined);
+$('design-turret-limits').value='turret';await $('design-turret-limits').onchange();
+assert.equal(nativeState.pendingTurret.recipient_mount,'turret');
+assert.deepEqual(native.draft().turrets[0].pose.position,[2,3,4],'switching modules preserves the prior adjustment');
+$('design-turret-pos').value='@hull';await $('design-turret-pos').onchange();
+assert.equal(nativeState.inspectorFocusPart,'hull');assert.equal(nativeState.pendingTurret,undefined);
+console.log('Native module focus: all turrets, independent pose/limits, no donor and chassis selection passed.');

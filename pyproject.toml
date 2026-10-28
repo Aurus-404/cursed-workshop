@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=70"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "goh-modular-workshop"
+version = "0.8.9"
+description = "Offline campaign and vehicle assembly workshop for Gates of Hell"
+requires-python = ">=3.12"
+
+[project.scripts]
+modular-workshop = "workshop.app:main"
+
+[tool.setuptools]
+packages = ["workshop"]
+
+[tool.setuptools.package-data]
+workshop = ["web/**/*"]

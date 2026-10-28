@@ -1,0 +1,13 @@
+import assert from 'node:assert/strict';
+import {toolProgress} from '../frontend/tool-progress.js';
+let clock=0,tick;const frames=[],stopped=[];
+const progress=toolProgress({render:f=>frames.push(f),now:()=>clock,schedule:fn=>(tick=fn,42),unschedule:id=>stopped.push(id)});
+progress.start('save');assert.equal(frames.at(-1).active,true);
+clock=5600;tick();assert.equal(frames.at(-1).elapsedMs,5600);assert.equal(frames.at(-1).progress,null);
+progress.stage('preview');assert.equal(frames.at(-1).label,'preview');assert.equal(frames.at(-1).elapsedMs,5600);
+progress.observe({progress:{completed:2,total:7}});assert.equal(frames.at(-1).progress.completed,2);
+progress.stage('recovery');assert.equal(frames.at(-1).progress,null,'unknown work never displays a made-up percentage');
+progress.finish();assert.equal(frames.at(-1).active,false);assert.deepEqual(stopped,[42]);
+clock=8000;progress.start('second');assert.equal(frames.at(-1).elapsedMs,0);progress.finish();
+assert.deepEqual(stopped,[42,42]);
+console.log('Inspector progress: immediate visibility, elapsed clock, stages, measured/unknown work, cleanup and restart passed.');
