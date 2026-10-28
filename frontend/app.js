@@ -56,7 +56,7 @@ const supportDiagnostic=diagnosticUI({state,api,$,selection:()=>({...state,crewS
 function reportError(error){if(error?.name==='AbortError'){status('Operación cancelada.');return;}supportDiagnostic.record(error);$('error-title').textContent='No se pudo completar';$('error-message').textContent=error.message||String(error);$('error-dialog').showModal();status(error.message||String(error));}
 function displayText(id,message){const node=$(id),text=t(message);if(node.textContent!==text)node.textContent=text;}
 function status(message){displayText('status-message',message);}
-function setBusy(busy,label='Cargando…'){state.busy=busy;$('busy-overlay').classList.toggle('hidden',!busy);$('busy-label').textContent=label;updateBuild();gunEditor?.controls();for(const id of ['load-save','apply-settings','install-button','repair-button','portraits-button','lang-select','operation-select','pick-delete'])$(id).disabled=busy;inspector?.render();}
+function setBusy(busy,label='Cargando…'){state.busy=busy;$('busy-overlay').classList.toggle('hidden',!busy);$('busy-overlay').classList.remove('passive');$('busy-label').textContent=label;updateBuild();gunEditor?.controls();for(const id of ['load-save','apply-settings','install-button','repair-button','portraits-button','lang-select','operation-select','pick-delete'])$(id).disabled=busy;inspector?.render();}
 const sound=completionSound({storage:uiStorage});
 $('completion-sound').checked=sound.enabled;
 $('completion-sound').onchange=()=>{sound.setEnabled($('completion-sound').checked);sound.arm();saveUISettings({sound:sound.enabled}).catch(reportError);};
@@ -81,7 +81,8 @@ const progress=operationProgress({busy:setBusy,notify:completionNotice,render:({
 const toolActivity=toolProgress({render:({active,label,elapsedMs,progress:measured})=>{
   $('inspector-progress').classList.add('hidden');
   if(state.busy)return;
-  $('busy-overlay').classList.toggle('hidden',!active);if(!active)return;
+  // Background work (previews, catalogs) never blocks the view: the same bar, passive.
+  $('busy-overlay').classList.toggle('hidden',!active);$('busy-overlay').classList.add('passive');if(!active)return;
   $('cancel-operation').classList.toggle('hidden',!state.toolCancellable);
   if($('busy-label').textContent!==t(label))displayText('busy-label',label);
   displayText('busy-elapsed','Tiempo transcurrido: '+elapsedTime(elapsedMs));

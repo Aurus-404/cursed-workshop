@@ -86,8 +86,12 @@ def code_identity():
 
 
 def stack_key(view):
+    # The tool's own built vehicles are not catalog material (readers skip
+    # them) and change with every build: keying on them read the whole game
+    # again after each build, minutes during which previews waited.
+    from .registration import is_own_mod
     sources = [[s.get('id'), s.get('version'), s.get('fingerprint'), os.path.normcase(str(s.get('root', '')))]
-               for s in view.sources]
+               for s in view.sources if not is_own_mod(str(s.get('id') or ''))]
     availability = view.dlc_availability().key() if hasattr(view, 'dlc_availability') else None
     return hashlib.sha256(json.dumps([SCHEMA, __version__, code_identity(), sources, availability]).encode()).hexdigest()
 

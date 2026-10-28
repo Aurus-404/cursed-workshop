@@ -2497,6 +2497,14 @@ def run_window(server,url) -> bool:
     if not getattr(sys,'frozen',False):
         deps=app_directory()/'.build-deps'
         if deps.is_dir() and str(deps) not in sys.path: sys.path.append(str(deps))
+    elif os.name=='nt':
+        # A download (GitHub, Nexus) extracted with Explorer marks every file as
+        # coming from the internet; .NET then refuses Python.NET's and WebView2's
+        # assemblies and the window falls back to the browser. Clear the mark
+        # from the program's own libraries, as Unblock-File does.
+        for library in app_directory().rglob('*.dll'):
+            try:os.remove(str(library)+':Zone.Identifier')
+            except OSError:pass
     try:
         import webview
         if os.name=='nt':

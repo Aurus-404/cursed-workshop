@@ -4,7 +4,7 @@ globalThis.localStorage={getItem:()=> 'es'};
 globalThis.Option=class{constructor(text,value){this.text=text;this.value=value;}};
 const {vehicleDesign}=await import('../frontend/vehicle-design.js');
 const {gunEditor}=await import('../frontend/gun-editor.js');
-const nodes=new Map(),$=id=>{if(!nodes.has(id))nodes.set(id,{value:'',classList:{toggle(){}},replaceChildren(...o){this.options=o;},add(o){(this.options??=[]).push(o);}});return nodes.get(id);};
+const nodes=new Map(),$=id=>{if(!nodes.has(id))nodes.set(id,{value:'',classList:{toggle(){},add(){},remove(){}},replaceChildren(...o){this.options=o;},add(o){(this.options??=[]).push(o);}});return nodes.get(id);};
 const base={eid:'1',template:'actual_vehicle'},a={eid:'2',template:'cannon_donor'},b={eid:'3',template:'mg_donor'};
 const state={busy:false,tab:'campaign',campaign:{units:[base,a,b]},hull:{...base,template:'old_recipe_hull'},turret:{...base,template:'old_recipe_module'},editing:{eid:'1'},
   transform:{hull:{position:[0,0,0],rotation:[0,0,0]},turret:{position:[0,0,0],rotation:[0,0,0]},extra_armor:[{asset:'kept'}]}};
