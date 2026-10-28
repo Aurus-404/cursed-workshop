@@ -37,12 +37,6 @@ campaign save you choose.
 Get the latest version from the **[Releases page](https://github.com/Aurus-404/cursed-workshop/releases/latest)**:
 download `CursedWorkshop-<version>-win64.zip`.
 
-Each release lists the SHA-256 of the `.zip` (also in `SHA256SUMS.txt`). To check your download in PowerShell:
-
-```powershell
-Get-FileHash .\CursedWorkshop-<version>-win64.zip -Algorithm SHA256
-```
-
 ## Requirements
 
 - Windows 10 or 11, 64-bit.
@@ -88,9 +82,8 @@ These points describe the current source code; check them yourself in this repos
 - No DLL injection, game-executable patching or game-memory modification was found in the reviewed application
   code. Diagnostic reports are generated locally and shared only by your choice.
 
-The executable is built with PyInstaller. Its SHA-256 identifies the published download; it is not a security
-certification. You can inspect and build the source yourself (see below).
-[Review scope and distribution notices](docs/DISTRIBUTION.md).
+You can inspect and build the source yourself (see below).
+[Program behavior and third-party notices](docs/DISTRIBUTION.md).
 
 ## Reporting bugs
 

@@ -165,12 +165,9 @@ def prepare():
     (output / 'release-manifest.json').write_text(json.dumps(manifest, indent=2), encoding='utf8')
     checksum = audit.digest(archive)
     (output / 'SHA256SUMS.txt').write_text(f'{checksum}  {archive.name}\n', encoding='utf8')
-    (output / 'release-notes.md').write_text(notes.read_text(encoding='utf8') +
-        f'\n## Package verification\n\n- Python: {manifest["python_tests"]} tests passed, {python_skipped} skipped.\n'
-        f'- Frontend: {len(js)} test scripts passed.\n'
-        '- ZIP CRC, extracted file hashes, content audit and extracted-program synthetic API checks: PASS.\n'
-        '- Manual in-game battle acceptance of this package: NOT TESTED.\n'
-        f'- Source commit: `{revision}`.\n- ZIP SHA-256: `{checksum}`.\n', encoding='utf8')
+    # Test evidence, file inventory and hashes stay in local verification outputs.
+    # Public release notes are written for players.
+    (output / 'release-notes.md').write_text(notes.read_text(encoding='utf8'), encoding='utf8')
     print(json.dumps({'zip': str(archive), 'sha256': checksum,
                       'python_tests': manifest['python_tests'], 'frontend_test_scripts': len(js)}, indent=2))
 

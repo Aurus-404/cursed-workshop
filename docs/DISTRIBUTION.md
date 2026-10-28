@@ -15,19 +15,6 @@ Diagnostics are generated locally; users decide whether and where to share them.
 does not implement an automatic report upload or application updater. These are bounded source-review
 findings, not a security certification or a promise about all operating-system/runtime behavior.
 
-## Public source scope
-
-`scripts/prepare_github_source.py` lists the public files explicitly: the complete application and frontend,
-compiled frontend, build dependencies, build/release tools, compatibility tools, synthetic tests and public
-documentation. Internal handoffs, player attachments/reports, real saves, extracted game/mod files, reverse
-engineering experiments, local diagnostics, personal lab scripts and the private Git history are excluded.
-The existing game screenshot used as the Steam thumbnail is also excluded from the GitHub source/package.
-The application icon is drawn by the build script.
-
-The public source scanner rejects known credential formats, private keys and contact candidates for review.
-The package scanner rejects game assets, saves, settings, debug maps, development folders and unexpected
-archives. Scans supplement manual review; they cannot prove the absence of every possible secret or defect.
-
 ## Licenses
 
 No open-source license has been selected for Cursed Workshop. Publishing its source for inspection does not
