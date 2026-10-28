@@ -308,3 +308,6 @@ button:not(.icon-button):not(.text-button):disabled{background:transparent;borde
 @media(max-width:540px){.shop-row{grid-template-columns:auto 64px minmax(0,1fr)}.shop-row small{grid-column:3;text-align:left}}
 /* Creative mode bar of the catalog: switch, then nation and type filters side by side. */
 .creative-bar{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin:0 10px 8px}.creative-bar .toggle{grid-column:1/-1}.creative-bar select{min-width:0}
+
+/* Background work: the same central bar as a strip under the model; the 3D view stays usable. */
+.busy-overlay.passive{top:auto;bottom:40px;left:50%;right:auto;transform:translateX(-50%);flex-direction:row;flex-wrap:wrap;gap:6px 12px;padding:8px 14px;width:max-content;max-width:92%;white-space:nowrap;background:var(--panel);border:1px solid var(--line);border-radius:6px;backdrop-filter:none;pointer-events:none}.busy-overlay.passive .spinner{height:14px;width:14px}.busy-overlay.passive progress{width:140px}.busy-overlay.passive #busy-detail{display:none}.busy-overlay.passive button{pointer-events:auto}

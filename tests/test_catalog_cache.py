@@ -37,6 +37,17 @@ class CatalogCacheTests(unittest.TestCase):
         self.assertEqual(catalog_cache.load(View('a'), 'test', self.folder), [{'id': 'plate', 'thickness': [10.0]}])
         self.assertEqual(self.calls, ['a'])
 
+    def test_building_a_vehicle_does_not_read_the_game_again(self):
+        # TheOppsAreOntoMe: each build changed the workshop mod's fingerprint, every
+        # whole-game catalog was read again for minutes and previews waited for it.
+        def view(addon):
+            v = View('a')
+            v.sources.append({'id': 'modular_workshop', 'version': '0', 'fingerprint': addon, 'root': 'mods/modular_workshop'})
+            return v
+        catalog_cache.load(view('build 1'), 'test', self.folder)
+        catalog_cache.load(view('build 2'), 'test', self.folder)
+        self.assertEqual(self.calls, ['a'])
+
     def test_a_changed_mod_or_a_damaged_file_reads_the_game_again(self):
         catalog_cache.load(View('a'), 'test', self.folder)
         catalog_cache.load(View('b'), 'test', self.folder)

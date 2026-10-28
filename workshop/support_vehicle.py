@@ -46,6 +46,8 @@ def catalog(resources):
     for path in sorted(resources.entries):
         if not path.startswith('entity/') or not path.endswith('.def') or re.search(r'/(?:x|xx)/|_(?:x|xx)\.def$', path):
             continue
+        if '/workshop/' in path:
+            continue  # built vehicles only copy native cargo (as the armour catalog skips them)
         if path.startswith('entity/-vehicle/') and call_pattern:
             text = resources.read_text(path)
             if call_pattern.search(text):
