@@ -26,7 +26,9 @@ export function weaponJointEditor({state,groups,$,remember,refreshCheck,active=(
     if(!list.some(j=>j.bone===selected[part]))selected[part]=list[0]?.bone||'';
     $('joint-select').replaceChildren(...list.map(j=>new Option(`${j.bone} · ${[...new Set(j.weapons)].join(', ')}`,j.bone)));
     $('joint-select').value=selected[part];
-    const joint=current();if(joint){const values=limits(part,joint);$('joint-min').value=values[0];$('joint-max').value=values[1];}
+    const joint=current();if(joint){const values=limits(part,joint);$('joint-min').value=values[0];$('joint-max').value=values[1];
+      // Traverse speed: the saved one, else the vehicle's own ("turret_heavy": 4 + power/3).
+      const speed=values[2]??joint.speed;$('joint-speed').value=speed!=null?String(Math.round(speed*10)/10):'';$('joint-speed').placeholder=t('nativa');}
     sync();
   }
   $('joint-select').onchange=()=>{selected[state.edit]=$('joint-select').value;refresh();};
@@ -36,11 +38,15 @@ export function weaponJointEditor({state,groups,$,remember,refreshCheck,active=(
     if(values.some(v=>!Number.isFinite(v)||v < -180||v >180)||values[0]>values[1]){
       $('joint-message').textContent=t('Usá límites entre -180 y 180 grados, con el mínimo primero.');refresh();return;
     }
+    const raw=String($('joint-speed').value??'').trim();
+    if(raw!==''){const speed=Number(raw);
+      if(!(speed>0&&speed<=3600)){$('joint-message').textContent=t('La velocidad de giro tiene que ser mayor que 0 grados por segundo.');refresh();return;}
+      if(joint.speed==null||Math.abs(speed-joint.speed)>.05)values.push(speed);}
     $('joint-message').textContent='';remember();
     state.transform.joint_limits={...state.transform.joint_limits,[state.edit]:{...state.transform.joint_limits?.[state.edit],[joint.bone]:values}};
     sync();refreshCheck();
   };
-  $('joint-min').onchange=change;$('joint-max').onchange=change;
+  $('joint-min').onchange=change;$('joint-max').onchange=change;$('joint-speed').onchange=change;
   $('joint-reset').onclick=()=>{
     const joint=current();if(!joint)return;remember();
     const spec=structuredClone(state.transform.joint_limits||{});delete spec[state.edit]?.[joint.bone];state.transform.joint_limits=spec;

@@ -3158,8 +3158,11 @@ def compile_assembly(resources, recipient_template, donor_template, transform, o
         _restore_independent_mount_capabilities(recipient_root, final_model)
     allowed_ids = _allowed_damage_ids(resources,recipient_root,final_model,(armor,))
     recipient_source = _load_entity(resources, recipient_template)[2]
-    orphan_slots = _drop_orphan_slots(recipient_root, {p.args[0] for w in recipient_source.find_all("Weaponry")
-                                                       for p in w.find_all("place") if p.args}, diagnostics)
+    # A slot may come from either part: the StuG III G's roof MG slot came with
+    # its casemate while its "mgun" place stayed behind (Kenway: crash spawning).
+    orphan_slots = _drop_orphan_slots(recipient_root, {p.args[0] for source in (recipient_source, _load_entity(resources, donor_template)[2])
+                                                       for w in source.find_all("Weaponry") for p in w.find_all("place") if p.args},
+                                      diagnostics)
     # Seats of either vehicle on bones that did not make it into the new one.
     _rebase_lost_seats(resources, recipient_root,
                        set(parse_model(resources.read(recipient["model_path"]))["bones"]) | set(donor_model["bones"]),

@@ -50,7 +50,10 @@ def weapon_catalog(index, *, item=None):
             continue
         name = posixpath.basename(key)
         if '.' not in name or name.endswith('.pattern'):
-            documents[key] = parse(base.read(key))
+            try:
+                documents[key] = parse(base.read(key))
+            except (ValueError, KeyError, OSError):
+                continue  # a mod's unreadable item is not offered; the rest still are
             if name.endswith('.pattern'):
                 patterns[name[:-8]].append(key)
             else:
@@ -117,12 +120,18 @@ def weapon_catalog(index, *, item=None):
             continue
         filling = values.get('filling') or []
         family = (filling[0].removeprefix('ammo ').split() if filling else [])
-        ammunition = []
+        ammunition, broader = [], []
         for ammo_path in base.entries:
             if not ammo_path.startswith('set/stuff/') or not ammo_path.endswith('.ammo'):
                 continue
             tokens = posixpath.basename(ammo_path)[:-5].split('.')
-            if tokens[:len(family)] != family or not family:
+            if not family:
+                continue
+            if tokens[:len(family)] != family:
+                # MACE's Type 92 HMG fills "type_92_hmg_magazine clip" from
+                # type_92_hmg_magazine.ammo: a file naming the family's start.
+                if family[:len(tokens)] == tokens and index.read(ammo_path) == base.read(ammo_path):
+                    broader.append((-len(tokens), tokens, ammo_path))
                 continue
             if index.read(ammo_path) != base.read(ammo_path):
                 continue
@@ -132,6 +141,9 @@ def weapon_catalog(index, *, item=None):
                 continue
             ammunition.append((len(tokens), tokens, ammo_path))
         ammunition.sort()
+        if not ammunition and broader:
+            broader.sort()  # the most specific file first
+            ammunition = [broader[0]]
         ammo_item = 'ammo ' + ' '.join(ammunition[0][1]) if ammunition else None
         if not ammo_item:
             continue

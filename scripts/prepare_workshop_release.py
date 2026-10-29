@@ -124,7 +124,7 @@ def collect_notices(item, root=ROOT, python_root=None):
 
 
 # Public work-in-progress release, authorized by the author on 19/10/2026.
-VERSION = "0.8.10"
+VERSION = "0.9.10"
 VISIBILITY = "0"  # Steam: 0 public, 1 friends only, 2 private
 # The published item (19/10/2026): every new release updates it, so subscribers
 # get the new version. Pass --publishedfileid 0 only to create a separate item.

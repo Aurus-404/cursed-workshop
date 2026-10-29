@@ -266,8 +266,12 @@ def preview_parts(resources, recipient, donor, spec, *, recipient_frame=None):
 
 
 def _ammo_key(name):
+    # "family type" -> family ("bulletger_75 he"); the "ammo " container prefix
+    # is not part of it: "ammo flame_thrower" is a whole family with no type.
     tokens=name.split()
-    return ' '.join(tokens[:-1]) if len(tokens)>1 else name
+    prefix=tokens[:1] if tokens[:1]==['ammo'] else []
+    rest=tokens[len(prefix):]
+    return ' '.join(prefix+(rest[:-1] if len(rest)>1 else rest))
 
 
 def _same_ammo(first,second):
@@ -353,9 +357,26 @@ def merge_animations(recipient, donor):
     return result
 
 
+def _stuff_presets(resources, path):
+    """Macros a weapon file sees: the .presets of its folder and of every folder
+    above it under set/stuff (the Crocodile's flamer fills its tank with
+    ("filling_tank" fuel(20)) from set/stuff/flame/.presets)."""
+    defines={};folder=posixpath.dirname(path)
+    chain=[]
+    while folder and folder.casefold().startswith('set/stuff'):
+        chain.append(folder);folder=posixpath.dirname(folder)
+    for folder in reversed(chain):  # nearer folders override
+        preset=folder+'/.presets'
+        try:document=parse(resources.read(preset))
+        except (KeyError,OSError,ValueError):continue
+        defines.update({k.casefold():v for k,v in _include_defines(resources,document,preset).items()})
+        defines.update({n.args[0].casefold():n for n in document.find_all('define') if n.args})
+    return defines
+
+
 def _fillings(resources, weapon, references=None):
     """Effective stuff inheritance, used only to resolve the actual ammo family."""
-    from .registration import _stuff_definition
+    from .registration import _stuff_definition, _expand_macros
     hashes={};seen=set()
     def visit(path):
         if path in seen:raise GunError('GunAssembly: La herencia del arma contiene un ciclo.')
@@ -366,6 +387,7 @@ def _fillings(resources, weapon, references=None):
             parent=node.args[0];pattern=parent.startswith('pattern ')
             result=visit(_stuff_definition(resources,parent.removeprefix('pattern '),path,pattern))
         else:node=next((n for n in doc.children if n.opener=='{'),None)
+        if node is not None:node=_expand_macros(node,_stuff_presets(resources,path))
         filling=node.find('filling') if node else None
         if references is not None and node:
             for head in ('foresight','shooter'):
@@ -650,7 +672,10 @@ def compile_gun(resources, recipient, donor, transform, output, identifier, *, r
     weaponry_owner.items=[new_place if n is rp else n for n in weaponry_owner.items]
     old_muzzle={p for p in rs['properties'] if p.startswith('muzzle_')}
     new_muzzle={p for p in ds['properties'] if p.startswith('muzzle_')}
-    if new_muzzle and old_muzzle!=new_muzzle:
+    # Muzzle props are the vehicle's main gun effects ({on fire "gun"} at
+    # foresight1): only a new weapon in the "gun" place changes them. A 2 cm
+    # in the hull MG slot (Kenway) gave the kept 75 mm its flash and sound.
+    if new_muzzle and old_muzzle!=new_muzzle and rp.args[0].casefold()=='gun':
         rr.append(block('{props '+' '.join(quote(p) for p in sorted({'-'+p for p in old_muzzle}|new_muzzle))+'}'))
     # Only selected ammo, never donor fuel, tools, towing gear or other weapons.
     kept_ammo=_mounted_ammo(resources,rr)

@@ -773,14 +773,16 @@ def build_preview(resources, template_id, part="full", mount_name=None, seats=No
         seat = mount_seat(resources, model, path, model["anchor_name"])
     joints = []
     try:
-        from .compiler import _load_entity, _explicit_weapon_operators, _articulation_ancestors
+        from .compiler import _load_entity, _explicit_weapon_operators, _articulation_ancestors, _include_defines
         from .articulation import weapon_joints
         _, _, root = _load_entity(resources, template_id)
         _explicit_weapon_operators(resources, root)
         visible = set(model['bones']) - selected if part == 'hull' else selected if part == 'turret' else set(model['bones'])
         if part == 'turret' and carried:
             visible |= set(_articulation_ancestors(root, model, model['anchor_name']))
-        joints = weapon_joints(model, root, adjustment, visible)
+        # Traverse macros ("turret_heavy") come from the vehicle's includes.
+        defines = {k.casefold(): v for k, v in _include_defines(resources, root).items()}
+        joints = weapon_joints(model, root, adjustment, visible, defines=defines)
     except (ValueError, KeyError, OSError) as error:
         warnings.append({'code': 'joints_unavailable', 'message': str(error)})
     # Armour volumes for View > Armour: the same parts and space as the meshes.

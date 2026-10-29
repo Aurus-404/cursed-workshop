@@ -87,6 +87,13 @@ class GunAssemblyTests(unittest.TestCase):
                 preview=preview_parts(resources,'receiver','donor',{'recipient_place':'main_slot','donor_place':'main_slot'})
                 self.assertTrue(any(mesh['bone']=='elevation' for mesh in preview['hull']['meshes']))
 
+    def test_ammo_family_ignores_the_container_prefix(self):
+        # toxicman400: the Crocodile's "ammo flame_thrower" fuel is a whole family.
+        from workshop.gun_assembly import _ammo_key
+        self.assertEqual(_ammo_key('ammo flame_thrower'),'ammo flame_thrower')
+        self.assertEqual(_ammo_key('ammo mgun_ger belt mk2'),'ammo mgun_ger belt')
+        self.assertEqual(_ammo_key('bulletger_75_l43 he'),'bulletger_75_l43')
+
     def test_original_mantlet_can_be_left_out(self):
         resources=Resources()
         path='entity/receiver/receiver.mdl'

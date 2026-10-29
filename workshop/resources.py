@@ -312,13 +312,16 @@ class ResourceIndex:
             return read_availability(self)
 
     def mountable_game(self):
-        """Official weapon resources, including DLC verified in the last game run.
+        """Mountable weapon resources: the game's, including DLC verified in the
+        last game run, and those of the active mods (MACE's Japanese machine
+        guns: AGrievousGuy), never the tool's own built vehicles.
 
-        Mounts still use base_game(). Mods/loose overrides are never smuggled
-        into the official weapon catalog. A changed scan invalidates memory and
-        disk catalog identities, even if all installed PAKs stayed identical.
+        Mounts still use base_game(). Loose files outside mods are not weapons.
+        A changed scan invalidates memory and disk catalog identities, even if
+        all installed PAKs stayed identical.
         """
         from .dlc import read_availability, dlc_archive, _path
+        from .registration import is_own_mod
         with self._base_lock:
             state = read_availability(self)
             if self.__dict__.get('_mountable_state') != state:
@@ -333,14 +336,15 @@ class ResourceIndex:
                 view = ResourceIndex(self.game_root)
                 for key, effective in self.entries.items():
                     candidates = self.collisions.get(key, [effective])
-                    official = [e for e in candidates if e.source_id == 'vanilla' and e.archive_path
-                                and (not dlc_archive(e.archive_path) or _path(e.archive_path) in state.archives)]
+                    official = [e for e in candidates if (e.source_id == 'vanilla' and e.archive_path
+                                and (not dlc_archive(e.archive_path) or _path(e.archive_path) in state.archives))
+                                or (e.source_id != 'vanilla' and not is_own_mod(e.source_id))]
                     if official:
                         view.entries[key] = official[-1]
                 for entry in view.entries.values():
                     if entry.path.startswith('entity/') and entry.path.endswith('.def'):
                         view._entity_by_id.setdefault(PurePosixPath(entry.path).stem.casefold(), []).append(entry.path)
-                view.sources = self.sources[:1]
+                view.sources = [s for s in self.sources if not is_own_mod(s['id'])]
                 view._available_dlc = frozenset(state.available)
                 view.built = True
                 self._mountable_game_view = view
