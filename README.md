@@ -37,6 +37,10 @@ campaign save you choose.
 Get the latest version from the **[Releases page](https://github.com/Aurus-404/cursed-workshop/releases/latest)**:
 download `CursedWorkshop-<version>-win64.zip`.
 
+## Discord
+
+Join the **[Discord server](https://discord.gg/cksk77sU9y)** for announcements about new updates and new mods.
+
 ## Requirements
 
 - Windows 10 or 11, 64-bit.
