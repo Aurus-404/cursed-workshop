@@ -1,5 +1,11 @@
 # Cursed Workshop
 
+## 📢 [JOIN THE DISCORD SERVER](https://discord.gg/cksk77sU9y)
+
+> **New updates and new mods are announced here!** Join the **[Discord community](https://discord.gg/cksk77sU9y)** to stay up to date.
+
+---
+
 **An external vehicle workshop for _Call to Arms – Gates of Hell: Ostfront_ Dynamic Conquest.**
 
 Cursed Workshop lets you rebuild the vehicles of your Conquest campaign: swap turrets and guns between vehicles,
@@ -36,10 +42,6 @@ campaign save you choose.
 
 Get the latest version from the **[Releases page](https://github.com/Aurus-404/cursed-workshop/releases/latest)**:
 download `CursedWorkshop-<version>-win64.zip`.
-
-## Discord
-
-Join the **[Discord server](https://discord.gg/cksk77sU9y)** for announcements about new updates and new mods.
 
 ## Requirements
 
