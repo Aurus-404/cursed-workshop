@@ -40,13 +40,18 @@ class ArticulationTests(unittest.TestCase):
             apply_limits(model,root,{'turret':{'turret':[-180,180,0]}},{'turret':{'turret':'turret'}})
 
     def test_a_joint_never_turns_slower_than_the_game_accepts(self):
-        # LVT(A)-1 + 155 mm: module_basis at 0.1 deg/s closed the game loading the
-        # campaign ("Zero speed in ik-bone"); no native joint goes below 0.5.
-        model=parse_model('{skeleton {bone revolute "basis" {bone revolute "turret" {bone "gun"}}}}')
-        root=parse('{game_entity {Weaponry {place "gun" {weapon "cannon"} {LinkBone "gun"}}}}').find('game_entity')
-        apply_limits(model,root,{'turret':{'turret':[0,0,0.1]}},{'turret':{'turret':'turret'}})
-        self.assertEqual(root.find('bone').find('speed2').args,['0.5'],'a saved recipe still builds, at the slowest native speed')
-        self.assertEqual(model['bones']['turret']['node'].find('speed2').args,['0.5'])
+        # Both 0.1 and 0.5 exported to the model crashed on loading a campaign.
+        # Exercise locked and moving joints, old recipes, and valid user speeds.
+        for requested in (0.1, 0.5, 0.6, 0.999, 1, 24):
+            for angles in ([0, 0], [-45, 60]):
+                with self.subTest(speed=requested, angles=angles):
+                    model=parse_model('{skeleton {bone revolute "basis" {bone revolute "turret" {bone "gun"}}}}')
+                    root=parse('{game_entity {Weaponry {place "gun" {weapon "cannon"} {LinkBone "gun"}}}}').find('game_entity')
+                    apply_limits(model,root,{'turret':{'turret':[*angles,requested]}},{'turret':{'turret':'turret'}})
+                    expected=max(1, requested)
+                    self.assertEqual(float(root.find('bone').find('speed2').args[0]),expected)
+                    self.assertEqual(float(model['bones']['turret']['node'].find('speed2').args[0]),expected)
+                    self.assertEqual([float(x) for x in root.find('bone').find('limits').args], angles)
 
     def test_only_weapon_ancestors_with_their_actual_reflected_frames(self):
         model=parse_model('{skeleton {bone "body" {bone revolute "wheel"} {bone revolute "hatch"}'

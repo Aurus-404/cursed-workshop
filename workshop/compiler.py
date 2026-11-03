@@ -660,10 +660,31 @@ def _apply_traverse_class(resources, root, model, carriages=()):
     if kind != 'gun':
         return None
     yaw = [j for j in weapon_joints(model, root) if primary in j['weapons'] and j['bone'] not in carriages
+           and model['bones'][j['bone']]['parent'] is not None
            and abs(j['matrix'][2][2]) > 0.9]  # a yaw joint turns about the vertical
     if not yaw:
         return None
     turret = any(abs(j['limits'][1] - j['limits'][0]) >= 180 for j in yaw)
+    if not turret:
+        # Native casemates carry the aiming chain through a locked revolute
+        # chassis root. A plain tank root stops IK at the end of the gun arc;
+        # changing only the turret prop does not ask the driver to turn.
+        anchor = yaw[0]['bone']
+        while model['bones'][anchor]['parent'] in model['bones']:
+            anchor = model['bones'][anchor]['parent']
+        chassis = model['bones'][anchor]['node']
+        if len(chassis.args) == 1:
+            name_atom = chassis.atoms[-1]
+            at = next(i for i, item in enumerate(chassis.items) if item is name_atom)
+            chassis.items[at:at] = [Atom('revolute', 'revolute'), Trivia(' ')]
+        if chassis.args[0].casefold() == 'revolute':
+            for old in chassis.find_all('limits'): chassis.remove(old)
+            chassis.append(block('{limits 0 0}'))
+            # Definition overrides are applied after the model.
+            for definition in root.find_all('bone'):
+                if bone_name(definition) == anchor:
+                    for old in definition.find_all('limits'): definition.remove(old)
+                    definition.append(block('{limits 0 0}'))
     keep, drop = ('turret', '-turret') if turret else ('-turret', 'turret')
     for props in root.find_all('props'):
         props.items = [item for item in props.items if not (isinstance(item, Atom) and item.value in (keep, drop))]
@@ -2437,6 +2458,8 @@ def _compile_vehicle_edit(resources, template, transform, output_dir, new_id):
         assets.files[new_id+'_'+tag+'.def']=doc.render().encode('utf8')
         wrecks.append({'state':tag,'module_lost':bool(contract),'native_chassis_preserved':True})
     final=parse_model(model['document'].render())
+    _apply_traverse_class(resources, root, final)
+    model = final
     _validate_carriage_crew(root)
     crew = _crew_roles(root)
     if not crew: raise CompileError('No verified crew capacity; this vehicle requires an explicit crew adapter')
@@ -3364,6 +3387,7 @@ def compile_assembly(resources, recipient_template, donor_template, transform, o
     carriages = {bone_mapping.get(name, name) for name, bone in donor_model["bones"].items()
                  if bone["parent"] is None and name in donor_names}
     traverse_class = _apply_traverse_class(resources, recipient_root, final_model, carriages)
+    recipient_model["document"] = final_model["document"]
     if traverse_class == 'casemate':
         diagnostics.append({'code': 'casemate_traverse', 'level': 'info',
                             'message': 'The main gun traverses a limited arc: the vehicle turns its hull to aim, like a native casemate.'})

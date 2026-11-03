@@ -96,7 +96,7 @@ def validate_limits(spec, groups):
                 raise ValueError('La velocidad de giro tiene que ser mayor que 0 grados por segundo.')
 
 
-MIN_JOINT_SPEED = 0.5  # degrees per second: the slowest {speed2} of any native vehicle (T18E2)
+MIN_JOINT_SPEED = 1.0  # degrees per second; 0.5 also triggers Zero speed in ik-bone on model load.
 
 
 def apply_limits(model, root, spec, groups):
@@ -117,8 +117,8 @@ def apply_limits(model, root, spec, groups):
             if speed is not None:
                 # The game closes loading a vehicle whose aiming joint turns
                 # slower than it accepts ("Zero speed in ik-bone module_basis"
-                # at 0.1); no native joint goes below MIN_JOINT_SPEED. Saved
-                # recipes keep building, at that speed.
+                # at both 0.1 and 0.5). Keep a safe 1 degree/second floor
+                # in the model and definition, including old saved recipes.
                 speed = max(speed, MIN_JOINT_SPEED)
             limits = list(limits[:2])
             if target is None or target not in model['bones'] or target not in allowed:

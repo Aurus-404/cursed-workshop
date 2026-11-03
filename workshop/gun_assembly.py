@@ -882,6 +882,9 @@ def compile_gun(resources, recipient, donor, transform, output, identifier, *, r
     if transform.get('mobility') is not None:
         from .mobility import apply as apply_mobility
         apply_mobility(rr,transform['mobility'],diagnostics)
+    from .compiler import _apply_traverse_class
+    rm = parse_model(rm['document'].render())
+    _apply_traverse_class(resources, rr, rm)
     assets.prune(rm['document'])
     if any(d.get('code')=='animation_tracks_dropped' for d in diagnostics):
         raise GunError('GunAssembly: No se pueden adaptar todas las pistas de animación necesarias.')

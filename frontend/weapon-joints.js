@@ -40,8 +40,8 @@ export function weaponJointEditor({state,groups,$,remember,refreshCheck,active=(
     }
     const raw=String($('joint-speed').value??'').trim();
     if(raw!==''){const speed=Number(raw);
-      // The game closes on an aiming joint slower than its slowest native one (0.5 °/s).
-      if(!(speed>=0.5&&speed<=3600)){$('joint-message').textContent=t('La velocidad de giro tiene que ser de al menos 0,5 grados por segundo.');refresh();return;}
+      // Keep the model-loader-safe minimum aligned with articulation.MIN_JOINT_SPEED.
+      if(!(speed>=1&&speed<=3600)){$('joint-message').textContent=t('La velocidad de giro tiene que ser de al menos 1 grado por segundo.');refresh();return;}
       if(joint.speed==null||Math.abs(speed-joint.speed)>.05)values.push(speed);}
     $('joint-message').textContent='';remember();
     state.transform.joint_limits={...state.transform.joint_limits,[state.edit]:{...state.transform.joint_limits?.[state.edit],[joint.bone]:values}};

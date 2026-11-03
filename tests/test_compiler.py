@@ -72,6 +72,9 @@ class CompilerTests(unittest.TestCase):
         root = built('qf25', [('turret', '-4.5 4.5'), ('gun_rot', '-5 15')])
         self.assertEqual(_apply_traverse_class(resources, root, model), 'casemate')
         self.assertEqual(last(root), '-turret')
+        chassis = parse_model(model['document'].render())['bones']['basis']['node']
+        self.assertEqual(chassis.args, ['revolute', 'basis'])
+        self.assertEqual(chassis.find('limits').args, ['0', '0'])
         root = built('qf25', [('gun_rot', '-5 15')])
         self.assertEqual(_apply_traverse_class(resources, root, model), 'turret')
         self.assertEqual(last(root), 'turret')
@@ -85,6 +88,24 @@ class CompilerTests(unittest.TestCase):
         root = built('mg34', [('turret', '-10 10'), ('gun_rot', '-5 15')])
         self.assertIsNone(_apply_traverse_class(resources, root, model), 'machine guns never decide the class')
         self.assertEqual(last(root), 'turret')
+
+    def test_casemate_root_preserves_pose_physics_and_other_weapon_chains(self):
+        from types import SimpleNamespace
+        from workshop.compiler import _apply_traverse_class
+        resources=SimpleNamespace(entries={'set/stuff/gun/cannon.weapon':SimpleNamespace(path='set/stuff/gun/cannon.weapon')})
+        for chassis_name in ('basis', 'frame', 'root'):
+            for native in (False, True):
+                with self.subTest(root=chassis_name, native=native):
+                    model=parse_model('{skeleton {bone '+('revolute ' if native else '')+'"'+chassis_name+'" {position 3 4 5} {parameters "wheelradius=0.43;"} {bone revolute "traverse" {limits -6 6} {bone "gun"}} {bone revolute "roof" {bone "mgun"}}}}')
+                    original=model['bones'][chassis_name]['world']
+                    root=parse('{game_entity {bone "'+chassis_name+'" {limits -90 90}} {Weaponry {place "gun" {weapon "cannon"}} {place "mgun" {weapon "mg"}{type "aa"}}}}').find('game_entity')
+                    self.assertEqual(_apply_traverse_class(resources,root,model),'casemate')
+                    final=parse_model(model['document'].render())
+                    self.assertEqual(final['bones'][chassis_name]['node'].args,['revolute',chassis_name])
+                    self.assertEqual(final['bones'][chassis_name]['world'],original)
+                    self.assertEqual(final['bones'][chassis_name]['node'].find('parameters').args,['wheelradius=0.43;'])
+                    self.assertEqual(root.find('bone').find('limits').args,['0','0'])
+                    self.assertIsNone(final['bones']['roof']['node'].find('limits'))
 
     def test_component_contracts_in_exported_sidecar_keep_saved_state(self):
         from workshop.campaign import _migrate_state, CampaignError
