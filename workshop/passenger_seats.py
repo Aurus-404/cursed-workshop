@@ -77,6 +77,8 @@ def _discover(index):
 
 
 def pose_catalog(index):
+    from .catalog_cache import catalog_source
+    index = catalog_source(index)
     if not hasattr(index, '_passenger_poses'):
         index._passenger_poses = _discover(index)
     return index._passenger_poses

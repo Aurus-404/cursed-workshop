@@ -43,6 +43,10 @@ export function jointDeltas(tree,angles){
   return deltas;
 }
 
+export function jointLocalPose(delta,parent,rest){
+  return parent.clone().invert().multiply(delta).multiply(parent).multiply(rest);
+}
+
 function sector(radius,[min,max],color){
   const full=max-min>=360,steps=full?96:Math.max(8,Math.ceil((max-min)/3.75)),points=[];
   for(let i=0;i<=steps;i++){const a=THREE.MathUtils.degToRad(min+(max-min)*i/steps);points.push(new THREE.Vector3(Math.cos(a)*radius,Math.sin(a)*radius,0));}
@@ -59,11 +63,12 @@ function sector(radius,[min,max],color){
 // Reach of a joint's parts at rest, in its own frame: the disc covers the
 // turret's footprint, the elevation slice ends at the muzzle; arcs are
 // drawn at 70 % of that so they cover less of the view.
-function reach(joint,objects){
+function reach(joint,objects,root){
   const inverse=joint.matrix.clone().invert(),p=new THREE.Vector3();let planar=0,forward=0;
   for(const object of objects){
     const positions=object.geometry?.attributes?.position;if(!positions)continue;
-    const rest=object.userData.weaponRest||object.matrix;
+    let rest=object.userData.weaponRest||object.matrix;
+    if(root&&object.parent!==root){root.updateWorldMatrix(true,false);object.parent.updateWorldMatrix(true,false);rest=root.matrixWorld.clone().invert().multiply(object.parent.matrixWorld).multiply(rest);}
     for(let i=0;i<positions.count;i+=Math.max(1,Math.floor(positions.count/4000))){
       p.fromBufferAttribute(positions,i).applyMatrix4(rest).applyMatrix4(inverse);
       planar=Math.max(planar,Math.hypot(p.x,p.y));forward=Math.max(forward,p.x);
@@ -98,6 +103,11 @@ export function weaponArcs({state,groups,camera,viewport,orbit,rigs,describe=()=
   function restore(rig){
     for(const object of rig.objects){
       if(!object.userData.weaponRest)continue;
+      if(object.userData.weaponFitting){
+        // Synced again since: its editor already set the rest it wants.
+        if(object.userData.weaponPose&&!object.matrix.equals(object.userData.weaponPose)){for(const key of ['weaponRest','weaponAuto','weaponPose','weaponFitting'])delete object.userData[key];continue;}
+        delete object.userData.weaponPose;delete object.userData.weaponFitting;
+      }
       object.matrix.copy(object.userData.weaponRest);delete object.userData.weaponRest;
       object.matrixAutoUpdate=object.userData.weaponAuto??true;delete object.userData.weaponAuto;
       object.matrix.decompose(object.position,object.quaternion,object.scale);
@@ -117,6 +127,9 @@ export function weaponArcs({state,groups,camera,viewport,orbit,rigs,describe=()=
         if(node.userData?.seat){if(!state.editSeat&&source.jointOf(node))objects.push(node);return;}
         if(node.isMesh&&node.userData?.mesh&&!inSeat(node)&&source.jointOf(node))objects.push(node);
       });
+      // Fittings fixed to a bone of this part (extra armor, smoke, passengers,
+      // towing points) live in their own groups but turn with that bone.
+      for(const node of source.extras?.()||[])if(source.jointOf(node)){node.userData.weaponFitting=true;objects.push(node);}
       for(const object of objects){
         object.updateMatrix();object.userData.weaponRest=object.matrix.clone();object.userData.weaponAuto=object.matrixAutoUpdate;object.matrixAutoUpdate=false;
       }
@@ -126,7 +139,7 @@ export function weaponArcs({state,groups,camera,viewport,orbit,rigs,describe=()=
         const own=objects.filter(object=>{let key=source.jointOf(object);while(key&&key!==joint.key)key=tree.find(j=>j.key===key)?.above;return key===joint.key;});
         if(!own.length)continue;
         const traverse=joint.kind?joint.kind==='traverse':Math.abs(new THREE.Vector3().setFromMatrixColumn(joint.matrix,2).normalize().z)>=.7;
-        const size=reach(joint,own);rows.push({joint,traverse,radius:Math.max(4,(traverse?size.planar:size.forward)*.7)});
+        const size=reach(joint,own,source.group);rows.push({joint,traverse,radius:Math.max(4,(traverse?size.planar:size.forward)*.7)});
       }
       // Gun, coaxial and machine-gun joints sit close together: a handle that
       // would land on another one at rest moves outwards along its own arc.
@@ -160,7 +173,13 @@ export function weaponArcs({state,groups,camera,viewport,orbit,rigs,describe=()=
       const current={};for(const joint of rig.tree)current[joint.key]=clampAngle(angles.get(angleKey(rig.key,joint.key))||0,joint.limits());
       const deltas=jointDeltas(rig.tree,current);
       for(const object of rig.objects){
-        const key=rig.jointOf(object);object.matrix.copy(deltas[key]||new THREE.Matrix4()).multiply(object.userData.weaponRest);
+        if(!object.parent)continue;
+        // A fitting's editor puts it back at its bone's rest whenever it syncs: that is its rest now.
+        if(object.userData.weaponFitting&&object.userData.weaponPose&&!object.matrix.equals(object.userData.weaponPose))object.userData.weaponRest=object.matrix.clone();
+        const key=rig.jointOf(object);rig.group.updateWorldMatrix(true,false);object.parent.updateWorldMatrix(true,false);
+        const parent=rig.group.matrixWorld.clone().invert().multiply(object.parent.matrixWorld);
+        object.matrix.copy(jointLocalPose(deltas[key]||new THREE.Matrix4(),parent,object.userData.weaponRest));
+        if(object.userData.weaponFitting)object.userData.weaponPose=object.matrix.clone();
         object.matrixWorldNeedsUpdate=true;
       }
       for(const joint of rig.joints){
@@ -179,11 +198,16 @@ export function weaponArcs({state,groups,camera,viewport,orbit,rigs,describe=()=
   function currentSignature(){
     if(!state.show.arcs)return 'off';
     return JSON.stringify([state.editSeat||'',state.transform.crew_seats||{},state.transform.crew_exclude||[],
-      ...rigs().map(rig=>rig&&[rig.key,rig.revision,rig.joints.map(j=>[j.key,j.limits(),j.matrix.elements.map(v=>+v.toFixed(3))])])]);
+      ...rigs().map(rig=>rig&&[rig.key,rig.revision,rig.joints.map(j=>[j.key,j.limits(),j.matrix.elements.map(v=>+v.toFixed(3))]),
+        (rig.extras?.()||[]).map(node=>node.uuid+'@'+node.userData.hostBone)])]);
   }
   function refresh(force=false){
     const next=currentSignature();
-    if(!force&&next===signature&&built.every(rig=>rig.overlay.parent===rig.group))return;
+    if(!force&&next===signature&&built.every(rig=>rig.overlay.parent===rig.group)){
+      // A fitting put back at rest by its editor turns with its weapon again.
+      if(built.some(rig=>rig.objects.some(o=>o.userData.weaponPose&&!o.matrix.equals(o.userData.weaponPose))))apply();
+      return;
+    }
     if(next==='off')angles.clear();  // turning the view off puts every weapon back
     signature=next;build();
   }

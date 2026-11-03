@@ -64,12 +64,16 @@ class ApplicationTests(unittest.TestCase):
         operation.mkdir(parents=True)
         previous=make_save(self.root/'previous.sav',SCENE)
         (operation/'result.json').write_text(json.dumps({'source_path':str(previous)}),'utf-8')
+        reports=self.state.workspace/'reports';reports.mkdir()
+        for number in range(11):(reports/f'Cursed Workshop report retained {number}.zip').write_bytes(b'original report')
         with patch('workshop.app.config_dirs',return_value=[self.root/'game-data']):
             result=self.state.error_report({'quiet':True,'diagnostic':'selected campaign'})
         with zipfile.ZipFile(result['path']) as archive:
             saves=[name for name in archive.namelist() if name.startswith('save/')]
             self.assertEqual(saves,['save/selected.sav'])
             self.assertEqual(archive.read(saves[0]),selected.read_bytes())
+        self.assertEqual(len(list(reports.glob('*.zip'))),12)
+        self.assertIn('/api/error-report?name=',result['download_url'])
         selected.unlink()
         with patch('workshop.error_report.build_report') as build:
             with self.assertRaisesRegex(ValueError,'Seleccioná primero una campaña'):
@@ -257,6 +261,20 @@ class ApplicationTests(unittest.TestCase):
         before=self.state.config_path.read_bytes()
         for bad in ([],{'game_root':'elsewhere'},{'theme':'__proto__'},{'help':1},{'size':None},{'language':'fr'},{'motion':'true'}):
             with self.subTest(bad=bad),self.assertRaises(ValueError):self.state.ui_preferences(bad)
+            self.assertEqual(self.state.config_path.read_bytes(),before)
+
+    def test_favorite_options_survive_restart_and_reject_malformed_lists(self):
+        # Ya (Discord): star useful parts so they are not lost in a long list.
+        starred={'armor-asset':['panzer4h#shieldl@body'],'cmd-item':['mg34']}
+        self.state.ui_preferences({'favorites':starred})
+        other=AppState(self.state.workspace)
+        try:self.assertEqual(other.ui_preferences()['favorites'],starred)
+        finally:other.pool.shutdown(wait=True)
+        before=self.state.config_path.read_bytes()
+        for bad in ({'favorites':[]},{'favorites':{'armor-asset':'x'}},{'favorites':{'':['x']}},
+                    {'favorites':{'armor-asset':[1]}},{'favorites':{'armor-asset':['']}},
+                    {'favorites':{str(i):[] for i in range(201)}}):
+            with self.subTest(bad=str(bad)[:60]),self.assertRaises(ValueError):self.state.ui_preferences(bad)
             self.assertEqual(self.state.config_path.read_bytes(),before)
 
     def test_failed_preferences_write_keeps_previous_settings(self):
@@ -657,13 +675,20 @@ class ApplicationTests(unittest.TestCase):
             self.assertEqual(manifest["campaign"], "c1")
             _owned_addon(addon, "modular_workshop:0")  # the published addon is ours again
             self.assertTrue((Path(result["backup"]) / "workshop_manifest_mw_a.json").is_file())
+            self.state.snapshot=None  # Shop settings apply across campaigns, without selecting one.
+            for cost in (0,79):
+                self.state.set_shop({'changes':{'mw_a':{'on':True,'cost':cost}}})
+                self.assertEqual(seen[-1][1]['cost'],cost)
+            self.state.set_shop({'changes':{'mw_a':{'on':True,'cost':None}}})
+            self.assertNotIn('cost',seen[-1][1])
             self.state.set_shop({"changes": {"mw_a": False}})
             self.assertIsNone(seen[-1][1])
             self.assertNotIn("shop", json.loads((addon / "workshop_manifest_mw_a.json").read_text(encoding="utf-8")))
         with self.assertRaises(ValueError):
             self.state.set_shop({"changes": {"mw_missing": True}})
+        with self.assertRaises(ValueError):self.state.set_shop({'changes':{'mw_a':{'on':True,'cost':-1}}})
         rows = [json.loads(line) for line in (self.state.workspace / "history" / "builds.jsonl").read_text(encoding="utf-8").splitlines()]
-        self.assertEqual([r["event"] for r in rows if r["event"] == "shop"], ["shop", "shop"])
+        self.assertEqual([r["event"] for r in rows if r["event"] == "shop"], ["shop"]*5)
 
     def test_creative_build_goes_to_the_shop_without_any_campaign(self):
         # Geofisika: any parts from the catalog, no unit spent, sold in the shop.
@@ -756,9 +781,14 @@ class ApplicationTests(unittest.TestCase):
         log_in(documents, 1000)
         log_in(appdata, 3000)  # the game writes here now
         (home / "OneDrive - Personal" / "Bilder").mkdir()
+        # Only this test's OneDrive: the machine's own OneDriveConsumer or
+        # OneDriveCommercial would add its real, newer game folder.
+        environment = {name: value for name, value in app.os.environ.items()  # Windows keys are upper case
+                       if name.casefold() not in ("onedriveconsumer", "onedrivecommercial")}
+        environment.update(OneDrive=str(home / "OneDrive - Personal"), LOCALAPPDATA=str(local))
         with patch.object(locations.Path, "home", return_value=home), \
              patch.object(locations, "documents_dir", return_value=home / "OneDrive - Personal" / "Dokumente"), \
-             patch.dict(app.os.environ, {"OneDrive": str(home / "OneDrive - Personal"), "LOCALAPPDATA": str(local)}), \
+             patch.dict(app.os.environ, environment, clear=True), \
              patch.object(locations, "running_under_wine", return_value=False):
             self.assertEqual(locations.config_dirs()[0], appdata)
             self.assertEqual({str(p) for p in locations.config_dirs()}, {str(appdata), str(documents), str(cloud)})
@@ -864,6 +894,20 @@ class ApplicationTests(unittest.TestCase):
 
 
 class LocalHTTPTests(unittest.TestCase):
+    def test_report_download_is_authenticated_and_confined_to_saved_reports(self):
+        from urllib.parse import quote
+        folder=self.state.workspace/'reports';folder.mkdir()
+        name='Cursed Workshop report 2026-10-30 12-00-00.zip'
+        raw=b'PK saved report';(folder/name).write_bytes(raw)
+        route='/api/error-report?name='+quote(name)
+        self.assertEqual(self.request('GET',route)[0],403)
+        headers={'X-Workshop-Token':self.state.token}
+        status,body,response_headers=self.request('GET',route,headers)
+        self.assertEqual((status,body),(200,raw))
+        self.assertEqual(response_headers['Content-Type'],'application/zip')
+        for invalid in ('../settings.json',name+'/../settings.json','Cursed Workshop report missing.zip'):
+            self.assertEqual(self.request('GET','/api/error-report?name='+quote(invalid),headers)[0],400)
+
     def test_report_endpoint_rejects_requests_without_an_open_campaign(self):
         headers={'X-Workshop-Token':self.state.token,'Content-Type':'application/json'}
         with patch('workshop.error_report.build_report') as build:
@@ -1028,6 +1072,14 @@ class GameFolderDetectionTests(unittest.TestCase):
                     state.index_resources()
             self.assertTrue(app.friendly_error(ValueError('Game resource folder missing: x')).startswith(
                 'No se encontró la carpeta del juego'))
+
+
+class DiagnosticErrorTests(unittest.TestCase):
+    def test_exceptions_without_a_message_still_have_a_technical_detail(self):
+        from workshop.app import friendly_error
+        self.assertIn('Detalle técnico: StopIteration', friendly_error(StopIteration()))
+        self.assertIn('Detalle técnico: AssertionError', friendly_error(AssertionError()))
+        self.assertIn('specific explanation', friendly_error(ValueError('specific explanation')))
 
 
 class TextureTests(unittest.TestCase):

@@ -29,6 +29,17 @@ class FakeResources:
 
 
 class CrewModelTests(unittest.TestCase):
+    def test_boarded_actor_discards_the_animated_root_in_every_pose(self):
+        from unittest.mock import patch
+        from workshop.geometry import euler_matrix
+        mdl=b'{skeleton {bone "basis" {orientation 1 0 0 0 -1 0 0 0 1}{bone "body" {position 0 0 10}{bone "head" {position 0 0 8}}}{bone "skin"}}}'
+        resources=FakeResources({SOLDIER:mdl,SKELETON:mdl,'clip':b'clip'})
+        with patch('workshop.crew_model._skin_meshes',return_value=[('skin.ply',skinned_ply())]),patch('workshop.crew_model.pose_for',return_value=('clip','begin')):
+            for angles in ([180,0,0],[0,180,0],[0,0,90]):
+                with self.subTest(angles=angles),patch('workshop.crew_model._clip_locals',return_value={'basis':euler_matrix(angles,[30,40,50])}):
+                    result=posed_soldier(resources,'any_pose')
+                    self.assertEqual(result['pose_origin'],[0,0,10])
+
     def test_pose_exposes_the_animated_body_anchor_in_actor_space(self):
         from unittest.mock import patch
         from workshop.geometry import euler_matrix

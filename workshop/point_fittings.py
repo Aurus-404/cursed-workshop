@@ -97,6 +97,81 @@ def _crew_roles(root):
     return [place.args[0] for placer in root.find_all('placer') for place in placer.find_all('place') if place.args]
 
 
+def charge_contract(resources, ammunition):
+    """Find the native detonation authority by weapon and filling, not chassis ID."""
+    from .compiler import _load_entity, _explicit_weapon_operators
+    from .registration import _load_include_graph, _interaction_events
+    cache=getattr(resources,'_charge_contracts',{})
+    if ammunition in cache:return cache[ammunition]
+    records,_=_load_include_graph(resources,'set/interaction_entity/entity.set')
+    defines={n.args[0].casefold():n for _,n in records if n.head.casefold()=='define' and n.args}
+    for _,record in reversed(records):
+        blast=next((e for e in record.find_all('on') if e.args[:1]==['explosion_blastwave'] and list(e.walk('blastwave'))),None)
+        if blast is None:continue
+        template=record.head.split()[0]
+        try: _,_,native=_load_entity(resources,template)
+        except (KeyError,OSError,ValueError):continue
+        places=[p for w in native.find_all('Weaponry') for p in w.find_all('place')
+                if p.find('weapon') is not None and p.find('weapon').args[:3]==['weapon goliath','filling',ammunition]]
+        if not places:continue
+        tags={v.casefold() for v in _explicit_weapon_operators(resources,native)}|{template.casefold()}
+        matching=[r for _,r in records if set(r.head.casefold().split())<=tags]
+        matching.sort(key=lambda r:len(r.head.split()))
+        fire=None
+        for candidate in matching:
+            for event in _interaction_events(candidate,defines).find_all('on'):
+                if event.args[:2]==['fire',places[0].args[0]]:fire=event
+        if fire is None:continue
+        result={'native_template':template,'fire':fire.render(),'blastwave':blast.render()}
+        cache[ammunition]=result;resources._charge_contracts=cache
+        return result
+    raise PointFittingError('No están disponibles los recursos nativos de la carga explosiva.')
+
+
+def add_charge_interactions(record, contract, resources):
+    """Bind detonation to the added slot without replacing normal chassis events."""
+    from .registration import _load_include_graph, _interaction_events
+    native=charge_contract(resources,CHARGES[contract['charge']])
+    records,_=_load_include_graph(resources,'set/interaction_entity/entity.set')
+    defines={n.args[0].casefold():n for _,n in records if n.head.casefold()=='define' and n.args}
+    record=_interaction_events(record,defines)
+    fire=block(native['fire']);fire.atoms[2].set(CHARGE_PLACE)
+    # The original vehicle's body-break handler calls into the explosion chain.
+    # An unrelated chassis has its own break handler: invoke the shared native
+    # explosion event explicitly, before running the source's destruction.
+    handler=block('{on fire '+quote(CHARGE_PLACE)+' overload {tags add "cw_charge_detonated"}{call "explosion"}}')
+    for child in fire.children:handler.append(child.clone())
+    for event in list(record.find_all('on')):
+        if event.args[:2]==['fire',CHARGE_PLACE]:record.remove(event)
+    record.append(handler)
+    old=[e for e in record.find_all('on') if e.args[:1]==['explosion_blastwave']]
+    if len(old)>1:raise PointFittingError('Ambiguous chassis explosion handlers')
+    previous=old[0] if old else None
+    if previous:
+        # Replacing a charge also replaces its yield. Unwrap our conditional
+        # to retain only the original chassis branch when adapting it again.
+        from .syntax import Atom
+        condition=next((n for n in previous.find_all('if') if n.args[:2]==['tagged','cw_charge_detonated']),None)
+        if condition is not None:
+            fallback=block('{on "explosion_blastwave"}')
+            at=next(i for i,item in enumerate(condition.items) if isinstance(item,Atom) and item.value=='else')
+            from .syntax import Node
+            for item in condition.items[at+1:]:
+                if isinstance(item,Node):fallback.append(item.clone())
+            previous=fallback
+    wrapper=block('{on "explosion_blastwave" overload}')
+    condition=block('{if tagged "cw_charge_detonated"}')
+    for child in block(native['blastwave']).children:condition.append(child.clone())
+    from .syntax import Atom,Trivia
+    condition.items.extend([Trivia(' '),Atom('else','else'),Trivia(' ')])
+    if old:
+        for child in previous.children:condition.append(child.clone())
+        record.remove(old[0])
+    else:condition.append(block('{inherited}'))
+    wrapper.append(condition);record.append(wrapper)
+    return record
+
+
 def apply_charge(resources, root, model, value, diagnostics):
     """Add the Goliath's demolition charge, fired by the driver from the point."""
     if value is None:
@@ -107,6 +182,7 @@ def apply_charge(resources, root, model, value, diagnostics):
             resources.read(path)
         except (KeyError, OSError) as error:
             raise PointFittingError('No están disponibles los recursos nativos de la carga explosiva.') from error
+    charge_contract(resources,CHARGES[spec['charge']])
     _add_point(model, spec, CHARGE_BONE)
     weaponry = root.find('Weaponry')
     if weaponry is None:

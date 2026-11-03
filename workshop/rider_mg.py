@@ -18,7 +18,7 @@ import posixpath
 
 from .pivots import pose_matrix, pivot_of, rebase_joint
 from .syntax import block, quote
-from .geometry import (parse_model, descendants, multiply, inverse, point, build_preview, attached_actor_frame)
+from .geometry import (parse_model, descendants, multiply, inverse, point, build_preview, attached_actor_frame, identity)
 
 # Climbing on and off any vehicle; a pose's own clip is kept only when it is one
 # of these (a boat's or an aircraft's would look wrong on a tank).
@@ -162,6 +162,8 @@ def _discover(index):
 
 
 def catalog(index):
+    from .catalog_cache import catalog_source
+    index = catalog_source(index)
     if not hasattr(index, '_rider_catalog'):
         supports, poses = _discover(index)
         index._rider_catalog = {'supports': supports, 'poses': poses}
@@ -225,16 +227,23 @@ def configuration(index, rows):
                       'yaw': yaw, 'pitch': pitch, 'seat': _vector(row.get('seat', [0, 0, 0]), 3, 200)}
         if 'pivot' in row:
             normalized['pivot'] = pivot_of(row)
+        for name in ('gun_pose','operator_pose','mount_pose'):
+            value=row.get(name) or {}
+            if not isinstance(value,dict):_error('El ajuste de la MG debe ser una posición y rotación.')
+            normalized[name]={'position':_vector(value.get('position',[0,0,0]),3,10000),
+                              'rotation':_vector(value.get('rotation',[0,0,0]),3,360)}
+            if 'pivot' in value:normalized[name]['pivot']=pivot_of(value)
+            pose_matrix(normalized[name])
         result.append((support, pose, weapon, normalized))
     return result
 
 
-def _seat_frame(support, offset):
+def _seat_frame(support, offset, adjustment=None):
     """The operator's spot, in the mount's frame, moved by the player's offset."""
     local = [list(r) for r in support['seat_frame']]
     for axis in range(3):
         local[axis][3] += offset[axis]
-    return local
+    return multiply(local,pose_matrix(adjustment or {}))
 
 
 def preview(index, body):
@@ -254,17 +263,17 @@ def preview(index, body):
         mesh['normals'] = []
     weapon_source = index.mountable_game()
     gun = build_preview(weapon_source, weapon['entity'], 'full')
-    attachment = attached_actor_frame(parse_model(weapon_source.read(gun['model_path'])),
-                                      multiply(inverse(pivot), model['bones'][support['link']]['world']))
+    gun_frame=multiply(inverse(pivot), model['bones'][support['link']]['world'])
+    actor_frame=attached_actor_frame(parse_model(weapon_source.read(gun['model_path'])),identity())
     for mesh in gun['meshes']:
-        mesh['positions'] = [v for i in range(0, len(mesh['positions']), 3) for v in point(attachment, mesh['positions'][i:i+3])]
-        mesh['normals'] = []
+        mesh['component']='gun'
         mesh['rig_joint'] = 'pitch'
         meshes.append(mesh)
     seat = _seat_frame(support, row['seat'])
     return {'meshes': meshes, 'pitch_matrix': multiply(inverse(pivot), model['bones'][support['pitch']]['world']),
+            'gun_frame':gun_frame,'actor_frame':actor_frame,'seat_turns':support['turns'],
             'seats': [{'place': 'rider', 'group': 'passenger', 'bone': 'rider', 'position': point(seat, [0, 0, 0]),
-                       'rotation': [r[:3] for r in seat[:3]], 'pose': pose['id']}],
+                       'rotation': [r[:3] for r in seat[:3]], 'matrix':seat, 'pose': pose['id']}],
             'yaw_limits': support['yaw_limits'], 'pitch_limits': support['pitch_limits'],
             'diagnostics': [], 'mounts': [], 'internal_crew': 0}
 
@@ -312,22 +321,20 @@ def apply(index, root, model, rows, assets, diagnostics):
             mapping[name] = _free(f'rider{number}_{name}', taken | set(mapping.values()))
         copied = native['bones'][support['root']]['node'].clone()
         _rename_bone_refs(copied, mapping)
+        from .weapon_binding import isolate_aiming
+        isolate_aiming(copied,mapping[support['yaw']])
         _set_matrix(copied, pose_matrix(row))
         for name, limits in ((support['yaw'], row['yaw']), (support['pitch'], row['pitch'])):
             bone = next(n for n in copied.walk('bone') if n.args[-1] == mapping[name])
             for old in list(bone.find_all('limits')):
                 bone.remove(old)
             bone.append(block('{limits %s %s}' % tuple(limits)))
-        if support['turns'] and any(row['seat']):
+        desired_seat=_seat_frame(support,row['seat'],row['operator_pose'])
+        if support['turns']:
             seat = next(n for n in copied.walk('bone') if n.args[-1] == mapping[support['seat']])
             parent = native['bones'][support['seat']]['parent']
-            local = multiply(inverse(native['bones'][parent]['world']), native['bones'][support['seat']]['world'])
-            # The offset is given in the mount's frame; the seat may hang from a sub-bone.
             frame = multiply(inverse(native['bones'][support['root']]['world']), native['bones'][parent]['world'])
-            shift = point(inverse([r[:3] + [0] for r in frame[:3]] + [[0, 0, 0, 1]]), row['seat'])
-            for axis in range(3):
-                local[axis][3] += shift[axis]
-            _set_matrix(seat, local)
+            _set_matrix(seat, multiply(inverse(frame),desired_seat))
         host = next(n for n in model['document'].walk('bone') if n.args[-1] == row['parent'])
         host.append(copied)
         if support['turns']:
@@ -336,11 +343,27 @@ def apply(index, root, model, rows, assets, diagnostics):
             # A fixed operator spot beside the mount, where the native one stood.
             seat_bone = _free(f'rider{number}_seat', taken | set(mapping.values()))
             spot = block('{bone %s}' % quote(seat_bone))
-            frame = [list(r) for r in support['seat_frame']]
-            for axis in range(3):
-                frame[axis][3] += row['seat'][axis]
-            _set_matrix(spot, multiply(pose_matrix(row), frame))
+            _set_matrix(spot, multiply(pose_matrix(row), desired_seat))
             host.append(spot)
+        # The firearm has its own attachment transform. Its native actor keeps
+        # ownership of the muzzle and firing animation inside that attachment.
+        gun_bone=_free(f'rider{number}_weapon',taken|set(mapping.values()))
+        gun_socket=block('{bone '+quote(gun_bone)+'}')
+        _set_matrix(gun_socket,pose_matrix(row['gun_pose']))
+        next(n for n in copied.walk('bone') if n.args[-1]==mapping[support['link']]).append(gun_socket)
+        # Hardware can move separately without moving the aiming joints or
+        # operator. Express the same mount-local visual offset on every LOD.
+        if any(row['mount_pose']['position']) or any(row['mount_pose']['rotation']):
+            offset=pose_matrix(row['mount_pose']);base_frame=inverse(native['bones'][support['root']]['world'])
+            for original in support['bones']:
+                node=next(n for n in copied.walk('bone') if n.args[-1]==mapping[original])
+                visuals=[n for n in node.children if n.head.casefold() in ('volumeview','lodview')]
+                if not visuals:continue
+                visual=block('{bone '+quote(_free(mapping[original]+'_visual',taken|set(mapping.values())))+'}')
+                frame=multiply(base_frame,native['bones'][original]['world'])
+                _set_matrix(visual,multiply(inverse(frame),multiply(offset,frame)))
+                for item in visuals:node.remove(item);visual.append(item)
+                node.append(visual)
         if any(pivot_of(row)):
             frame = pose_matrix(row)
             rebase_joint(model['document'], mapping[support['root']], point(inverse(frame), point(frame, pivot_of(row))))
@@ -351,11 +374,12 @@ def apply(index, root, model, rows, assets, diagnostics):
         assets.files.update(extra.files)
         assets.missing_materials.update(extra.missing_materials)
         assets.missing_bones.update(extra.missing_bones)
-        place, slot = f'mw_rider{number}', f'mgun_rider{number}'
+        from .weapon_binding import mountable_slot
+        place, slot = f'mw_rider{number}', mountable_slot(root)
         visor, clip = f'mw_rider{number}_top', f'mw_rider{number}'
         root.append(block('{placer {place %s {group "passenger"} {linkbone %s} {visor %s}}}'
                           % (quote(place), quote(seat_bone), quote(visor))))
-        root.append(block('{sensor {visor %s {vision "human"} {bone %s}}}' % (quote(visor), quote(mapping[support['link']]))))
+        root.append(block('{sensor {visor %s {vision "human"} {bone %s}}}' % (quote(visor), quote(gun_bone))))
         boarder.append(block('{anm %s {forward {begin %s} {end %s}} {reverse {end %s}}}'
                              % (quote(clip), quote(pose['begin']), quote(pose['id']), quote(pose['reverse']))))
         for door in doors[:2]:
@@ -370,12 +394,12 @@ def apply(index, root, model, rows, assets, diagnostics):
         # {Rotate}, which would turn the whole vehicle towards a target.
         mount = block('{place %s {type "aa"} {gunner %s} {charger %s} {LinkBone %s} {LinkAnimation "off"} '
                       '("abm_mgun") {basic} {ai_in_manual}}'
-                      % (quote(slot), quote(place), quote(place), quote(mapping[support['link']])))
+                      % (quote(slot), quote(place), quote(place), quote(gun_bone)))
         weaponry.append(mount)
         for name, speed in ((support['yaw'], 180), (support['pitch'], 90)):
             root.append(block('{bone %s {speed2 %s}}' % (quote(mapping[name]), speed)))
         mounts.append({'place': place, 'slot': slot, 'item': weapon['id'], 'support': support['id'], 'pose': pose['id'],
-                       'parent': row['parent'], 'bones': {**mapping, '@seat': seat_bone}, 'root': mapping[support['root']],
+                       'parent': row['parent'], 'bones': {**mapping, '@seat': seat_bone,'@weapon':gun_bone}, 'root': mapping[support['root']],
                        'initial_item': initial.render(), 'ammo_item': ammo.render()})
     diagnostics.append({'code': 'rider_mg_runtime_gate', 'level': 'warning',
                         'message': 'MG de pasajero: la usa quien suba al vehículo. Postura e IA pendientes de prueba en batalla.'})

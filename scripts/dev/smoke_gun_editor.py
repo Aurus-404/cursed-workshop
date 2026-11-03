@@ -20,16 +20,66 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--exe',type=Path,required=True)
     parser.add_argument('--out',type=Path,required=True)
+    parser.add_argument('--reuse',action='store_true',help='Reuse this script\'s existing synthetic workspace without deleting it.')
     parser.add_argument('--crew-visibility',action='store_true',help='Also exercise internal crew compilation.')
     parser.add_argument('--support-vehicle',action='store_true',help='Also exercise native support packages and cargo.')
     parser.add_argument('--extra-armor',action='store_true',help='Also exercise physical native armor fittings.')
     parser.add_argument('--smoke-launchers',action='store_true',help='Exercise original smoke models and native dispatch compilation.')
     parser.add_argument('--corrections',action='store_true',help='Exercise artwork, cancellation and the operation panel.')
+    parser.add_argument('--nested-turrets',action='store_true',help='Exercise roof turret joints and saved multibarrel designs.')
+    parser.add_argument('--report-download',action='store_true',help='Generate and download a diagnostic for an isolated empty campaign.')
+    parser.add_argument('--weapon-references',action='store_true',help='Exercise retained and inherited multibarrel prefixes in saved designs.')
     args=parser.parse_args();out=args.out.resolve()
-    if not out.is_relative_to((ROOT/'outputs').resolve()) or out.exists():raise ValueError('Use a new output folder.')
-    out.mkdir(parents=True);game=out/'fixture_game';(game/'binaries').mkdir(parents=True)
+    if not out.is_relative_to((ROOT/'outputs').resolve()):raise ValueError('Use a folder under project outputs.')
+    if out.exists():
+        previous=out/'report.json';settings=out/'workspace/settings.json'
+        if not args.reuse or not previous.is_file() or not settings.is_file():raise ValueError('Use a new output folder, or --reuse with an existing synthetic fixture.')
+        prior=json.loads(previous.read_text());configured=json.loads(settings.read_text())
+        if prior.get('personal_saves_touched') is not False or not prior.get('own_process_stopped') or Path(configured.get('game_root','')).resolve()!=out/'fixture_game' or configured.get('mod_roots'):
+            raise ValueError('This output is not an inactive synthetic smoke workspace.')
+    out.mkdir(parents=True,exist_ok=True);game=out/'fixture_game';(game/'binaries').mkdir(parents=True,exist_ok=True)
     fixture=Resources()
     fixture.files['set/stuff/shell/mg_round.belt.ammo']=b'{ammo {entity "mg_bullet"}}'
+    if args.weapon_references:
+        for original,name in [('receiver','reference_receiver'),('donor','reference_donor')]:
+            for path,raw in list(fixture.files.items()):
+                if not path.startswith('entity/'+original+'/'):continue
+                target=path.replace('entity/'+original+'/', 'entity/'+name+'/').replace('/'+original+'.','/'+name+'.')
+                raw=raw.replace((original+'.mdl').encode(),(name+'.mdl').encode())
+                if name=='reference_receiver':
+                    if path.endswith('.def'):raw=raw.replace(b'{place "coax_slot"',b'{place "coax_slot" {Barrels 2}{shooter "emit"}')
+                    if path.endswith('.mdl'):raw=raw.replace(b'{bone "coax"',b'{bone "coax" {bone "emit00" {Position 12 -2 0}}{bone "emit01" {Position 12 2 0}}{bone "jet00"}')
+                else:
+                    if path.endswith('.def'):raw=raw.replace(b'{place "main_slot"',b'{place "main_slot" {Barrels 2}').replace(b'"donor_weapon"',b'"reference_weapon"')
+                    if path.endswith('.mdl'):raw=raw.replace(b'{bone "sight"',b'{bone "jet00" {Position 14 -2 0}}{bone "jet01" {Position 14 2 0}}{bone "sight"')
+                fixture.files[target]=raw
+        fixture.files['set/stuff/gun/reference_weapon']=b'{from "donor_weapon" {shooter "jet"}}'
+    if args.nested_turrets:
+        fixture.files['properties/tank_crew.ext']=b'(define "native_roles" {placer {place "gunner2"}{place "charger2"}})'
+        for original, name in [('receiver','roof_receiver'),('donor','roof_donor')]:
+            for path, raw in list(fixture.files.items()):
+                if not path.startswith('entity/'+original+'/'):continue
+                target=path.replace('entity/'+original+'/', 'entity/'+name+'/').replace('/'+original+'.','/'+name+'.')
+                raw=raw.replace((original+'.mdl').encode(),(name+'.mdl').encode())
+                for old,new in [('azimuth','turret'),('elevation','gun_rot'),('breech','gun')]:
+                    raw=raw.replace(('"'+old+'"').encode(),('"'+new+'"').encode())
+                if path.endswith('.mdl'):
+                    raw=raw.replace(b'{bone revolute "gun_rot"',b'{bone revolute "gun_rot" {Orientation 1 0 0 0 0 1 0 -1 0}')
+                    if name=='roof_donor':raw=raw.replace(b'{bone "sight"',b'{bone "shooter00" {Position 10 -2 0}}{bone "shooter01" {Position 10 2 0}}{bone "sight"')
+                if path.endswith('.def'):
+                    raw=raw.replace(b'{game_entity',b'{game_entity {props "tank"}')
+                    if name=='roof_donor':raw=raw.replace(b'{place "main_slot"',b'{place "main_slot" {Barrels 2}')
+                fixture.files[target]=raw
+        for path,raw in list(fixture.files.items()):
+            if path.startswith('entity/roof_donor/'):
+                fixture.files[path.replace('entity/roof_donor/','entity/roof_single_emitter/').replace('/roof_donor.','/roof_single_emitter.')]=raw.replace(b'roof_donor.mdl',b'roof_single_emitter.mdl')
+        fixture.files['set/interaction_entity/entity.set']=b'''{entities {"roof_donor tank"
+          {on spawn {add_view "flash" "flash00" "shooter00"}{add_view "flash" "flash01" "shooter01"}}
+          {on fire "main_slot" overload {if name "00" {view start "flash00"} else name "01" {view start "flash01"}}}
+        } {"roof_single_emitter tank"
+          {on spawn {add_view "flash" "single" "shooter00"}}
+          {on fire "main_slot" {view start "single"}{delay .2 "fire" {view pause "single"}}}
+        }}'''
     if args.smoke_launchers:
         from tests.test_smoke_launchers import resources as smoke_resources
         extra=smoke_resources()
@@ -62,7 +112,7 @@ def main():
     for path,raw in fixture.files.items():
         target=game/'resource'/path;target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes(raw)
     with zipfile.ZipFile(game/'resource/gamelogic.pak','w'):pass
-    workspace=out/'workspace';workspace.mkdir()
+    workspace=out/'workspace';workspace.mkdir(exist_ok=True)
     (workspace/'settings.json').write_text(json.dumps({'game_root':str(game),'mod_roots':[]}),encoding='utf8')
     with socket.socket() as probe:
         probe.bind(('127.0.0.1',0));port=probe.getsockname()[1]
@@ -99,6 +149,32 @@ def main():
             raise AssertionError('Gun API accepted missing token')
         except urllib.error.HTTPError as error:assert error.code==403
         job('/api/configure',{'game_root':str(game),'mod_roots':[]})
+        if args.weapon_references:
+            design={'assembly_draft':{'schema':1,'turrets':[],'guns':[{'schema':1,'recipient_place':'main_slot','donor_place':'main_slot',
+                'donor_template':'reference_donor','donor_catalog':True,'upright':True,'pose':{'position':[0,0,0],'rotation':[0,0,0]}}]}}
+            view=job('/api/design-preview',{'hull':'reference_receiver','transform':design})
+            assert view['preview_valid'] and view['hull']['meshes']
+            catalog=job('/api/design-catalog',{'hull':'reference_receiver','transform':design})
+            assert len(catalog['weapons'])==2
+            report['packaged_weapon_reference_design']=True
+        if args.nested_turrets:
+            design={'assembly_draft':{'schema':1,'guns':[],'turrets':[{
+                'donor_template':'roof_donor','donor_catalog':True,'recipient_mount':'@free:turret','donor_mount':'turret',
+                'joint_limits':{'gun_rot':[-7,18]},'pose':{'position':[2,0,3],'rotation':[0,0,0]}}]}}
+            projected=job('/api/design-preview',{'hull':'roof_receiver','transform':design})
+            assert 'module_turret' in projected['hull']['module_mounts']
+            joints={j['bone']:j for j in projected['hull']['joints']}
+            assert joints['module_gun_rot']['limits']==[-7,18]
+            assert joints['module_turret']['weapons']!=joints['turret']['weapons']
+            pending=job('/api/design-preview',{'hull':'roof_receiver','transform':design,
+                'pending':{'kind':'turret',**design['assembly_draft']['turrets'][0]}})
+            assert any(j['bone']=='gun_rot' for j in pending['turret']['joints'])
+            assert not any(j['bone']=='module_turret' for j in pending['hull']['joints'])
+            report['packaged_nested_turrets']=True
+            design['assembly_draft']['turrets'][0]['donor_template']='roof_single_emitter'
+            projected=job('/api/design-preview',{'hull':'roof_receiver','transform':design})
+            assert 'module_turret' in projected['hull']['module_mounts']
+            report['packaged_projected_multibarrel']=True
         if args.corrections:
             diagnostic=json.loads(request('/api/diagnostic',token=token))
             assert len(diagnostic['build']['source_sha256'])==64
@@ -218,6 +294,23 @@ def main():
         if args.smoke_launchers:assert 'id="smoke-fields"' in html and 'id="smoke-list"' in html
         digest=hashlib.sha256(request('/assets/app.js')).hexdigest()
         assert digest==hashlib.sha256((ROOT/'workshop/web/assets/app.js').read_bytes()).hexdigest()
+        if args.report_download:
+            from tests.test_campaign import make_save
+            import io
+            save=make_save(out/'synthetic_report_campaign.sav',scene='{campaign {CampaignSquads}}',
+                status='{saveinfo {name "Synthetic report"}{army ger}{mods}{gameVersion "1.060.0"}}')
+            job('/api/load-save',{'path':str(save)})
+            saved=json.loads(request('/api/error-report',{'quiet':True,'diagnostic':'Synthetic packaged download check'},token))
+            try:
+                request(saved['download_url'])
+                raise AssertionError('Report download accepted missing token')
+            except urllib.error.HTTPError as error:assert error.code==403
+            downloaded=request(saved['download_url'],token=token)
+            assert downloaded==Path(saved['path']).read_bytes()
+            with zipfile.ZipFile(io.BytesIO(downloaded)) as archive:
+                assert archive.read('diagnostic.txt')==b'Synthetic packaged download check'
+                assert any(name.startswith('save/') for name in archive.namelist())
+            report['packaged_report_download']=True
         report.update(ok=True,packaged_catalog=True,packaged_preview=True,packaged_compiler=True,token_protected=True,ui_sha256=digest)
     finally:
         if token:

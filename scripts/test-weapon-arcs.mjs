@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
-import {clampAngle,jointTree,jointDeltas} from '../frontend/weapon-arcs.js';
+import {clampAngle,jointTree,jointDeltas,jointLocalPose} from '../frontend/weapon-arcs.js';
 
 const near=(a,b,message)=>assert.ok(a.distanceTo(b)<1e-6,`${message}: ${a.toArray()} != ${b.toArray()}`);
 
@@ -38,3 +38,10 @@ assert.ok(Math.abs(turned.z-muzzle.z)<1e-6,'traverse does not change the elevati
 assert.ok(Math.abs(turned.x-10)<1e-6,'after 90 degrees the barrel points along +Y');
 
 console.log('Weapon arcs: limits, joint order and turret/gun turning passed.');
+for(const scale of [1,-1]){
+  const parent=new THREE.Matrix4().makeTranslation(5,7,9).multiply(new THREE.Matrix4().makeRotationX(.7)).scale(new THREE.Vector3(1,scale,1));
+  const local=new THREE.Matrix4().makeTranslation(2,3,4),delta=both.gun_rot;
+  const actual=parent.clone().multiply(jointLocalPose(delta,parent,local));
+  const expected=delta.clone().multiply(parent).multiply(local);
+  actual.elements.forEach((v,i)=>assert.ok(Math.abs(v-expected.elements[i])<1e-7,'nested and reflected fitting frames retain the same aiming delta'));
+}

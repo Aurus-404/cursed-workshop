@@ -29,6 +29,25 @@ def linear_determinant(matrix):
             +a[0][2]*(a[1][0]*a[2][1]-a[1][1]*a[2][0]))
 
 
+def transform_mesh(mesh, matrix):
+    """Move an already placed mesh, keeping its native visible side and UVs."""
+    mesh['positions'] = [v for i in range(0, len(mesh['positions']), 3)
+                         for v in point(matrix, mesh['positions'][i:i+3])]
+    normal = inverse(matrix)
+    values = []
+    for i in range(0, len(mesh.get('normals', [])), 3):
+        source = mesh['normals'][i:i+3]
+        moved = [sum(normal[c][r]*source[c] for c in range(3)) for r in range(3)]
+        length = math.sqrt(sum(v*v for v in moved)) or 1
+        values.extend(v/length for v in moved)
+    mesh['normals'] = values
+    if linear_determinant(matrix) < 0:
+        mesh['indices'] = [v for i in range(0, len(mesh['indices']), 3)
+                           for v in (mesh['indices'][i], mesh['indices'][i+2], mesh['indices'][i+1])]
+    if 'bounds' in mesh: mesh['bounds'] = bounds_of(mesh['positions'])
+    return mesh
+
+
 def inverse(a):
     """General inverse: some shipped basis transforms are reflections, not rotations."""
     rows = [list(a[r]) + identity()[r] for r in range(4)]
@@ -142,7 +161,7 @@ def _initially_visible(node):
 # auxiliary turrets of multi-turret tanks (T-35: gun1, gun_rot2), and machine guns,
 # also when a name clash made the tool rename them (a Pz I turret on a Pz IV
 # roof keeps "module_gun_rot"), so an added part stays adjustable once built.
-_WEAPON_BONE = re.compile(r"(?:module_)*(?:gun(?:_rot)?_?\d*|mgun.*)$", re.IGNORECASE)
+_WEAPON_BONE = re.compile(r"(?:module\d*_)*(?:gun(?:_rot)?_?\d*|mgun.*|shooter.*)$", re.IGNORECASE)
 
 
 def parse_model(text: str | bytes) -> dict:
@@ -343,6 +362,31 @@ def reverse_mesh_winding(raw: bytes) -> bytes:
     return bytes(output)
 
 
+def hide_mesh_faces(raw: bytes, keep) -> bytes:
+    """Hide the triangles keep() rejects as zero-area ones (all three corners on
+    one vertex); every chunk, count and vertex channel stays byte-identical.
+    keep(t) receives the triangle's index over all chunks, in file order."""
+    mesh=read_mesh(raw)
+    output=bytearray(raw);cursor=4;chunks=0;triangle=0
+    while (offset:=raw.find(b'VERT',cursor))>=0:
+        cursor=offset+4
+        if offset+12>len(raw):continue
+        count,stride,_=struct.unpack_from('<IHH',raw,offset+4)
+        if not 0<count<=2_000_000 or stride not in (32,36,40,44,48,52,56,64):continue
+        end=offset+12+count*stride
+        if raw[end:end+4]!=b'INDX' or end+8>len(raw):continue
+        size=struct.unpack_from('<I',raw,end+4)[0]
+        if size%3 or size>12_000_000 or end+8+size*2>len(raw):
+            raise GeometryError('Truncated or non-triangular EPLY index chunk')
+        for position in range(end+8,end+8+size*2,6):
+            if not keep(triangle):
+                output[position+2:position+4]=output[position+4:position+6]=raw[position:position+2]
+            triangle+=1
+        cursor=end+8+size*2;chunks+=1
+    if chunks!=len(mesh['submeshes']):raise GeometryError('Could not verify every EPLY index chunk')
+    return bytes(output)
+
+
 def mesh_materials(raw: bytes) -> list[tuple[int, str]]:
     """Material references of every EPLY MESH chunk as (length-byte offset, name).
 
@@ -446,6 +490,45 @@ def recipient_mount_name(model, requested=None):
     return model['anchor_name'] if model['anchor_name'] in replaceable_mounts(model) else FREE_MOUNT
 
 
+def editable_mounts(model, root):
+    """Independent weapon modules, including yaw mounts inside another turret.
+
+    Dropping every descendant hides roof turrets; offering every joint instead
+    lets a pitch/recoil socket masquerade as an entire turret.
+    """
+    from .articulation import weapon_joints
+    candidates = replaceable_mounts(model)
+    structural = free_mount_parent(model)
+    joints = {j['bone']:j for j in weapon_joints(model, root)}
+    for joint in joints.values():
+        name = joint['bone']
+        if (name not in candidates and model['bones'][name]['parent'] is not None
+                and structural not in descendants(model['bones'], name)):
+            candidates.append(name)
+    result = []
+    for name in candidates:
+        parent = model['bones'][name]['parent']
+        enclosing = None
+        while parent in model['bones']:
+            if parent in candidates:
+                enclosing = parent
+                break
+            parent = model['bones'][parent]['parent']
+        axis = [model['bones'][name]['world'][r][2] for r in range(3)]
+        length = math.sqrt(sum(v*v for v in axis))
+        own = set(joints.get(name, {}).get('weapons', []))
+        outer = set(joints.get(enclosing, {}).get('weapons', []))
+        # A second pivot on the same weapon path is not a second module merely
+        # because an exporter left both axes vertical. A nested turret either
+        # owns another weapon group or has its own yaw/pitch pair.
+        branch = descendants(model['bones'], name) - {name}
+        pitch = any(abs(j['matrix'][2][2]) < .7 for n,j in joints.items() if n in branch)
+        independent = bool(own and own != outer) or pitch
+        if enclosing is None or (independent and length and abs(axis[2])/length >= .7):
+            result.append(name)
+    return result
+
+
 def free_mount_spec(name):
     """"@free" -> (True, None); "@free:<bone>" -> (True, bone); else (False, None)."""
     if not name or not str(name).startswith(FREE_MOUNT):
@@ -459,6 +542,12 @@ def free_mount_options(model):
     options = [FREE_MOUNT]
     if model["anchor_name"] in model["bones"]:
         options.append(f"{FREE_MOUNT}:{model['anchor_name']}")
+    for name in replaceable_mounts(model):
+        axis = [model['bones'][name]['world'][r][2] for r in range(3)]
+        length = math.sqrt(sum(v*v for v in axis))
+        option = f'{FREE_MOUNT}:{name}'
+        if length and abs(axis[2])/length >= .7 and option not in options:
+            options.append(option)
     for name, bone in model["bones"].items():
         if _SPOT_PATTERN.search(name) and bone["assets"] and name != model["anchor_name"]:
             options.append(f"{FREE_MOUNT}:{name}")
@@ -470,7 +559,7 @@ def free_spot_parent(model, spot):
     with the turret); for a hatch, the part that carries it (the lid opens)."""
     if spot not in model["bones"]:
         raise GeometryError(f"Mount spot {spot!r} does not exist")
-    if spot == model["anchor_name"]:
+    if spot == model["anchor_name"] or spot in model['mounts']:
         return spot
     return model["bones"][spot]["parent"] or spot
 
@@ -771,16 +860,19 @@ def build_preview(resources, template_id, part="full", mount_name=None, seats=No
         seat = donor_seat(resources, model, path, model["anchor_name"], carried)
     else:
         seat = mount_seat(resources, model, path, model["anchor_name"])
-    joints = []
+    joints, modules = [], None
     try:
-        from .compiler import _load_entity, _explicit_weapon_operators, _articulation_ancestors
+        from .compiler import _load_entity, _explicit_weapon_operators, _articulation_ancestors, _include_defines
         from .articulation import weapon_joints
         _, _, root = _load_entity(resources, template_id)
         _explicit_weapon_operators(resources, root)
+        modules = editable_mounts(model, root)
         visible = set(model['bones']) - selected if part == 'hull' else selected if part == 'turret' else set(model['bones'])
         if part == 'turret' and carried:
             visible |= set(_articulation_ancestors(root, model, model['anchor_name']))
-        joints = weapon_joints(model, root, adjustment, visible)
+        # Traverse macros ("turret_heavy") come from the vehicle's includes.
+        defines = {k.casefold(): v for k, v in _include_defines(resources, root).items()}
+        joints = weapon_joints(model, root, adjustment, visible, defines=defines)
     except (ValueError, KeyError, OSError) as error:
         warnings.append({'code': 'joints_unavailable', 'message': str(error)})
     # Armour volumes for View > Armour: the same parts and space as the meshes.
@@ -792,7 +884,16 @@ def build_preview(resources, template_id, part="full", mount_name=None, seats=No
         armor = armor_volumes(resources, root, model, path, shown, adjustment)
     except Exception as error:
         warnings.append({'code': 'armor_unavailable', 'message': str(error)})
+    mobility = None
+    if part in ('hull', 'full'):
+        from .mobility import read as read_mobility
+        try:
+            mobility = read_mobility(root)
+        except Exception as error:  # a view aid: never blocks the preview
+            warnings.append({'code': 'mobility_unavailable', 'message': str(error)})
     return {"template_id": template_id, "part": part, "model_path": path, "meshes": meshes, "joints": joints,
+            "mobility": mobility,
+            "module_mounts": modules,
             "anchor": model["anchor"], "anchor_name": model["anchor_name"], "mounts": (replaceable_mounts(model) if part == 'hull' else model["mounts"]) + options,
             "seat": seat, "carried": bool(part == "turret" and carried),
             "seats": seat_points, "internal_crew": internal,

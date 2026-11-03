@@ -46,7 +46,10 @@ export function vehicleDesign({state,$,job,displayPart,updateSelection,remember,
     const promise=job('/api/preview',{template,part:'hull'}).then(data=>{
       const parents=new Map((data?.bones||[]).map(b=>[b.name,b.parent])),rings=(data?.mounts||[]).filter(m=>!String(m).startsWith('@'));
       const usable=rings.filter(m=>parents.get(m)!==null);
-      const top=usable.filter(m=>{let parent=parents.get(m);while(parent){if(usable.includes(parent))return false;parent=parents.get(parent);}return true;});
+      // Pitch/recoil joints belong to their enclosing module, but a turret
+      // mounted on another turret is independently editable. The backend
+      // identifies those module roots from the weapon paths, not name prefixes.
+      const top=data?.module_mounts||usable.filter(m=>{let parent=parents.get(m);while(parent){if(usable.includes(parent))return false;parent=parents.get(parent);}return true;});
       if(state.hull?.template===template)chassis={template,mounts:[...top,...(data?.mounts||[]).filter(m=>String(m).startsWith('@free'))],preferred:data.anchor_name||''};
       controls();
     }).finally(()=>{if(loading?.promise===promise)loading=null;});
@@ -137,7 +140,7 @@ export function vehicleDesign({state,$,job,displayPart,updateSelection,remember,
     state.turret=(state.campaign?.units||[]).find(u=>u.eid===row.donor_eid)||{...row,eid:row.donor_eid,template:row.donor_template,label:row.donor_template,...(row.donor_catalog?{creative:true,depot:'creative'}:{})};
     state.pendingTurret={...structuredClone(row),kind:'turret',original:mount};
     state.transform.turret=structuredClone(row.pose||zero());
-    if(row.joint_limits)state.transform.joint_limits={...state.transform.joint_limits,turret:structuredClone(row.joint_limits)};
+    state.transform.joint_limits={...state.transform.joint_limits,turret:structuredClone(row.joint_limits||{})};
     await refresh(state.pendingTurret);return true;
   }
   async function discard(){

@@ -4,6 +4,7 @@ No blanket hull-thickness bonus. Every fitting retains source geometry/material/
 thickness (including CastSteel). The native armor tag isolates it from hull damage.
 """
 import hashlib
+import json
 import math
 import re
 
@@ -155,7 +156,7 @@ def _definition_items(resources, path, extensions):
     if vehicle:
         text=resources.read_text(path)
         local='\n'.join(resources.read_text(p) for p in extensions.get(path.rsplit('/',1)[0], []))
-        if not re.search(r'shield|sandbag|\("armor"|volume\s+"armor|wood_shield', text+'\n'+local, re.I): return []
+        if not re.search(r'shield|sandbag|\("armor"|volume\s+"armor|wood_shield|"mantlet', text+'\n'+local, re.I): return []
     info, _, root = _load_entity(resources, path)
     if not info.get('model_path'): return []
     model = parse_model(resources.read(info['model_path']))
@@ -178,10 +179,136 @@ def _definition_items(resources, path, extensions):
     for selected, label, kind in candidates:
         item = _candidate(resources, info, root, model, selected, label, kind, contracts)
         if item: rows.append(item)
+    if vehicle:
+        mantlet = _mantlet_candidate(resources, info, root, model, effective, contracts)
+        if mantlet: rows.append(mantlet)
+    return rows
+
+
+def elevation_joint(root, model):
+    """The joint that raises the main gun: the nearest one above it turning
+    about a horizontal axis. Its shell is the gun's mantlet."""
+    from .gun_assembly import _primary_place
+    from .weapon_binding import weapon_link
+    primary = _primary_place(root)
+    place = next((p for w in root.find_all('Weaponry') for p in w.find_all('place') if p.args and p.args[0] == primary), None)
+    if place is None: return None
+    bones = model['bones']
+    name = weapon_link(place, model)
+    while name in bones:
+        bone = bones[name]
+        if bone['parent'] is not None and bone['node'].args[:1] == ['revolute'] and abs(bone['world'][2][2]) < 0.5:
+            return name
+        name = bone['parent']
+    return None
+
+
+def _mantlet_candidate(resources, info, root, model, effective, contracts):
+    """The main gun's mantlet: the elevation joint's own shell and armor,
+    without the barrel, breech or coaxial weapons hanging from it. It is
+    fitted as a fixed piece, usually on the new vehicle's own gun elevation."""
+    bones = model['bones']
+    name = elevation_joint(root, model)
+    if name is None or not bones[name]['assets'] or any(b['name'] == name for b in model.get('duplicates', [])): return None
+    def internal(volume):  # breech and barrel volumes: hidden, not armor
+        tags = {v for tag in volume.find_all('tags') for a in tag.args for v in a.split()}
+        return 'no_target' in tags or re.search(r'contact\s+0', volume.render(), re.I)
+    owned = [n for n, v in model['volumes'].items()
+             if v['bone'] == name and n in contracts and n in effective and not internal(effective[n])]
+    if not owned: return None
+    vehicle = resources.label_for(info['definition_path'].rsplit('/', 1)[-1][:-4])
+    item = {'id': info['model_path']+'#'+name+'@mantlet', 'label': vehicle+' · mantlet', 'kind': 'mantlet',
+            'single': True, 'source': info.get('source_id', ''), 'definition_path': info['definition_path'],
+            'model_path': info['model_path'], 'bone': name, 'volumes': owned,
+            'contracts': {n: contracts[n].render() for n in owned},
+            'materials': sorted({contracts[n].find('material').args[0] for n in owned}),
+            'thickness': sorted({float(contracts[n].find('thickness').args[0]) for n in owned}),
+            'cast_steel': any(contracts[n].find('CastSteel') is not None for n in owned)}
+    try:
+        # A shell that cannot be told from its breech or cradle stays out of
+        # the list (still resolvable for a recipe that already uses it).
+        item['clean'] = _shell_faces(resources, item, model)[1]
+    except (KeyError, OSError, ValueError):
+        item['clean'] = False
+    return item
+
+
+_NATIONS =('germany', 'ussr', 'eng', 'usa', 'japan', 'finland', 'fra', 'swe', 'ita', 'hun', 'pol', 'rom')
+_WEIGHT = {'other': 0.05, 'wood': 0.2, 'sandbags': 0.3, 'tracks': 0.4}
+
+
+def _category(item):
+    """What the piece is for, from its kind and the modeler's part name."""
+    if item['kind'] in ('mantlet', 'tracks', 'sandbags', 'wood'): return item['kind']
+    part = (item.get('bone') or '').casefold()
+    if re.search(r'lifering|basket|box|crate|external|rocket|towing|exha?ust|roller|magazine|ammo|door|grill|jerry|tool|antenna|light', part):
+        return 'other'
+    if re.search(r'shield_?(?:[lr]|left|right)\d*$|schur|skirt|side', part): return 'skirts'
+    if re.search(r'shield', part): return 'shields'
+    return 'plates'
+
+
+def _annotate(resources, rows):
+    """Nation, purpose, usefulness and identical-piece groups for the list.
+
+    Every piece stays resolvable (saved recipes keep their ids); the list shows
+    one piece per group of identical geometry and armor, the most useful first.
+    """
+    meshes, models = {}, {}
+    def shape(item):
+        if item['model_path'] not in models:
+            models[item['model_path']] = parse_model(resources.read(item['model_path']))
+        model = models[item['model_path']]
+        names = {item['bone']} if item.get('single') else (descendants(model['bones'], item['bone']) if item['bone'] else set(model['bones']))
+        origin = inverse(model['bones'][item['bone']]['world']) if item['bone'] else identity()
+        points, parts = [], []
+        for name in sorted(names):
+            bone = model['bones'][name]
+            frame = multiply(origin, bone['world'])
+            for ref in bone['assets']:
+                path = resolve_path(item['model_path'], ref)
+                if path not in meshes:
+                    data = resources.read(path)
+                    meshes[path] = (hashlib.sha1(data).hexdigest(), read_mesh(data)['positions'])
+                digest, positions = meshes[path]
+                parts.append(digest + ':' + ','.join('%.2f' % v for row in frame for v in row))
+                points += [point(frame, positions[i:i+3]) for i in range(0, len(positions), 3)]
+        return points, parts
+    for item in rows:
+        segment = item['definition_path'].split('/')[2].lstrip('+') if item['definition_path'].count('/') > 2 else ''
+        item['nation'] = segment if segment in _NATIONS else 'other'
+        # Test vehicles, ships, aircraft and trains are no tank armor (a
+        # destroyer's funnels topped the list); their pieces stay resolvable.
+        folders = item['definition_path'].casefold().split('/')
+        item['listed'] = (segment != 'test' and not set(folders) & {'test', 'marine', 'airborne', 'train', 'trains', 'railway'}
+                          and item.get('clean', True))
+        item['category'] = _category(item)
+        try:
+            points, parts = shape(item)
+        except (KeyError, OSError, ValueError):
+            points, parts = [], [item['id']]
+        if points:
+            size = sorted(max(p[k] for p in points) - min(p[k] for p in points) for k in range(3))
+            area = size[1] * size[2]
+        else:
+            area = 0.0
+        item['score'] = round(max(item['thickness'] or [0]) * area * _WEIGHT.get(item['category'], 1.0), 3)
+        item['group'] = hashlib.sha1(json.dumps([sorted(parts), sorted(item['contracts'].values()), item['category']]).encode()).hexdigest()[:16]
+    groups = {}
+    for item in rows:
+        groups.setdefault(item['group'], []).append(item)
+    for members in groups.values():
+        listed = [m for m in members if m['listed']]
+        lead = min(listed or members, key=lambda m: (m['source'] != 'vanilla', len(m['label']), m['label']))
+        for m in members:
+            m['primary'] = m is lead
+            m['variants'] = len(listed) or 1
     return rows
 
 
 def catalog(resources):
+    from .catalog_cache import catalog_source
+    resources = catalog_source(resources)
     if hasattr(resources, '_armor_catalog'): return resources._armor_catalog
     rows, seen = [], set()
     extensions = {}
@@ -198,7 +325,7 @@ def catalog(resources):
                 if item['id'] not in seen:rows.append(item);seen.add(item['id'])
         except (ValueError, KeyError, OSError): continue
     checkpoint();report_progress(len(files),len(files))
-    resources._armor_catalog = rows
+    resources._armor_catalog = _annotate(resources, rows)
     return rows
 
 
@@ -210,13 +337,17 @@ def resolve_fitting(resources, identifier):
     fallback for that uncommon layout. No asset supplied by a recipe is trusted.
     """
     if not isinstance(identifier,str):return None
+    from .catalog_cache import catalog_source
+    resources=catalog_source(resources)
     if hasattr(resources,'_armor_catalog'):
-        return next((p for p in resources._armor_catalog if p['id']==identifier),None)
+        if not hasattr(resources,'_armor_by_id'):
+            resources._armor_by_id={item['id']:item for item in resources._armor_catalog}
+        return resources._armor_by_id.get(identifier)
     cached=resources.__dict__.setdefault('_armor_items',{})
     if identifier in cached:return cached[identifier]
     if '#' not in identifier:return None
     model, _=identifier.rsplit('#',1);folder=model.rsplit('/',1)[0]
-    paths=[p for p in resources.entries if p.rsplit('/',1)[0]==folder]
+    paths=[p for p in resources.entries if p.startswith(folder+'/') and p.rsplit('/',1)[0]==folder]
     extensions={folder:[p for p in paths if p.endswith('.ext')]}
     for path in sorted(p for p in paths if p.endswith('.def')):
         try:
@@ -237,7 +368,8 @@ def configuration(resources, value):
         raise ArmorError('Elegí una pieza de blindaje nativa disponible.')
     rows = []
     for row in value:
-        if not isinstance(row, dict) or resolve_fitting(resources,row.get('asset')) is None:
+        item=resolve_fitting(resources,row.get('asset')) if isinstance(row,dict) else None
+        if item is None:
             raise ArmorError('Elegí una pieza de blindaje nativa disponible.')
         parent = row.get('parent')
         if not isinstance(parent, str) or not parent or len(parent) > 160:
@@ -254,15 +386,17 @@ def configuration(resources, value):
             if not isinstance(vector, list) or len(vector) != 3 or any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or abs(v) > bound for v in vector):
                 raise ArmorError('La posición o el giro del blindaje no es válido.')
             normalized[key] = vector
-        rows.append((normalized, resolve_fitting(resources,row['asset'])))
+        rows.append((normalized, item))
     return rows
 
 
 def fitting(resources, item):
     model = parse_model(resources.read(item['model_path']))
-    names = descendants(model['bones'], item['bone']) if item['bone'] else set(model['bones'])
+    # A mantlet is its elevation joint's own shell: never the barrel below it.
+    names = {item['bone']} if item.get('single') else (descendants(model['bones'], item['bone']) if item['bone'] else set(model['bones']))
     meshes = []
     origin = inverse(model['bones'][item['bone']]['world']) if item['bone'] else identity()
+    shells = _shell_faces(resources, item, model)[0]
     for name in model['bones']:
         if name not in names: continue
         bone = model['bones'][name];frame = multiply(origin, bone['world'])
@@ -270,21 +404,164 @@ def fitting(resources, item):
             path = resolve_path(item['model_path'], ref);mesh = read_mesh(resources.read(path))
             for sub in mesh['submeshes']: sub['mtl'] = resolve_path(path, sub['material']) if sub['material'] else None
             positions = [v for i in range(0, len(mesh['positions']), 3) for v in point(frame, mesh['positions'][i:i+3])]
-            meshes.append({**mesh, 'positions': positions, 'normals': [], 'bone': name, 'path': path})
+            indices = mesh['indices']
+            if path in shells:  # the breech sharing the shell's mesh is hidden, as in the export
+                keep = shells[path]
+                indices = [index for t in range(len(indices)//3)
+                           for index in (indices[3*t:3*t+3] if keep[t] else [indices[3*t]]*3)]
+            meshes.append({**mesh, 'positions': positions, 'indices': indices, 'normals': [], 'bone': name, 'path': path})
     if not meshes: raise ArmorError('No se pudo cargar el modelo del blindaje.')
-    box = bounds_of([v for m in meshes for v in m['positions']]);lo, hi = box['min'], box['max']
+    drawn = {(m['path'], i) for m in meshes for t in range(len(m['indices'])//3)
+             if len(set(m['indices'][3*t:3*t+3])) == 3 for i in m['indices'][3*t:3*t+3]}
+    box = bounds_of([v for m in meshes for i in range(len(m['positions'])//3) if (m['path'], i) in drawn
+                     for v in m['positions'][3*i:3*i+3]] or [v for m in meshes for v in m['positions']])
+    lo, hi = box['min'], box['max']
     center = translation([-(lo[0]+hi[0])/2, -(lo[1]+hi[1])/2, -(lo[2]+hi[2])/2])
     for mesh in meshes:
         mesh['positions'] = [v for i in range(0, len(mesh['positions']), 3) for v in point(center, mesh['positions'][i:i+3])]
+    model['shell_faces'] = shells
     return model, names, multiply(center, origin), meshes
 
 
 def preview(resources, identifier):
     item = resolve_fitting(resources,identifier)
     if item is None: raise ArmorError('Elegí una pieza de blindaje nativa disponible.')
-    _, _, _, meshes = fitting(resources, item)
+    model, _, _, meshes = fitting(resources, item)
+    # The piece is drawn in its own bone's axes, which modelers often turn
+    # (a gun_rot swaps them). This is how that bone sat on its own vehicle, so
+    # a new piece can start upright, as it was there, on any attachment bone.
+    native = model['bones'][item['bone']]['world'] if item['bone'] else identity()
     return {'meshes': meshes, 'item': {k: v for k, v in item.items() if k != 'contracts'},
-            'preview_valid': True, 'runtime_verified': False}
+            'native_frame': native, 'preview_valid': True, 'runtime_verified': False}
+
+
+def _shell_faces(resources, item, model):
+    """{mesh path: keep(triangle)} for a mantlet whose shell shares one mesh with
+    the breech, cradle or barrel sleeve (IS-4 gun_rot.ply, Pz.Bfw VI P). The
+    modeler's separate pieces are merged into one file: they are split into
+    connected pieces (shared vertices or positions), and each whole piece stays
+    when most of it lies in the mantlet's armor volumes (with a margin: hitboxes
+    are simplified) and its centre in no internal one (breech, barrel). Cutting
+    single triangles by volume left jagged plates and stray slivers.
+    Returns ({path: keep}, clean): clean is False when a sizeable piece is half
+    in and half out, so the shell cannot be told from the rest."""
+    if not item.get('single'): return {}, True, None
+    from .armor_view import read_volume_mesh, _box, _cylinder
+    from .geometry import node_matrix
+    bone = item['bone']
+    def frame(name):
+        node = model['volumes'][name]['node']
+        shape = next(n for n in node.children if n.head.casefold() in ('polyhedron', 'box', 'cylinder'))
+        kind = shape.head.casefold()
+        if kind == 'polyhedron':
+            verts = read_volume_mesh(resources.read(resolve_path(item['model_path'], shape.args[0])))[0]
+        elif kind == 'box':
+            verts = _box([float(v) for v in shape.args[:3]])[0]
+        else:
+            verts = _cylinder(float(shape.args[0]), float(shape.args[1]))[0]
+        return inverse(node_matrix(node)), [min(v[k] for v in verts) for k in range(3)], [max(v[k] for v in verts) for k in range(3)]
+    def boxes(names):
+        found = []
+        for name in names:
+            try: found.append(frame(name))
+            except (StopIteration, KeyError, OSError, ValueError, IndexError): pass
+        return found
+    armor = boxes([n for n in item['volumes'] if n in model['volumes']])
+    internal = boxes([n for n, v in model['volumes'].items() if v['bone'] == bone and n not in item['volumes']])
+    if not armor: return {}, True, None
+    def inside(found, p, grow):
+        # The margin follows the volume's largest size: a mantlet hitbox is a
+        # thin plate while its shell (Tiger sleeve) reaches well beyond it.
+        for to_local, low, high in found:
+            q = point(to_local, p)
+            pad = grow*max(high[k]-low[k] for k in range(3)) + (0.5 if grow else 0)
+            if all(low[k] - pad <= q[k] <= high[k] + pad for k in range(3)):
+                return True
+        return False
+    result, clean, kept_total, all_total, kept_area = {}, True, 0, 0, 0.0
+    # The armor's own face: what a real shell must roughly cover (a lone collar
+    # ring or a few bolts left behind by a cradle do not).
+    face = sum(sorted(high[k]-low[k] for k in range(3))[1]*sorted(high[k]-low[k] for k in range(3))[2] for _, low, high in armor)
+    for ref in model['bones'][bone]['assets']:
+        path = resolve_path(item['model_path'], ref)
+        try: mesh = read_mesh(resources.read(path))
+        except (KeyError, OSError, ValueError): continue
+        positions, indices = mesh['positions'], mesh['indices']
+        count = len(positions)//3
+        # Union-find over vertices: shared index or the same position (UV seams
+        # duplicate vertices inside one modelled piece).
+        parent = list(range(count))
+        def find(v):
+            while parent[v] != v:
+                parent[v] = parent[parent[v]]; v = parent[v]
+            return v
+        def union(a, b):
+            a, b = find(a), find(b)
+            if a != b: parent[b] = a
+        seen = {}
+        for v in range(count):
+            key = tuple(round(x, 3) for x in positions[3*v:3*v+3])
+            if key in seen: union(seen[key], v)
+            else: seen[key] = v
+        for t in range(len(indices)//3):
+            a, b, c = indices[3*t:3*t+3]; union(a, b); union(b, c)
+        pieces = {}
+        for t in range(len(indices)//3):
+            pieces.setdefault(find(indices[3*t]), []).append(t)
+        triangles = len(indices)//3
+        keep = [False]*triangles
+        for members in pieces.values():
+            vertices = {i for t in members for i in indices[3*t:3*t+3]}
+            points = [positions[3*v:3*v+3] for v in vertices]
+            share = sum(inside(armor, p, 0.25) for p in points)/len(points)
+            # Mostly inside the breech or barrel volumes: that piece. A barrel
+            # cylinder runs through the mantlet's centre, so the centre alone
+            # proves nothing.
+            inner = sum(inside(internal, p, 0) for p in points)/len(points)
+            # A small loose piece (coaxial MG, sight rod, barrel stub, cradle
+            # bracket) must sit on the hitbox itself; only a large piece (the
+            # Tiger's sleeve) may reach out through the wide margin.
+            tight = sum(inside(armor, p, 0.05) for p in points)/len(points)
+            size = sorted(max(p[k] for p in points) - min(p[k] for p in points) for k in range(3))
+            rod = size[2] >= 4*max(size[1], 1e-6)  # a coaxial or sight barrel poking out
+            if inner >= 0.5 or (len(members) < 0.2*triangles and (tight < 0.3 or rod)):
+                chosen = []
+            elif share >= 0.6:
+                chosen = members
+            elif share > 0.2:
+                # One piece holds shell and breech (Sherman, Panther): only
+                # triangles wholly in an internal volume go. That cut runs
+                # inside the turret, never across the mantlet's face.
+                chosen = [t for t in members if not all(inside(internal, positions[3*i:3*i+3], 0) for i in indices[3*t:3*t+3])]
+            else:
+                chosen = []  # outside the armor: sleeve, cradle, stray slivers
+            for t in chosen: keep[t] = True
+            if chosen:
+                for t in chosen:
+                    a, b, c = (positions[3*i:3*i+3] for i in indices[3*t:3*t+3])
+                    u, w = [b[k]-a[k] for k in range(3)], [c[k]-a[k] for k in range(3)]
+                    cross = (u[1]*w[2]-u[2]*w[1], u[2]*w[0]-u[0]*w[2], u[0]*w[1]-u[1]*w[0])
+                    kept_area += math.sqrt(sum(x*x for x in cross))/2
+        kept_total += sum(keep); all_total += triangles
+        if not all(keep):
+            result[path] = keep
+    if all_total and (kept_total == 0 or (face > 0 and kept_area < SHELL_COVERAGE*face)):
+        clean = False
+    return result, clean, (kept_area/face if face else None)
+
+
+SHELL_COVERAGE = 0.5  # kept surface / armor face: measured on the catalog's mantlets
+
+
+def _static_piece(node, names):
+    """A fitting is fixed armor: no joint, and only the bones it is made of
+    (a mantlet's elevation joint loses its barrel and its revolute axis)."""
+    for bone in list(node.walk('bone')):
+        for child in list(bone.children):
+            if child.head.casefold() == 'bone' and bone_name(child) not in names:
+                bone.remove(child)
+        if len(bone.atoms) > 2 and bone.atoms[1].value.casefold() == 'revolute':
+            bone.items.remove(bone.atoms[1])
 
 
 def apply(resources, root, model, value, assets, diagnostics):
@@ -297,10 +574,14 @@ def apply(resources, root, model, value, assets, diagnostics):
     reserved = set(final['bones']) | set(final['volumes'])
     claimed = {row['serial'] for row,_ in rows if 'serial' in row}
     used = set()
+    fittings = {}
     for i, (row, item) in enumerate(rows):
         if row['parent'] not in hosts:
             raise ArmorError('El punto de fijación del blindaje ya no existe en este vehículo.')
-        source, names, centered, _ = fitting(resources, item)
+        key = (item['model_path'], item['bone'])
+        if key not in fittings:
+            fittings[key] = fitting(resources, item)[:3]
+        source, names, centered = fittings[key]
         serial = row.get('serial')
         if serial is None or serial in used or any(n.startswith('mw_armor_'+str(serial)+'_') for n in reserved):
             serial = 0
@@ -317,8 +598,11 @@ def apply(resources, root, model, value, assets, diagnostics):
         roots = [n for n in names if source['bones'][n]['parent'] not in names]
         for n in sorted(roots):
             original = source['bones'][n];node = original['node'].clone()
+            _static_piece(node, names)
             _set_matrix(node, multiply(centered, original['world']))
             _rename_bone_refs(node, mapping)
+            for path, keep in source.get('shell_faces', {}).items():
+                assets.mesh_filters[(path, owner)] = keep
             for child in list(node.walk()):
                 for p in list(child.children):
                     if p.head.casefold() in ('parameters', 'animation', 'limits', 'speed', 'speed2'): child.remove(p)

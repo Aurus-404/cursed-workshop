@@ -9,21 +9,13 @@ from .geometry import descendants, is_carried_weapon, whole_model_mount
 def apply_native_poses(model, spec, *, root=None, wreck=False):
     """Adjust existing owned branches without transplanting weapons or crew."""
     from .compiler import _set_matrix, _hull_system
-    from .geometry import replaceable_mounts, point, translation, multiply, inverse
+    from .geometry import replaceable_mounts, editable_mounts, point, translation, multiply, inverse
     from .pivots import pose_matrix
     if not isinstance(spec,dict) or len(spec)>16:
         raise ValueError('La selección de módulos instalados no es válida.')
     candidates=set(replaceable_mounts(model))
-    if root is not None:
-        from .gun_assembly import weapon_link
-        for weaponry in root.find_all('Weaponry'):
-            for place in weaponry.find_all('place'):
-                name=weapon_link(place,model)
-                while name in model['bones']:
-                    bone=model['bones'][name]
-                    if bone['parent'] and bone['node'].args[0].casefold()=='revolute':candidates.add(name)
-                    name=bone['parent']
-    top={n for n in candidates if not any(n!=p and n in descendants(model['bones'],p) for p in candidates)}
+    top=set(editable_mounts(model, root)) if root is not None else {
+        n for n in candidates if not any(n!=p and n in descendants(model['bones'],p) for p in candidates)}
     for mount,pose in spec.items():
         if wreck and mount not in model['bones']:continue
         if mount not in model['bones'] or (not wreck and mount not in top):

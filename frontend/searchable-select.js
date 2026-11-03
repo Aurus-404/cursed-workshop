@@ -1,4 +1,5 @@
 import {t} from './i18n.js';
+import {favorites,toggleFavorite} from './favorites.js';
 
 // A long <select> opens as a list with a search box fixed on top: typing
 // filters the list at once. The native <select> stays in the page (hidden) as
@@ -9,7 +10,9 @@ import {t} from './i18n.js';
 // The option under the pointer (or the keyboard) is announced with a bubbling
 // 'part-hover' event ({detail:{value}}, null when it ends), which the 3D view
 // uses to mark the part a list picks.
-const LIMIT=400,WIDTH=340;
+// Long lists (armor, MGs, supports, bones...) let the player star options (the
+// star, or Ctrl+D on the active one) and show only the starred ones.
+const LIMIT=400,WIDTH=340,STARS_FROM=8;
 const fold=text=>String(text||'').normalize('NFD').replace(/[̀-ͯ]/g,'').toLocaleLowerCase();
 const VALUE=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value');
 const INDEX=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'selectedIndex');
@@ -53,8 +56,29 @@ export function searchableSelect(select){
   const search=document.createElement('input');search.type='search';search.className='ss-search';search.autocomplete='off';
   const list=document.createElement('ul');list.className='ss-list';list.setAttribute('role','listbox');list.id=(select.id||`ss-generated-${++generatedId}`)+'-ss-list';
   const more=document.createElement('div');more.className='ss-more';
-  pop.append(search,list,more);document.body.append(pop);
-  let rows=[],active=-1,hovered;
+  const head=document.createElement('div');head.className='ss-head';
+  const only=document.createElement('button');only.type='button';only.className='ss-only';only.setAttribute('aria-pressed','false');
+  only.onmousedown=event=>event.preventDefault();
+  head.append(search,only);pop.append(head,list,more);document.body.append(pop);
+  let rows=[],active=-1,hovered,onlyStarred=false;
+  const starrable=()=>!!select.id&&select.options.length>=STARS_FROM;
+  function star(index){
+    const option=rows[index];if(!option||!starrable()||option.value==='')return;
+    toggleFavorite(select.id,option.value);
+    if(onlyStarred){const top=list.scrollTop;paint(false);list.scrollTop=top;}else{markStar(list.children[index],option);filterButton(favorites(select.id));}
+  }
+  function filterButton(starred){
+    const stars=starrable(),filtering=stars&&onlyStarred;only.classList.toggle('hidden',!stars);
+    only.setAttribute('aria-pressed',String(filtering));only.classList.toggle('active',filtering);
+    only.textContent=(filtering?'★ ':'☆ ')+t('Favoritos')+(starred.size?` (${starred.size})`:'');
+    only.title=t('Mostrar solo favoritos');
+  }
+  function markStar(li,option){
+    const mark=li?.querySelector('.ss-star');if(!mark)return;
+    const on=favorites(select.id).has(option.value);
+    mark.textContent=on?'★':'☆';mark.classList.toggle('on',on);mark.title=t(on?'Quitar de favoritos':'Marcar como favorito');
+    li.setAttribute('aria-label',option.text+(on?' · '+t('Favorito'):''));
+  }
   const hover=value=>{if(value===hovered)return;hovered=value;select.dispatchEvent(new CustomEvent('part-hover',{bubbles:true,detail:{value}}));};
 
   function refresh(){
@@ -66,17 +90,26 @@ export function searchableSelect(select){
     // A choice may disable the list while its tool works: keep it open, inert.
     pop.classList.toggle('ss-busy',button.disabled);
   }
-  function paint(){
+  function paint(scroll=true){
     const query=fold(search.value).split(/\s+/).filter(Boolean);
+    const stars=starrable(),starred=stars?favorites(select.id):new Set(),filtering=stars&&onlyStarred;
+    filterButton(starred);
     const matches=[...select.options].filter(o=>!o.disabled||o.value===VALUE.get.call(select))
+      .filter(o=>!filtering||starred.has(o.value))
       .filter(o=>{const hay=fold(o.text+' '+o.value);return query.every(q=>hay.includes(q));});
     rows=matches.slice(0,LIMIT);
-    list.replaceChildren(...rows.map((o,i)=>{const li=document.createElement('li');li.textContent=o.text;li.id=`${list.id}-${i}`;
+    list.replaceChildren(...rows.map((o,i)=>{const li=document.createElement('li');li.id=`${list.id}-${i}`;
+      const name=document.createElement('span');name.className='ss-text';name.textContent=o.text;li.append(name);
+      if(stars&&o.value!==''){const mark=document.createElement('span');mark.className='ss-star';mark.setAttribute('aria-hidden','true');
+        mark.onclick=event=>{event.stopPropagation();star(i);};li.append(mark);markStar(li,o);}
       li.setAttribute('role','option');li.setAttribute('aria-selected',String(o.selected));if(o.selected)li.classList.add('selected');
       li.onmousedown=event=>event.preventDefault();li.onclick=()=>choose(i);li.onmouseenter=()=>hover(o.value);return li;}));
-    more.textContent=matches.length>LIMIT?t('Hay más resultados: seguí escribiendo para acotar.'):matches.length?'':t('Sin resultados.');
-    activate(Math.max(0,rows.findIndex(o=>o.selected)));
+    more.textContent=matches.length>LIMIT?t('Hay más resultados: seguí escribiendo para acotar.'):matches.length?'':
+      filtering&&!starred.size?t('Sin favoritos en esta lista: tocá la estrella de una opción.'):t('Sin resultados.');
+    if(scroll)activate(Math.max(0,rows.findIndex(o=>o.selected)));
+    else activate(Math.min(active,rows.length-1));
   }
+  only.onclick=()=>{onlyStarred=!onlyStarred;paint();search.focus();};
   function activate(index){
     active=rows.length?Math.max(0,Math.min(index,rows.length-1)):-1;
     for(const [i,li] of [...list.children].entries())li.classList.toggle('active',i===active);
@@ -132,6 +165,7 @@ export function searchableSelect(select){
     else if(event.key==='PageDown'){event.preventDefault();activate(active+10);}
     else if(event.key==='PageUp'){event.preventDefault();activate(active-10);}
     else if(event.key==='Enter'){event.preventDefault();choose(active);}
+    else if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='d'){event.preventDefault();star(active);}
     else if(event.key==='Escape'){event.preventDefault();event.stopPropagation();close(true);}
     else if(event.key==='Tab')close();
   };

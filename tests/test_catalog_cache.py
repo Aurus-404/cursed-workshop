@@ -14,6 +14,21 @@ class View:
 
 
 class CatalogCacheTests(unittest.TestCase):
+    def test_packaged_catalog_identity_uses_backend_hash_with_legacy_fallback(self):
+        for metadata,expected in [({'source_sha256':'a'*64,'catalog_code_sha256':'b'*64},'b'*64),
+                                  ({'source_sha256':'a'*64},'a'*64)]:
+            with patch.object(catalog_cache,'_CODE',None),patch('workshop.build_info.read_build_info',return_value=metadata):
+                self.assertEqual(catalog_cache.code_identity(),expected)
+
+    def test_catalog_source_identity_changes_for_backend_code_but_not_docs_or_line_endings(self):
+        from workshop.build_info import source_code_sha256
+        path=self.folder/'reader.py';path.write_bytes(b'first\r\n')
+        initial=source_code_sha256(self.folder)
+        path.write_bytes(b'first\n');(self.folder/'README.md').write_text('new documentation')
+        self.assertEqual(source_code_sha256(self.folder),initial)
+        path.write_bytes(b'second\n')
+        self.assertNotEqual(source_code_sha256(self.folder),initial)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.folder = Path(self.temp.name)
@@ -51,10 +66,21 @@ class CatalogCacheTests(unittest.TestCase):
     def test_a_changed_mod_or_a_damaged_file_reads_the_game_again(self):
         catalog_cache.load(View('a'), 'test', self.folder)
         catalog_cache.load(View('b'), 'test', self.folder)
-        (self.folder / 'test.json').write_text('{"key": ', encoding='utf-8')
+        saved = self.folder / f"test-{catalog_cache.stack_key(View('b'))[:24]}.json"
+        saved.write_text('{"key": ', encoding='utf-8')
         catalog_cache.load(View('b'), 'test', self.folder)
         self.assertEqual(self.calls, ['a', 'b', 'b'])
-        self.assertEqual(json.loads((self.folder / 'test.json').read_text(encoding='utf-8'))['value'][0]['id'], 'plate')
+        self.assertEqual(json.loads(saved.read_text(encoding='utf-8'))['value'][0]['id'], 'plate')
+
+    def test_switching_between_mod_stacks_reuses_each_saved_catalog(self):
+        (self.folder / 'test.json').write_text('{"key": "old layout"}', encoding='utf-8')
+        for fingerprint in ('with mace', 'vanilla', 'with mace', 'vanilla'):
+            catalog_cache.load(View(fingerprint), 'test', self.folder)
+        self.assertEqual(self.calls, ['with mace', 'vanilla'])
+        self.assertFalse((self.folder / 'test.json').exists())
+        for fingerprint in 'cdefg':
+            catalog_cache.load(View(fingerprint), 'test', self.folder)
+        self.assertEqual(len(list(self.folder.glob('test-*.json'))), catalog_cache.STACKS_KEPT)
 
     def test_new_tool_code_reads_the_game_again(self):
         catalog_cache.load(View('a'), 'test', self.folder)

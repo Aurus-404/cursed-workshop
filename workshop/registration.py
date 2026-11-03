@@ -311,6 +311,25 @@ def _load_include_graph(index, start, *, generated=False):
     checkpoint()
     cache = index.__dict__.setdefault('_registration_graphs', {})
     cache_key=(start,'stored') if original is not index else start
+    # Generated entity stages retain the native include graph. Reuse its
+    # parsed records only when every dependency still resolves to the exact
+    # source entry; an overridden include keeps a stage-local graph instead.
+    owner = original.catalog_source() if hasattr(original, 'catalog_source') else original
+    shared_cache = authority = shared_key = None
+    if owner is not original:
+        authority = owner.registration_sources() if not generated else owner
+        shared_cache = authority.__dict__.setdefault('_registration_graphs', {})
+        shared_key = (start, 'stored') if owner is not authority else start
+
+    def same_sources(view, provenance):
+        try:
+            return all(view.resolve(source['path']).as_dict() == source['source'] for source in provenance)
+        except (FileNotFoundError, ValueError):
+            return False
+
+    if cache_key not in cache and shared_cache is not None and shared_key in shared_cache:
+        records, provenance = shared_cache[shared_key]
+        if same_sources(index, provenance): cache[cache_key] = records, provenance
     if cache_key in cache:
         records, provenance = cache[cache_key]
         # Reads enforce the resource index's loose-file change guards.
@@ -352,6 +371,8 @@ def _load_include_graph(index, start, *, generated=False):
                 path=normalize_path(str(PurePosixPath(start).parent/include.args[0]))
                 if index.exists(path):visit(path)
     cache[cache_key] = (records, provenance)
+    if shared_cache is not None and same_sources(authority, provenance):
+        shared_cache.setdefault(shared_key, (records, provenance))
     return records, provenance
 
 
@@ -678,12 +699,19 @@ def _entity_sound_record(index, recipient, donor, new_id, metadata=None):
         result.append(child)
         retained.append(child.head + " " + " ".join(child.args))
     warnings = []
+    diagnostics = []
     if donor_node is None:
         warnings.append(f"Donor {donor} has no entity-specific interaction record in the effective game files; "
                         "its native weapon behavior and engine defaults are retained without a custom donor sound event.")
     elif default_weapon_sound:
         warnings.append(f"Donor {donor} has no vehicle weapon sound event or mountable weapon; "
                         "its weapon keeps the sound of its own definition.")
+    if donor_node is None or default_weapon_sound:
+        # Keep the diagnostic with the authority that produced it. Composite
+        # designs can seed interactions from a roof turret or the receiver,
+        # while their top-level donor identifies a later gun replacement.
+        diagnostics.append({"code": "donor_interaction_defaults", "level": "warning",
+                            "donor": donor, "message": warnings[-1]})
     additional_donor = [node for node in don_children if node.head.casefold() == "on" and node.args
                         and node.args[0] not in ("add_movement_sound", "add_weapon_sound")]
     if additional_donor:
@@ -692,12 +720,14 @@ def _entity_sound_record(index, recipient, donor, new_id, metadata=None):
                     "weapon_playback": ("engine_default" if donor_node is None or default_weapon_sound else
                                         "native_stuff" if native_weapons else "vehicle_event"),
                     "native_weapons": native_weapons,
+                    "diagnostics": diagnostics,
                     "source_hashes": provenance, "chassis_events": retained}, warnings
 
 
 def _gun_entity_sound_record(index,recipient,donor,new_id,metadata):
     records=metadata.get('gun_assemblies') or [metadata['gun_assembly']]
-    seed=_entity_sound_record(index,recipient,metadata['draft_turret_donor'],new_id) if metadata.get('draft_turret_donor') else None
+    authority = metadata.get('interaction_donor') or metadata.get('draft_turret_donor')
+    seed=_entity_sound_record(index,recipient,authority,new_id) if authority else None
     for contract in records:
         seed=_one_gun_entity_sound_record(index,recipient,contract['donor'].get('template') or donor,new_id,{**metadata,'gun_assembly':contract},seed)
     if len(records)>1:
@@ -808,7 +838,7 @@ def _expand_macros(node, defines, depth=0):
     return result
 
 
-def _hide_from_shop(entry, defines, side):
+def _hide_from_shop(entry, defines, side, armies=()):
     """Keep a roster entry in the Conquest unit set but out of every shop.
 
     The shop lists units tagged with the player's army; owned squads only need
@@ -820,13 +850,15 @@ def _hide_from_shop(entry, defines, side):
     tags = list(expanded.walk("tags"))
     if not tags:
         raise RegistrationError("Roster entry has no tags; cannot keep it out of the shop")
+    hidden={side.casefold(),*(army.casefold() for army in armies)}
     for node in tags:
-        values = [value for value in node.args[0].split() if value.casefold() != side.casefold()] if node.args else []
+        values = [value for value in node.args[0].split() if value.casefold() not in hidden] if node.args else []
         node.atoms[1].set(" ".join(values))
     return expanded
 
 
 SHOP_SHARE = 0.75  # James Rommel: a Pz.III (40) + Pz.IV (40) hybrid costs 60
+SHOP_POLICY = 'player_any_campaign'
 
 
 def _last_number(entry, head):
@@ -867,12 +899,18 @@ def shop_prices(index):
     return _ShopPrices(index)
 
 
-def shop_offer(index, parts, recipes=None, share=SHOP_SHARE, prices=None):
-    """Price and research stage of a workshop vehicle sold in the shop.
+def shop_cost(value):
+    """The engine stores whole, nonnegative resource costs."""
+    if type(value) is not int or not 0<=value<=2147483647:
+        raise RegistrationError('El precio debe ser un número entero de 0 a 2147483647.')
+    return value
+
+
+def shop_offer(index, parts, recipes=None, share=SHOP_SHARE, prices=None, cost=None):
+    """Suggested price, optional player override, and immediate availability.
 
     The price is a share of what its parts cost (each part's cheapest army),
-    rounded like the game to multiples of 5; it unlocks at the latest research
-    stage among its parts. A workshop part counts as the native vehicles it is
+    rounded like the game to multiples of 5. A workshop part counts as the native vehicles it is
     made of. Parts with no roster entry of their own (tractors sold inside
     squads) add nothing and are listed as unpriced.
     """
@@ -894,10 +932,8 @@ def shop_offer(index, parts, recipes=None, share=SHOP_SHARE, prices=None):
             continue
         rows.append({"template": template, "cost": price[0], "stage": price[1]})
     total = sum(row["cost"] for row in rows) * share
-    cost = max(5, int(5 * round(total / 5))) if rows else 0
-    if not rows:
-        raise RegistrationError("None of the vehicle's parts is sold in the Conquest shop; it has no price to derive.")
-    return {"cost": cost, "stage": max(row["stage"] for row in rows), "share": share,
+    suggested = max(5, int(5 * round(total / 5))) if rows else 0
+    return {"cost": shop_cost(cost) if cost is not None else suggested, "suggested_cost":suggested, "stage": 1, "share": share,
             "parts": rows, "unpriced": unpriced}
 
 
@@ -919,14 +955,16 @@ def vehicle_parts(metadata):
     return [_source_id(part) for part in parts + donors if part]
 
 
-def _offer_in_shop(entry, offer, side):
-    """A roster entry sold in the army's shop at the derived price and stage."""
+def _offer_in_shop(entry, offer, side, armies=(), periods=()):
+    """Player purchase entry; AI recruitment remains in its native Lua pools."""
     for node in entry.walk("tags"):
         values = node.args[0].split() if node.args else []
-        if side.casefold() not in (value.casefold() for value in values):
-            values.insert(2 if len(values) >= 2 else len(values), side)
+        for tag in (side,*armies,*periods):
+            if tag.casefold() not in (value.casefold() for value in values):values.append(tag)
         node.atoms[1].set(" ".join(values))
-    for head, value in (("cost", offer["cost"]), ("research_stage", offer["stage"]), ("research_stage_max", 99)):
+    for condition in list(entry.find_all('conditions')):entry.remove(condition)
+    for head, value in (("cost", offer["cost"]), ("research_stage", 1), ("research_stage_max", 99),
+                        ("round_multiple",1),("not_for_player_sale",0),("not_for_sale",0)):
         nodes = list(entry.walk(head))
         for node in nodes:
             node.atoms[1].set(str(value))
@@ -1326,7 +1364,11 @@ def register_variant(index: ResourceIndex, compilation_result: dict, output_dir:
                        f"the roster entry of {donor} was used.")
     roster_source = entries[-1][0] if len(entries) == 1 else [path for path, _ in entries]
     variants = [_adapt_roster(roster, roster_owner, new_id, metadata) for _, roster in entries]
-    sound, sound_provenance, warnings = _entity_sound_record(index, recipient, donor, new_id, metadata)
+    sound, sound_provenance, warnings = _entity_sound_record(index, recipient, metadata.get('interaction_donor') or donor, new_id, metadata)
+    from .weapon_effects import install
+    if metadata.get('weapon_effects') and sound is None:
+        sound = block('{' + quote(new_id) + '}')
+    sound = install(sound, metadata.get('weapon_effects') or [], index)
     if metadata.get('commander_mg'):
         from .commander_mg import add_interactions
         if sound is None:
@@ -1343,6 +1385,11 @@ def register_variant(index: ResourceIndex, compilation_result: dict, output_dir:
         add_smoke_interactions(sound, metadata.get('smoke_launchers'))
     if metadata.get('smoke_launchers'):
         warnings.append('Added smoke launchers: native discharge, inventory consumption and persistence require battle acceptance.')
+    if metadata.get('charge'):
+        from .point_fittings import add_charge_interactions
+        if sound is None:sound=block('{'+quote(new_id)+'}')
+        sound=add_charge_interactions(sound,metadata['charge'],index)
+        warnings.append('Demolition charge: native detonation and blastwave are registered; battle acceptance pending.')
     if sound is not None:_validate_interaction_events(index,sound)
     if roster_note:
         warnings.append(roster_note)
@@ -1351,9 +1398,15 @@ def register_variant(index: ResourceIndex, compilation_result: dict, output_dir:
     # Generated units exist only through workshop operations unless the player
     # put them up for sale.
     defines = _roster_defines(index)
+    # Player purchase filters come from native Conquest declarations. Generated
+    # IDs are never added to the AI's independent Lua Purchases pools.
+    records,_=_load_include_graph(index,'set/multiplayer/units/roster_conquest.set')
+    armies=sorted({side for _,record in records if (side:=_roster_side(record))})
+    periods=sorted({_macro_arguments(call)['period'] for _,record in records for call in record.walk()
+                    if call.opener=='(' and _macro_arguments(call).get('period')})
     offer = None
     if shop:
-        offer = shop_offer(index, shop["parts"], _assembly_recipes(index, output), shop.get("share", SHOP_SHARE))
+        offer = shop_offer(index, shop["parts"], _assembly_recipes(index, output), shop.get("share", SHOP_SHARE), cost=shop.get('cost'))
         if offer["unpriced"]:
             warnings.append("Not priced (no shop entry of their own): " + ", ".join(offer["unpriced"]) + ".")
     sides = [_macro_arguments(call).get("side") for roster in variants for call in roster.walk() if call.opener == "("]
@@ -1373,9 +1426,9 @@ def register_variant(index: ResourceIndex, compilation_result: dict, output_dir:
     if not side:
         raise RegistrationError("Cannot determine the chassis army to keep the variant out of the shop")
     if offer:
-        variants = [_offer_in_shop(_expand_macros(roster, defines), offer, _roster_side(roster) or side) for roster in variants]
+        variants = [_offer_in_shop(_expand_macros(variants[0], defines), offer, side, armies, periods)]
     else:
-        variants = [_hide_from_shop(roster, defines, _roster_side(roster) or side) for roster in variants]
+        variants = [_hide_from_shop(roster, defines, _roster_side(roster) or side, armies) for roster in variants]
     variants = [_resize_roster_crew(roster, metadata.get('crew_roles')) for roster in variants]
     # Reserve squads are named by army+breed+size, so several variants share
     # one. They live in a single shared file built from every manifest: one
@@ -1507,7 +1560,8 @@ def register_variant(index: ResourceIndex, compilation_result: dict, output_dir:
                   "warnings": warnings + ["Verify transplanted optics and aiming in-game."],
                   "runtime_verified": False}
     if offer:
-        provenance["shop"] = {"parts": list(shop["parts"]), "share": offer["share"], "offer": offer}
+        provenance["shop"] = {"parts": list(shop["parts"]), "share": offer["share"], "offer": offer, "policy":SHOP_POLICY}
+        if shop.get('cost') is not None:provenance['shop']['cost']=shop_cost(shop['cost'])
     _write(output, "mod.info", info)
     _write(output, "resource/set/registry/unit.reg", unit_doc.render())
     _write(output, "resource/set/tp_control.set", tp_doc.render())
@@ -1518,7 +1572,17 @@ def register_variant(index: ResourceIndex, compilation_result: dict, output_dir:
     _write(output, "resource/set/multiplayer/units/" + namespace + ".set", "\n".join(r.render() for r in variants) + "\n")
     if reserve_lines:
         _write(output, "resource/set/multiplayer/units/" + RESERVES + ".set", "\n".join(reserve_lines) + "\n")
-    _write_text_tables(output, f"modular_workshop_{new_id}", [(key, label, label) for key, label in locale_rows])
+    texts=[(key,label,label) for key,label in locale_rows]
+    roles=[]
+    for mount in (metadata.get('rider_mgs') or {}).get('mounts',[]):
+        roles.append((mount['place'],'Passenger machine gunner','Ametrallador pasajero'))
+    for seat in (metadata.get('passenger_seats') or {}).get('added',[]):
+        roles.append((seat['place'],'Passenger','Pasajero'))
+    captions={}
+    for role,english,spanish in roles:
+        for key in (role,re.sub(r'\d+$','',role)):captions['crewbar/'+key]=(english,spanish)
+    texts.extend((key,*labels) for key,labels in sorted(captions.items()))
+    _write_text_tables(output, f"modular_workshop_{new_id}", texts)
     if reserve_lines:
         _write_text_tables(output, "modular_workshop__reserves",
                            [("desc/squad/" + row["template"], "Reserve crew", "Tripulación de reserva") for row in shared_reserves])
@@ -1541,8 +1605,5 @@ def register_variant(index: ResourceIndex, compilation_result: dict, output_dir:
     compilation_result.setdefault("files", []).extend(["mod.info", "resource/set/registry/unit.reg", "resource/set/tp_control.set",
                                                       "resource/set/interaction_entity/entity.set", "resource/set/multiplayer/units/roster_conquest.set"])
     compilation_result["registration"] = provenance
-    if sound_provenance["weapon_playback"] == "engine_default":
-        compilation_result.setdefault("diagnostics", []).append({
-            "code": "donor_interaction_defaults", "level": "warning", "donor": donor,
-            "message": next(warning for warning in warnings if warning.startswith(f"Donor {donor} has no "))})
+    compilation_result.setdefault("diagnostics", []).extend(copy.deepcopy(sound_provenance.get("diagnostics", [])))
     return provenance

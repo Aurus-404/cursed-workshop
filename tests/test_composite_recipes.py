@@ -143,7 +143,7 @@ class CompositeRecipeTests(unittest.TestCase):
                         self.assertIn(rebuilt['metadata']['camera_bone_mapping']['AZIMUTH'],final['bones'],
                             'an accessory edit must keep the seed weapon camera and exported optical socket')
                         root_def=parse((root/'reopened/resource'/rebuilt['definition_path']).read_bytes()).find('game_entity')
-                        slots=[p.args[0] for w in root_def.find_all('Weaponry') for p in w.find_all('place') if p.args and p.args[0].startswith('mgun_cmd')]
+                        slots=[p.args[0] for w in root_def.find_all('Weaponry') for p in w.find_all('place') if p.find('gunner') and p.find('gunner').args==['commander']]
                         self.assertEqual(len(slots),1,'the inherited commander MG must not be added twice')
                     finally:child.close()
                     # Add another fitting to the already compiled vehicle, retaining
@@ -155,7 +155,7 @@ class CompositeRecipeTests(unittest.TestCase):
                     self.assertIn('mw_armor_0_root',model['bones']);self.assertIn('mw_armor_1_root',model['bones'])
                     self.assertIn('cw_smoke_0_root',model['bones'])
                     text=(root/'chained/resource'/chained['definition_path']).read_text()
-                    self.assertIn('donor_weapon',text);self.assertIn('mgun_cmd',text)
+                    self.assertIn('donor_weapon',text);self.assertIn('{user "mgun1"}',text)
                     self.assertFalse(chained['runtime_verified'])
                     # Rebuild both recipe generations through the actual app. Only
                     # roster registration is a boundary double in this fixture.

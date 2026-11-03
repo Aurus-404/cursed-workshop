@@ -7,6 +7,7 @@ outputs. Original saves are read, hashed and archived, never replaced.
 from __future__ import annotations
 
 import csv
+from collections import deque
 import errno
 import hashlib
 from contextlib import nullcontext
@@ -163,6 +164,31 @@ def _no_symlink(path: Path) -> None:
             break
         if item.is_symlink() or (hasattr(item, "is_junction") and item.is_junction()):
             raise TransactionError(f"Symlink/junction destinations are unsupported: {item}")
+
+
+def copy_tree(source, destination, *, ignore=None):
+    """Copy a tree with bounded concurrent I/O; join every writer on failure.
+
+    Publication callers still verify source/output hashes and retain their
+    previous addon until that succeeds. Directory traversal and metadata keep
+    copytree's behavior; only independent file copies run concurrently.
+    """
+    from .cancellation import checkpoint
+    pending = deque(); errors = []
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        def finish_file():
+            future, src, dst = pending.popleft()
+            try: future.result()
+            except OSError as error: errors.append((os.fspath(src), os.fspath(dst), str(error)))
+        def copy_file(src, dst):
+            checkpoint()
+            pending.append((pool.submit(shutil.copy2, src, dst), src, dst))
+            if len(pending) >= 32: finish_file()
+            return dst
+        result = shutil.copytree(source, destination, ignore=ignore, copy_function=copy_file)
+        while pending: finish_file()
+        if errors: raise shutil.Error(errors)
+    return result
 
 
 def _write_file(path: Path, data: bytes, *, exclusive: bool = True, durable: bool = True) -> None:
@@ -626,7 +652,7 @@ def _archive_previous_addon(path: Path, journal: dict, backup_addon: Path, op: P
             publication['archive_method']='rename'
         except OSError as error:
             if error.errno!=errno.EXDEV and getattr(error,'winerror',None)!=17:raise
-            shutil.copytree(long_path(backup_addon),long_path(archive))
+            copy_tree(long_path(backup_addon),long_path(archive))
             publication['archive_method']='copy'
         if _tree_hashes(archive) != expected:
             raise TransactionError("Archived previous addon failed hash validation")

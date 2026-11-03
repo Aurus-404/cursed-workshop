@@ -17,7 +17,13 @@ export const ARMOR_EN={
  'La posición o el giro del blindaje no es válido.':'Invalid armor position or rotation.',
  'No se pudo cargar el modelo del blindaje.':'The armor model could not be loaded.',
  'El punto de fijación del blindaje ya no existe en este vehículo.':'The armor attachment point no longer exists on this vehicle.',
- 'El vehículo ya contiene ese blindaje. Editá su receta original.':'The vehicle already contains that armor. Edit its original recipe.'
+ 'El vehículo ya contiene ese blindaje. Editá su receta original.':'The vehicle already contains that armor. Edit its original recipe.',
+ 'Manteletes':'Gun mantlets','Faldones laterales':'Side skirts','Escudos y chapas':'Shields and plates','Placas':'Plates','Accesorios':'Accessories',
+ 'Nación':'Nation','Todas las naciones':'All nations','Alemania':'Germany','Unión Soviética':'Soviet Union','Reino Unido':'United Kingdom',
+ 'Estados Unidos':'United States','Japón':'Japan','Finlandia':'Finland','Francia':'France','Suecia':'Sweden','Italia':'Italy','Hungría':'Hungary',
+ 'Polonia':'Poland','Rumanía':'Romania','Otras':'Other','Orden':'Order','Más útiles primero':'Most useful first','De la A a la Z':'A to Z',
+ 'Más gruesos primero':'Thickest first','variantes iguales':'identical variants','Mantelete del cañón':"Gun mantlet",
+ 'Se fija a la elevación del cañón y sube y baja con él. Para cambiar el mantelete, quitá el original en Cambiar cañón.':'Attached to the gun elevation, it rises and falls with the gun. To replace the mantlet, leave the original out in Change gun.'
 };
 export const ARMOR_ZH={
  'Ese punto de fijación cambia la escala o refleja la pieza. Elegí otro.':'该固定点会改变部件比例或使其镜像，请选择其他固定点。',
@@ -30,5 +36,10 @@ export const ARMOR_ZH={
  'Conserva material, espesor y resistencia nativos. Arena, madera y orugas no equivalen a ese espesor de acero. No aumenta el blindaje de todo el casco.':'保留原生材质、厚度和抗弹系数。沙袋、木材及履带并不等同于相同厚度的钢板，且不会增加整个车体的装甲厚度。',
  'Experimental: penetración, daño y persistencia pendientes de prueba en batalla. La masa y movilidad del chasis se conservan.':'实验功能：穿透、损伤及状态保存仍需实战测试。保留车体原生质量与机动性。',
  'Leer blindajes disponibles':'读取可用装甲','Cargar pieza de blindaje':'加载装甲部件','No se pudo resolver el blindaje nativo de esa pieza.':'无法解析该部件的原生装甲。', 'Elegí una pieza de blindaje nativa disponible.':'请选择可用的原生装甲部件。','Elegí un punto de fijación válido para el blindaje.':'请选择有效的装甲固定点。','La posición o el giro del blindaje no es válido.':'装甲位置或旋转无效。','No se pudo cargar el modelo del blindaje.':'无法加载装甲模型。',
- 'El punto de fijación del blindaje ya no existe en este vehículo.':'该车辆上已不存在此装甲固定点。','El vehículo ya contiene ese blindaje. Editá su receta original.':'车辆已包含该装甲，请编辑其原始配方。'
+ 'El punto de fijación del blindaje ya no existe en este vehículo.':'该车辆上已不存在此装甲固定点。','El vehículo ya contiene ese blindaje. Editá su receta original.':'车辆已包含该装甲，请编辑其原始配方。',
+ 'Manteletes':'炮盾','Faldones laterales':'侧裙板','Escudos y chapas':'护盾与钢板','Placas':'装甲板','Accesorios':'附件',
+ 'Nación':'国家','Todas las naciones':'全部国家','Alemania':'德国','Unión Soviética':'苏联','Reino Unido':'英国','Estados Unidos':'美国','Japón':'日本',
+ 'Finlandia':'芬兰','Francia':'法国','Suecia':'瑞典','Italia':'意大利','Hungría':'匈牙利','Polonia':'波兰','Rumanía':'罗马尼亚','Otras':'其他',
+ 'Orden':'排序','Más útiles primero':'最实用优先','De la A a la Z':'A to Z','Más gruesos primero':'最厚优先','variantes iguales':'个相同变体','Mantelete del cañón':'火炮炮盾',
+ 'Se fija a la elevación del cañón y sube y baja con él. Para cambiar el mantelete, quitá el original en Cambiar cañón.':'固定在火炮俯仰轴上，随火炮一起升降。要更换炮盾，请在“更换火炮”中去掉原有炮盾。'
 };

@@ -16,6 +16,7 @@ export async function loadUISettings(){
   // Server is authoritative; missing values use defaults, not another origin's cache.
   uiStorage.setItem('cw.appearance',JSON.stringify({theme:saved.theme,size:saved.size,motion:saved.motion,help:saved.help}));
   uiStorage.setItem('cw.completionSound',saved.sound===false?'off':'on');
+  uiStorage.setItem('cw.favorites',JSON.stringify(saved.favorites||{}));
 }
 export function saveUISettings(patch){
   // Keep rapid changes ordered, and let the next user action recover after an error.

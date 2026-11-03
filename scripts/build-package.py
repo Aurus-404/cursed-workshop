@@ -9,6 +9,8 @@ import sys
 from release_utils import source_digest
 
 ROOT=Path(__file__).resolve().parents[1]
+sys.path.insert(0,str(ROOT))
+from workshop.build_info import source_code_sha256
 if len(sys.argv)>1:
     raise SystemExit("Build without arguments. The only local package is dist/CursedWorkshop/CursedWorkshop.exe.")
 # Fail before PyInstaller can clean the canonical folder if Windows has the EXE open.
@@ -25,6 +27,12 @@ if os.name == 'nt' and exe.exists():
     if handle == ctypes.c_void_p(-1).value:
         raise SystemExit('The canonical executable is open or not writable. Close CursedWorkshop.exe and retry; it has been preserved.')
     kernel.CloseHandle(handle)
+# Always compile the editable frontend before computing the package identity.
+# Reusing workshop/web from an earlier build silently ships old UI behavior.
+import shutil
+npm=shutil.which('npm.cmd' if os.name=='nt' else 'npm')
+if not npm:raise SystemExit('npm is required to build the current frontend. The executable has been preserved.')
+subprocess.run([npm,'run','build'],cwd=ROOT,check=True)
 sys.path.insert(0,str(ROOT/'.build-deps'))
 from PyInstaller.__main__ import run
 
@@ -72,6 +80,7 @@ def tank_icon(path: Path) -> Path:
 
 icon = tank_icon(ROOT/'build'/'modular_workshop.ico')
 info={'source_sha256':source_digest(ROOT),'source_digest_format':'paths-lengths-crlf-normalized-v1',
+      'catalog_code_sha256':source_code_sha256(ROOT/'workshop'),
       'built_utc':datetime.now(timezone.utc).isoformat(timespec='seconds')}
 try:
     info['revision']=subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True,stderr=subprocess.DEVNULL).strip()

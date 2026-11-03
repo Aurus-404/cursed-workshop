@@ -1,4 +1,5 @@
 import {vehicleStorage} from './vehicle-storage.js';
+import {shopEditor} from './shop-editor.js';
 import {pivotEditor as createPivotEditor,applyPose,poseMatrix} from './pivot-editor.js';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -6,10 +7,12 @@ import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { t, startI18n, lang, setLang } from './i18n.js';
 import {showAddonReadiness,installMessage} from './addon-readiness.js';
 import { portraitCamera, ICON_CAMERA } from './portrait-camera.js';
+import { gameCamera, gameRenderer, gameOrbit } from './game-view.js';
 import { commanderEditor } from './commander-mg.js';
 import { diagnosticUI } from './diagnostics.js';
 import {applyModelTextures,seatFrame,setSeatPoseOrigin,updateSeatFrames,configureModelTexture} from './model-geometry.js';
 import {weaponJointEditor} from './weapon-joints.js';
+import {mobilityEditor} from './mobility-editor.js';
 import {partHighlight} from './part-highlight.js';
 import {armorView} from './armor-view.js';
 import {weaponArcs} from './weapon-arcs.js';
@@ -37,6 +40,7 @@ import {editorHistory} from './editor-history.js';
 import {runJob} from './job-client.js';
 import {unitArtwork} from './unit-artwork.js';
 import {vehicleDesign} from './vehicle-design.js';
+import {designTemplates} from './design-templates.js';
 import {searchableSelects,moveSelectField} from './searchable-select.js';
 let inspector=null;
 
@@ -103,11 +107,11 @@ async function operation(path,body,label){return loading(label,()=>pollJob(path,
 
 const viewport=$('viewport');
 const scene=new THREE.Scene();scene.fog=new THREE.FogExp2(0x17252d,0.0012);
-const camera=new THREE.PerspectiveCamera(40,1,0.1,10000);camera.up.set(0,0,1);camera.position.set(240,-300,230);
-const renderer=new THREE.WebGLRenderer({antialias:true,alpha:true});renderer.setPixelRatio(Math.min(devicePixelRatio,2));renderer.setClearColor(0x19272e,0);renderer.outputColorSpace=THREE.SRGBColorSpace;
+const camera=gameCamera(new THREE.PerspectiveCamera(40,1,0.1,10000));camera.up.set(0,0,1);camera.position.set(240,300,230);
+const renderer=gameRenderer(new THREE.WebGLRenderer({antialias:true,alpha:true}));renderer.setPixelRatio(Math.min(devicePixelRatio,2));renderer.setClearColor(0x19272e,0);renderer.outputColorSpace=THREE.SRGBColorSpace;
 viewport.prepend(renderer.domElement);
-const orbit=new OrbitControls(camera,renderer.domElement);orbit.enableDamping=true;orbit.dampingFactor=.07;orbit.target.set(0,0,25);
-const light=new THREE.HemisphereLight(0xe1edf4,0x28301f,2.4);scene.add(light);const sun=new THREE.DirectionalLight(0xffedd5,3.1);sun.position.set(-120,-120,350);scene.add(sun);const fill=new THREE.DirectionalLight(0x86b8d5,1.1);fill.position.set(200,120,130);scene.add(fill);
+const orbit=gameOrbit(new OrbitControls(camera,renderer.domElement));orbit.enableDamping=true;orbit.dampingFactor=.07;orbit.target.set(0,0,25);
+const light=new THREE.HemisphereLight(0xe1edf4,0x28301f,2.4);scene.add(light);const sun=new THREE.DirectionalLight(0xffedd5,3.1);sun.position.set(-120,120,350);scene.add(sun);const fill=new THREE.DirectionalLight(0x86b8d5,1.1);fill.position.set(200,-120,130);scene.add(fill);
 const grid=new THREE.GridHelper(1600,80,0x445b67,0x2b424f);grid.rotation.x=Math.PI/2;grid.position.z=-.15;grid.material.transparent=true;grid.material.opacity=.42;scene.add(grid);
 const originAxes=new THREE.AxesHelper(60);originAxes.visible=false;scene.add(originAxes);
 const designFrame=new THREE.Group();scene.add(designFrame);
@@ -137,7 +141,11 @@ function jointLimits(part,joint){const own=state.transform.joint_limits?.[part]?
 function partRig(part){const data=state.previews[part];if(!data?.joints?.length)return null;
   const parents=new Map((data.bones||[]).map(bone=>[bone.name,bone.parent])),keys=new Set(data.joints.map(joint=>joint.bone));
   const nearest=bone=>{const seen=new Set();while(bone&&!keys.has(bone)&&!seen.has(bone)){seen.add(bone);bone=parents.get(bone);}return keys.has(bone)?bone:null;};
-  return {key:part,group:groups[part],revision:previewId(data),parentOf:bone=>parents.get(bone),jointOf:object=>nearest(object.userData.seat?object.userData.bone:object.userData.mesh?.bone),
+  // Fittings fixed to this part's bones; a bone the module also has belongs to the module.
+  const owns=bone=>parents.has(bone)&&(part==='turret'||!state.previews.turret?.bones?.some(b=>b.name===bone));
+  const extras=()=>['extra_armor','smoke_launchers','passenger_seats','towing','charge'].flatMap(key=>groups[key]?.children||[]).filter(host=>host.visible&&owns(host.userData.hostBone));
+  return {key:part,group:groups[part],revision:previewId(data),parentOf:bone=>parents.get(bone),extras,
+    jointOf:object=>nearest(object.userData.hostBone??(object.userData.seat?object.userData.bone:object.userData.mesh?.bone)),
     joints:data.joints.map(joint=>({key:joint.bone,weapons:joint.weapons||[],matrix:new THREE.Matrix4().set(...previewJointFrame(joint,data.anchor_name,part==='turret'?state.transform.turret?.pivot:null,levelJointFrame(part)).flat()),limits:()=>jointLimits(part,joint)}))};}
 var weaponView=weaponArcs({state,groups,camera,viewport,orbit,rigs:()=>[partRig('hull'),partRig('turret'),cmdEditor.weaponRig(),...riderEditor.weaponRigs()],
   describe:(joint,kind)=>`${t(kind==='traverse'?'Giro':'Elevación')}: ${[...new Set(joint.weapons||[])].join(', ')} (${joint.key})`});
@@ -152,6 +160,21 @@ const towingEditor=pointEditor({key:'towing',field:'tier',prefix:'towing',front:
 const chargeEditor=pointEditor({key:'charge',field:'charge',prefix:'charge',front:true,color:0xff6a3d,state,$,groups,scene:designFrame,remember,selectEdit,refreshCheck,reportError,applyShow,active:()=>inspector?.navigation.tool==='charge'});
 const riderEditor=createRiderEditor({state,$,groups,scene:designFrame,job:quickJob,loading,remember,selectEdit,refreshCheck,reportError,applyShow,makeSeat:seat=>makeSeatFigure(seat,'rider_mgs'),active:()=>inspector?.navigation.tool==='rider'});
 const passengerEditor=createPassengerEditor({state,$,groups,scene:designFrame,job:quickJob,loading,remember,selectEdit,refreshCheck,reportError,applyShow,makeSeat:seat=>makeSeatFigure(seat,'passenger_seats'),reposeSeat,active:()=>inspector?.navigation.tool==='passengers'});
+const templateLabel=template=>(state.catalog||[]).find(u=>(u.id||u.template)===template)?.label||(state.campaign?.units||[]).find(u=>u.template===template)?.label||String(template||'').replaceAll('_',' ');
+// A template replaces the whole design, then every editor rebuilds from it, as when a built vehicle is opened.
+async function applyDesign(transform){resetAssemblyExtras();state.transform=transform;draftEditor.placeholder();$('operation-select').value=transform.assembly_draft.guns?.length?'gun':'turret';
+  await draftEditor.refresh();await gunEditor.restore();await cmdEditor.restore();await armorEditor.restore();await smokeEditor.restore();towingEditor.restore();chargeEditor.restore();await riderEditor.restore();await passengerEditor.restore();mobility.refresh();updateSelection();updateBuild();}
+// A vehicle opened with Edit keeps a plain recipe: the template replaces it and its own mounts stay.
+async function applyRecipe(transform){const keep={...(state.transform.commander_only?{commander_only:true}:{}),...(state.transform.source_recipe?{source_recipe:state.transform.source_recipe}:{})};
+  resetAssemblyExtras();const {recipient_mount,donor_mount,crew_static,...rest}=transform;
+  state.transform={crew_seats:{},crew_exclude:[],crew_hidden:[],joint_limits:{},...rest,...keep};state.editSeat=null;
+  if(typeof crew_static==='boolean')$('crew-static').checked=crew_static;
+  applyTransforms();await gunEditor.restore();await cmdEditor.restore();await armorEditor.restore();await smokeEditor.restore();towingEditor.restore();chargeEditor.restore();await riderEditor.restore();await passengerEditor.restore();mobility.refresh();updateSelection();refreshCheck();}
+const templateRecipe=()=>draftEditor.active()?{transform:draftEditor.transform(),recipient:state.hull.template,draft:true}:
+  {transform:{...structuredClone(state.transform),recipient_mount:state.mounts.hull,donor_mount:state.mounts.turret,crew_static:$('crew-static').checked},recipient:state.hull.template,donor:state.turret?.template};
+const templateEditor=designTemplates({state,$,api,draftEditor,recipe:templateRecipe,applyDesign,applyRecipe,remember,reportError,status:message=>status(message),labelOf:templateLabel});
+// A floating panel, not a modal: the long template list opens above it and the view stays usable.
+$('templates-button').onclick=()=>{const panel=$('templates-dialog');if(panel.open){panel.close();return;}templateEditor.load().catch(reportError);panel.show();};
 $('operation-select').onchange=async()=>{
   if(state.busy)return;
   const next=$('operation-select').value,previous=state.operation||'turret';
@@ -197,6 +220,7 @@ document.addEventListener('part-hover',event=>{const select=event.target;if(!(se
   const value=event.detail?.value;if(value===null||value===undefined){highlight.clear();return;}
   try{highlight.show(partSpec(select,value));}catch(error){console.warn('part highlight',error);highlight.clear();}});
 const jointEditor=weaponJointEditor({state,groups,$,remember,refreshCheck,active:()=>inspector?.navigation.tool==='joints',level:part=>levelJointFrame(part),limitsOf:jointLimits});
+const mobility=mobilityEditor({state,$,remember,refreshCheck});
 transformControl.addEventListener('dragging-changed',event=>{orbit.enabled=!event.value;if(event.value)remember();else{if(state.editSeat)renderCrewList();refreshCheck();}});
 let syncing=false;
 transformControl.addEventListener('objectChange',()=>{if(syncing||state.busy||state.inspectorPending>0||!inspector?.navigation.tool)return;if(!state.editSeat&&pivotEditor.capture()){updateFields();return;}if(state.editSeat){const figure=seatFigure(state.editSeat);if(figure)state.transform.crew_seats={...(state.transform.crew_seats||{}),[state.editSeat]:saveCrewPlacement(figure,crewGroup())};return;}if(smokeEditor.capture()||towingEditor.capture()||chargeEditor.capture()||riderEditor.capture()||passengerEditor.capture()||armorEditor.capture()||supportEditor.capture()){updateFields();return;}const part=state.edit,g=groups[part],base=part==='turret'?moduleBase():[0,0,0];state.transform[part].position=g.position.toArray().map((v,i)=>Number((v-base[i]).toFixed(3)));const e=new THREE.Euler().setFromQuaternion(g.quaternion,'ZYX');state.transform[part].rotation=[e.x,e.y,e.z].map(v=>Number(THREE.MathUtils.radToDeg(v).toFixed(3)));updateFields();});
@@ -204,7 +228,15 @@ function resize(){const width=viewport.clientWidth,height=viewport.clientHeight;
 // The near plane follows the orbit distance: a fixed tiny one wasted the depth
 // buffer, so close surfaces (armour plates on the hull) flickered when zoomed in.
 function fitClipPlanes(){const near=Math.max(.01,camera.position.distanceTo(orbit.target)*.01);if(Math.abs(near-camera.near)>camera.near*.05){camera.near=near;camera.updateProjectionMatrix();}}
-function animate(){requestAnimationFrame(animate);orbit.update();fitClipPlanes();updateSeatFrames(groups);renderer.render(scene,camera);}animate();
+// Draw at full rate only while the camera moves or the player interacts; an
+// idle view is refreshed a few times a second, which still shows parts,
+// textures and results that arrive on their own, without spending a CPU core.
+let activeUntil=0,lastFrame=0;
+const wakeView=()=>{activeUntil=performance.now()+1500;};
+for(const type of ['pointerdown','pointermove','pointerup','wheel','keydown','input','change'])window.addEventListener(type,wakeView,{capture:true,passive:true});
+function animate(now){requestAnimationFrame(animate);const moved=orbit.update();
+  if(document.hidden||(!moved&&now>activeUntil&&now-lastFrame<250))return;
+  lastFrame=now;fitClipPlanes();updateSeatFrames(groups);renderer.render(scene,camera);}requestAnimationFrame(animate);
 
 function disposeGroup(group){while(group.children.length){const child=group.children[0];group.remove(child);child.traverse(node=>{if(!node.userData?.keepGeometry)node.geometry?.dispose();const flat=node.userData?.flat;if(flat&&flat!==node.material)flat.dispose();for(const m of [node.material].flat())if(m&&!m.userData?.shared)m.dispose();});}}
 function displayPart(part,data){disposeGroup(groups[part]);for(const mesh of data.meshes){const geometry=new THREE.BufferGeometry();geometry.setAttribute('position',new THREE.Float32BufferAttribute(mesh.positions,3));if(mesh.normals?.length)geometry.setAttribute('normal',new THREE.Float32BufferAttribute(mesh.normals,3));if(mesh.uv?.length)geometry.setAttribute('uv',new THREE.Float32BufferAttribute(mesh.uv,2));if(mesh.indices?.length)geometry.setIndex(mesh.indices);if(!mesh.normals?.length)geometry.computeVertexNormals();const material=new THREE.MeshStandardMaterial({color:mesh.color==='#d2a150'?0xc5a36b:mesh.color==='#7696a8'?0x7b9dab:part==='hull'?0x7b9dab:0xc5a36b,metalness:.16,roughness:.84,side:THREE.DoubleSide,wireframe:state.wire});const object=new THREE.Mesh(geometry,material);object.name=mesh.bone||mesh.name||part;object.userData={mesh,flat:material};if(!(part==='turret'&&supportEditor.addMesh(mesh,object)))groups[part].add(object);}state.previews[part]=data;addSeats(part,data);applyShow();applyTransforms();refreshFreeAnchor();refreshCheck();$('crew-static-field').classList.toggle('hidden',!state.previews.turret?.carried);renderCrewList();$('viewport-empty').classList.add('hidden');updateDiagnostics();updateMeshInfo();updateMounts();fitView();selectEdit(state.edit);}
@@ -237,7 +269,7 @@ async function refreshFreeAnchor(){
 }
 function moduleBase(){const a=(hullIsFree()&&state.freeAnchor)||state.previews.hull?.anchor||[0,0,0];return [a[0],a[1],a[2]+seatOffset()];}
 function applyTransforms(){queueMicrotask(updateStaticSeats);syncing=true;if(draftEditor.active()){if(groups.hull.parent!==designFrame)designFrame.add(groups.hull,groups.turret);applyPose(designFrame,state.transform.hull);}else{if(groups.hull.parent!==scene)scene.add(groups.hull,groups.turret);designFrame.position.set(0,0,0);designFrame.rotation.set(0,0,0);}if(supportEditor.active()){for(const part of ['hull','turret']){groups[part].position.set(0,0,0);groups[part].rotation.set(0,0,0);}const node=supportEditor.target(),pose=supportEditor.pose();if(node){applyPose(node,pose);}armorEditor.sync();smokeEditor.sync();towingEditor.sync();chargeEditor.sync();riderEditor.sync();passengerEditor.sync();pivotEditor.sync();syncing=false;return;}for(const part of ['hull','turret']){const t=state.transform[part],anchor=part==='turret'?moduleBase():[0,0,0];if(draftEditor.active()&&part==='hull'){groups.hull.position.set(0,0,0);groups.hull.rotation.set(0,0,0);}else applyPose(groups[part],t,anchor);}cmdEditor.sync();armorEditor.sync();smokeEditor.sync();towingEditor.sync();chargeEditor.sync();riderEditor.sync();passengerEditor.sync();pivotEditor.sync();syncing=false;}
-function fitView(direction='perspective'){const box=new THREE.Box3();for(const group of Object.values(groups))if(group.children.length)box.union(new THREE.Box3().setFromObject(group));if(box.isEmpty())return;const center=box.getCenter(new THREE.Vector3()),size=box.getSize(new THREE.Vector3()),radius=Math.max(size.x,size.y,size.z,20)*1.65;const vectors={perspective:[1,-1.25,.8],front:[1,0,.15],side:[0,-1,.15],top:[0,-.001,1]};/* vehicles face +X */const vector=new THREE.Vector3(...(vectors[direction]||vectors.perspective)).normalize();camera.position.copy(center).addScaledVector(vector,radius);orbit.target.copy(center);camera.near=Math.max(.01,radius/1000);camera.far=Math.max(10000,radius*30);camera.updateProjectionMatrix();orbit.update();}
+function fitView(direction='perspective'){const box=new THREE.Box3();for(const group of Object.values(groups))if(group.children.length)box.union(new THREE.Box3().setFromObject(group));if(box.isEmpty())return;const center=box.getCenter(new THREE.Vector3()),size=box.getSize(new THREE.Vector3()),radius=Math.max(size.x,size.y,size.z,20)*1.65;const vectors={perspective:[1,1.25,.8],front:[1,0,.15],side:[0,1,.15],top:[0,.001,1]};/* vehicles face +X; +Y is their right */const vector=new THREE.Vector3(...(vectors[direction]||vectors.perspective)).normalize();camera.position.copy(center).addScaledVector(vector,radius);orbit.target.copy(center);camera.near=Math.max(.01,radius/1000);camera.far=Math.max(10000,radius*30);camera.updateProjectionMatrix();orbit.update();}
 function updateMeshInfo(){const values=Object.values(state.previews),triangles=values.reduce((n,v)=>n+(v.stats?.triangles||0),0),meshes=values.reduce((n,v)=>n+(v.stats?.meshes||0),0);$('mesh-info').textContent=`${meshes} piezas · ${triangles.toLocaleString('es-AR')} triángulos`;}
 function diagnosticText(d){const messages={mass_requires_component_data:'Se conserva el peso declarado del chasis. Los recursos no separan el peso de la torreta.',animation_rotation_gate:'La orientación del montaje necesita comprobarse en el juego.',wreck_runtime_gate:'Los estados de destrucción necesitan comprobarse en el juego.'};return messages[d.code]||d.message||d.code||String(d);}
 function updateDiagnostics(){$('model-diagnostics').replaceChildren();for(const data of Object.values(state.previews))for(const diagnostic of data.diagnostics||[]){const p=document.createElement('div');p.textContent=diagnosticText(diagnostic);$('model-diagnostics').append(p);}}
@@ -258,7 +290,7 @@ function selectEdit(part){
   if(canPlaceCrew(crewFigure,state.transform.crew_exclude||[])&&!crewHidden(state,crewPart(),crewPlace)){
     state.editSeat=crewPlace;transformControl.attach(crewFigure);transformControl.setMode(crewMode);renderCrewList();
   }
-  updateFields();updateMounts();cmdEditor.sync();armorEditor.sync();smokeEditor.sync();towingEditor.sync();chargeEditor.sync();riderEditor.sync();passengerEditor.sync();jointEditor.refresh();
+  updateFields();updateMounts();cmdEditor.sync();armorEditor.sync();smokeEditor.sync();towingEditor.sync();chargeEditor.sync();riderEditor.sync();passengerEditor.sync();jointEditor.refresh();mobility.refresh();
   if(supportEditor.active())supportEditor.controls();inspector?.render();
 }
 function requireFinishedTool(){if(!inspector?.navigation.tool||inspector.navigation.tool==='operation')return true;status(t('Terminá la herramienta actual antes de cambiar de vehículo u operación.'));return false;}
@@ -286,7 +318,7 @@ async function stepHistory(direction){
   if(value===null){status(t(direction==='undo'?'Sin cambios para deshacer.':'Sin cambios para rehacer.'));updateHistoryButtons();return;}
   state.transform=JSON.parse(value);const selection=state.transform._editor_selection;delete state.transform._editor_selection;if(selection){state.turret=selection.turret;state.pendingTurret=selection.pendingTurret;}state.crewVisibility=null;updateFields();applyTransforms();
   await toolOperation(async()=>{await cmdEditor.restore();await armorEditor.restore();await smokeEditor.restore();towingEditor.restore();chargeEditor.restore();await riderEditor.restore();await passengerEditor.restore();await gunEditor.restore();await supportEditor.restore();if(draftEditor.active()&&!gunEditor.active())await draftEditor.refresh(state.pendingTurret);});
-  selectEdit(inspector.navigation.part());jointEditor.refresh();renderCrewList();refreshCheck();updateBuild();updateHistoryButtons();
+  selectEdit(inspector.navigation.part());jointEditor.refresh();mobility.refresh();renderCrewList();refreshCheck();updateBuild();updateHistoryButtons();
 }
 
 function editablePose(){if(draftEditor.active()&&state.edit==='turret'&&!state.pendingTurret&&!state.transform.gun_swap)return null;if(state.edit==='turret'&&(state.transform.gun_swap||Array.isArray(state.transform.gun_swaps))&&!(state.transform.gun_swap?.recipient_place&&state.transform.gun_swap?.donor_place))return null;return state.edit==='towing'?towingEditor.pose():state.edit==='charge'?chargeEditor.pose():state.edit==='smoke_launchers'?smokeEditor.pose():state.edit==='rider_mgs'?riderEditor.pose():state.edit==='passenger_seats'?passengerEditor.pose():state.edit==='extra_armor'?armorEditor.pose():supportEditor.active()&&state.edit==='turret'?supportEditor.pose():state.transform[state.edit];}
@@ -354,7 +386,7 @@ function checkHint(){const check=state.check;if(!check||check.key!==checkKey())r
   if(check.status==='fail')return{text:'Esta combinación no se puede construir: '+t(check.message.split('\n\nDetalle técnico:')[0].replace(/^La operación no se pudo completar\..*$/s,'el taller encontró un problema'))+(check.message.includes('Detalle técnico:')?' ('+t(check.message.split('Detalle técnico:')[1].trim())+')':''),blocked:true};
   if(check.status==='ok'){const order=['driver','commander','gunner','charger','loader','radioman'],rank=r=>{const i=order.indexOf(String(r).replace(/\d+$/,''));return i<0?99:i;};const crew=[...check.crew].sort((a,b)=>rank(a)-rank(b)||String(a).localeCompare(b)).map(roleName);return{text:'Compatible ✓'+(crew.length?` · ${t('Tripulación')} (${crew.length}): ${crew.join(', ')}`:''),blocked:false};}
   return{text:'',blocked:false};}
-function updateBuild(){draftEditor.controls();$('cancel-check').classList.toggle('hidden',state.check?.status!=='pending');$('check-again').disabled=state.busy||!state.hull||!state.turret||state.check?.status==='pending';crewVisibility.render();cmdEditor.controls();armorEditor.controls();smokeEditor.controls();towingEditor.controls();chargeEditor.controls();if(state.edit==='commander_mg'&&!state.transform.commander_mg)transformControl.detach();for(const id of ['gun-recipient','gun-donor'])$(id).disabled=state.busy||!!state.editing;const reason=buildBlocker(),hint=checkHint();$('build-button').disabled=state.busy||!!reason||hint.blocked;$('design-retry').classList.toggle('hidden',!(draftEditor.active()&&state.campaign&&!state.pendingTurret&&!state.transform.gun_swap&&state.designPreviewKey!==draftEditor.key()&&!state.designRefreshInFlight));
+function updateBuild(){draftEditor.controls();templateEditor.controls();$('cancel-check').classList.toggle('hidden',state.check?.status!=='pending');$('check-again').disabled=state.busy||!state.hull||!state.turret||state.check?.status==='pending';crewVisibility.render();cmdEditor.controls();armorEditor.controls();smokeEditor.controls();towingEditor.controls();chargeEditor.controls();if(state.edit==='commander_mg'&&!state.transform.commander_mg)transformControl.detach();for(const id of ['gun-recipient','gun-donor'])$(id).disabled=state.busy||!!state.editing;const reason=buildBlocker(),hint=checkHint();$('build-button').disabled=state.busy||!!reason||hint.blocked;$('design-retry').classList.toggle('hidden',!(draftEditor.active()&&state.campaign&&!state.pendingTurret&&!state.transform.gun_swap&&state.designPreviewKey!==draftEditor.key()&&!state.designRefreshInFlight));
   // A turret or gun change still being adjusted blocks the build; save it from here (SturmDrachen).
   const pendingGun=state.transform.gun_swap,pending=!!(draftEditor.active()&&state.pendingTurret||pendingGun);$('apply-pending').classList.toggle('hidden',!pending);$('discard-pending').classList.toggle('hidden',!pending);$('discard-pending').disabled=state.busy;
   $('apply-pending').disabled=state.busy||!!(pendingGun&&(!pendingGun.recipient_place||!pendingGun.donor_place||state.turret?.designPlaceholder))&&!state.pendingTurret;
@@ -370,7 +402,10 @@ async function refreshConfig(){state.config=await api('/api/config');$('game-pat
 function renderMods(){const selected=state.config.settings.mod_roots,mods=[...state.config.installed_mods].sort((a,b)=>{const ai=selected.indexOf(a.root),bi=selected.indexOf(b.root);return(ai<0?999:ai)-(bi<0?999:bi);});$('mod-list').replaceChildren();for(const mod of mods){const row=document.createElement('div');row.className='mod-row';row.dataset.root=mod.root;const check=document.createElement('input');check.type='checkbox';check.id='mod-'+mod.id;check.checked=selected.includes(mod.root);const label=document.createElement('label');label.htmlFor=check.id;label.textContent=mod.name;const small=document.createElement('small');small.textContent=mod.id+' · '+(mod.description||mod.root);label.append(small);const up=document.createElement('button');up.textContent='↑';up.title='Mover antes';up.onclick=()=>{if(row.previousElementSibling)row.parentElement.insertBefore(row,row.previousElementSibling);};const down=document.createElement('button');down.textContent='↓';down.title='Mover después';down.onclick=()=>{if(row.nextElementSibling)row.parentElement.insertBefore(row.nextElementSibling,row);};row.append(check,label,up,down);$('mod-list').append(row);}}
 function showStats(stats){state.artRevision=(state.artRevision||0)+1;$('source-count').textContent=`${stats.sources?.length||0} fuentes activas`;$('stats-message').textContent=`${(stats.resources||0).toLocaleString('es-AR')} recursos indexados`;}
 const storageEditor=vehicleStorage({$,state,t,pollJob,loading,readSave,status,reportError});
-async function readSave(path){const result=await pollJob('/api/load-save',{path});state.campaign=result.campaign;clearPart('hull');clearPart('turret');$('campaign-name').textContent=state.campaign.campaign_name||path.split(/[\\/]/).pop();const humans=state.campaign.units.filter(u=>u.kind==='human').length,vehicles=state.campaign.units.filter(u=>u.kind==='vehicle').length;$('campaign-summary').textContent=`${vehicles} vehículos · ${humans} soldados · ${state.campaign.army||''}`;showStats(result.stats);state.catalog=(await api('/api/catalog')).units;await refreshConfig();renderUnits();if(state.campaign.unresolved_mods?.length)throw new Error('La campaña requiere mods que no se encontraron: '+state.campaign.unresolved_mods.join(', '));if(state.campaign.disabled_mods?.length)status(t('El juego desactiva estos mods por la versión, y el taller también los ignora: ')+state.campaign.disabled_mods.map(m=>m.name).join(', '));if(state.campaign.repaired_save)status(`Se reparó esta partida: una versión anterior del taller la dejaba sin poder cargarse (${state.campaign.repaired_save.inventories} inventarios). Copia original: ${state.campaign.repaired_save.backup}`);if(state.campaign.crew_fitted?.length)status(t('Tripulantes que sobraban pasaron a la reserva (el vehículo ahora tiene menos puestos): ')+state.campaign.crew_fitted.map(row=>(state.campaign.units||[]).find(u=>String(u.template||'').startsWith(row.vehicle))?.label||row.vehicle).join(', '));if(state.campaign.storage_problem)status(state.campaign.storage_problem);if(state.campaign.mod_stack_problem)throw new Error(state.campaign.mod_stack_problem);}
+async function readSave(path){const result=await pollJob('/api/load-save',{path});state.campaign=result.campaign;clearPart('hull');clearPart('turret');$('campaign-name').textContent=state.campaign.campaign_name||path.split(/[\\/]/).pop();const humans=state.campaign.units.filter(u=>u.kind==='human').length,vehicles=state.campaign.units.filter(u=>u.kind==='vehicle').length;$('campaign-summary').textContent=`${vehicles} vehículos · ${humans} soldados · ${state.campaign.army||''}`;showStats(result.stats);state.catalog=(await api('/api/catalog')).units;await refreshConfig();renderUnits();if(state.campaign.unresolved_mods?.length)throw new Error('La campaña requiere mods que no se encontraron: '+state.campaign.unresolved_mods.join(', '));if(state.campaign.disabled_mods?.length)status(t('El juego desactiva estos mods por la versión, y el taller también los ignora: ')+state.campaign.disabled_mods.map(m=>m.name).join(', '));if(state.campaign.repaired_save)status(`Se reparó esta partida: una versión anterior del taller la dejaba sin poder cargarse (${state.campaign.repaired_save.inventories} inventarios). Copia original: ${state.campaign.repaired_save.backup}`);if(state.campaign.crew_fitted?.length)status(t('Tripulantes que sobraban pasaron a la reserva (el vehículo ahora tiene menos puestos): ')+state.campaign.crew_fitted.map(row=>(state.campaign.units||[]).find(u=>String(u.template||'').startsWith(row.vehicle))?.label||row.vehicle).join(', '));if(state.campaign.storage_problem)status(state.campaign.storage_problem);reportModStack(state.campaign);}
+// The full include check of the active mods runs in the background after the
+// campaign opens; it only warns, so the campaign is usable meanwhile.
+function reportModStack(campaign){api('/api/mod-stack').then(result=>{if(result.problem&&state.campaign===campaign)reportError(new Error(result.problem));}).catch(()=>{});}
 async function loadSave(path){if(!path)return;try{await loading('Leyendo campaña y recursos',()=>readSave(path));}catch(error){reportError(error);}}
 async function browse(kind){return(await api('/api/pick',{kind})).path;}
 
@@ -405,7 +440,7 @@ $('install-button').onclick=async()=>{
   try{
     if(shopOnly()){const body=buildBody();
       const r=await operation('/api/creative',{recipient:state.hull.template,donor:state.turret.template,transform:body.transform,name:body.name},'Construyendo en modo creativo');
-      $('error-title').textContent=t('Vehículo en la tienda');$('error-message').textContent=r.name+(r.offer?`\n${t('Precio')}: ${r.offer.cost} · ${t('etapa')} ${r.offer.stage}`:'')+reloadText(r.reload_steps);
+      $('error-title').textContent=t('Vehículo en la tienda');$('error-message').textContent=r.name+(r.offer?`\n${t('Precio')}: ${r.offer.cost}`:'')+reloadText(r.reload_steps);
       $('error-dialog').showModal();await refreshConfig();return;}
     const body={...buildBody(),shop:$('build-shop').checked};
     const {done,portraitWarning,elapsedMs}=await buildVehicle(progress,{
@@ -421,26 +456,7 @@ $('install-button').onclick=async()=>{
   }catch(error){reportError(error);}
 };
 $('repair-button').onclick=async()=>{if(state.busy)return;if(!state.campaign){reportError(new Error(t('Seleccioná primero una campaña.')));$('save-select').focus();return;}if(!confirm(t('Actualizar vehículos vuelve a armar únicamente los vehículos presentes en la partida abierta. Se guarda una copia del mod anterior. ¿Continuar?')))return;try{const r=await operation('/api/repair',{source_hash:state.campaign.source_hash},'Actualizando vehículos');const portraits=await regeneratePortraits(true,r.rebuilt);const label=id=>(r.labels||{})[id]||id;$('error-title').textContent='Vehículos actualizados';$('error-message').textContent=(r.rebuilt.length?`Actualizados (${r.rebuilt.length}):\n${r.rebuilt.map(id=>'· '+label(id)).join('\n')}`:'No se actualizó ningún vehículo.')+(r.skipped.length?`\n\nSe dejaron como estaban:\n${r.skipped.map(x=>'· '+label(x.id)+': '+x.reason).join('\n')}`:'')+'\n\n'+portraitSummary(portraits,false)+reloadText([...new Set([...(r.reload_steps||[]),...(portraits.reload_steps||[])])])+(r.crew_fitted?.length?'\n\n'+t('Tripulantes que sobraban pasaron a la reserva (el vehículo ahora tiene menos puestos): ')+r.crew_fitted.map(row=>label(row.vehicle)).join(', '):'')+(r.backup?`\n\nCopia del mod anterior: ${r.backup}`:'');$('error-dialog').showModal();await refreshConfig();}catch(error){reportError(error);}};
-// Tienda: workshop vehicles sold in the Conquest shop. Only the addon changes.
-async function openShop(){const status=$('shop-status');status.textContent=t('Calculando precios…');shopArtwork.clear();$('shop-list').replaceChildren();$('shop-apply').disabled=true;$('shop-dialog').showModal();
-  try{const data=await api('/api/shop');const rows=data.vehicles||[];status.textContent='';
-    if(!rows.length){status.textContent=t('Todavía no hay vehículos creados con el taller.');return;}
-    for(const row of rows){const label=document.createElement('label');label.className='shop-row';const box=document.createElement('input');box.type='checkbox';box.checked=row.on;box.dataset.id=row.id;box.dataset.on=String(row.on);
-      const icon=document.createElement('span');icon.className='shop-icon';icon.setAttribute('aria-hidden','true');icon.innerHTML=svgVehicle;shopArtwork.attach(icon,row,state.artRevision||0);
-      const name=document.createElement('strong');name.textContent=row.name;name.title=(row.parts||[]).join(' + ');
-      const price=document.createElement('small');price.textContent=row.problem?t('Sin precio: ninguna parte se vende en la tienda'):row.cost!=null?`${row.cost} · ${t('etapa')} ${row.stage}`:'';
-      box.onchange=()=>{$('shop-apply').disabled=![...$('shop-list').querySelectorAll('input')].some(b=>String(b.checked)!==b.dataset.on);};
-      label.append(box,icon,name,price);$('shop-list').append(label);}
-    if(!data.priced)status.textContent=t('Leé los recursos para ver precio y etapa.');
-  }catch(error){$('shop-dialog').close();reportError(error);}}
-$('shop-button').onclick=()=>{if(!state.busy)openShop();};
-$('shop-dialog').addEventListener('close',()=>shopArtwork.clear());
-$('shop-apply').onclick=async()=>{if(state.busy)return;const changes={};for(const box of $('shop-list').querySelectorAll('input'))if(String(box.checked)!==box.dataset.on)changes[box.dataset.id]=box.checked;
-  if(!Object.keys(changes).length)return;$('shop-dialog').close();
-  try{const r=await operation('/api/shop',{changes},'Actualizando la tienda');const names=Object.fromEntries([...$('shop-list').querySelectorAll('.shop-row')].map(row=>[row.querySelector('input').dataset.id,row.querySelector('strong').textContent]));
-    const lines=Object.entries(r.changes).map(([id,on])=>'· '+(names[id]||id)+': '+(on?(r.offers?.[id]?`${t('en venta por')} ${r.offers[id].cost} (${t('etapa')} ${r.offers[id].stage})`:t('en venta')):t('fuera de la tienda')));
-    $('error-title').textContent=t('Tienda actualizada');$('error-message').textContent=lines.join('\n')+reloadText(r.reload_steps)+(r.backup?`\n\n${t('Copia del mod anterior')}: ${r.backup}`:'');$('error-dialog').showModal();await refreshConfig();
-  }catch(error){reportError(error);}};
+shopEditor({state,$,api,operation,artwork:shopArtwork,svgVehicle,reportError,refreshConfig,reloadText});
 $('creative-mode').onchange=()=>{state.creative=$('creative-mode').checked;
   if(!state.creative){for(const part of ['turret','hull'])if(state[part]?.creative)clearPart(part);}
   status(t(state.creative?'Modo creativo: tocá vehículos del catálogo para usarlos como chasis, torreta o cañón. Con un chasis de tu partida, el vehículo cambia en tu partida.':'Modo creativo desactivado.'));};
@@ -451,7 +467,7 @@ $('close-button').onclick=async()=>{try{await api('/api/shutdown',{});status('Ta
 
 async function start(){try{const session=await fetch('/api/session').then(r=>r.json());state.token=session.token;
   // The tool's own version, so players can tell which one they run when reporting a problem.
-  if(session.version)document.querySelector('.version').textContent='v'+session.version;await refreshConfig();if(state.config.campaign_loaded){state.campaign=await api('/api/campaign');$('campaign-name').textContent=state.campaign.campaign_name;const humans=state.campaign.units.filter(u=>u.kind==='human').length,vehicles=state.campaign.units.filter(u=>u.kind==='vehicle').length;$('campaign-summary').textContent=`${vehicles} vehículos · ${humans} soldados · ${state.campaign.army||''}`;state.catalog=(await api('/api/catalog')).units;renderUnits();status('Campaña cargada.');}else status('Elegí una campaña para comenzar.');}catch(error){reportError(error);}}
+  if(session.version)document.querySelector('.version').textContent='v'+session.version;await refreshConfig();templateEditor.load().catch(error=>console.warn('design templates',error));if(state.config.campaign_loaded){state.campaign=await api('/api/campaign');$('campaign-name').textContent=state.campaign.campaign_name;const humans=state.campaign.units.filter(u=>u.kind==='human').length,vehicles=state.campaign.units.filter(u=>u.kind==='vehicle').length;$('campaign-summary').textContent=`${vehicles} vehículos · ${humans} soldados · ${state.campaign.army||''}`;state.catalog=(await api('/api/catalog')).units;renderUnits();status('Campaña cargada.');}else status('Elegí una campaña para comenzar.');}catch(error){reportError(error);}}
 async function refreshGameReadiness(){try{const result=await api('/api/status');setGameStatus(result.game);showAddonReadiness($,result.addon_readiness);return result;}catch(error){showAddonReadiness($,{required:true,ready:false,message:'No se pudo comprobar la carga del mod. No cargues la campaña hasta verificarlo.'});throw error;}}
 $('check-addon').onclick=async()=>{try{await refreshGameReadiness();}catch(error){reportError(error);}};
 setInterval(async()=>{try{if(state.token)await refreshGameReadiness();}catch{}},12000);
@@ -509,7 +525,7 @@ async function renderPortrait(data,token){
     }
     await Promise.all(pending);
     const W=448,H=560,cam=portraitCamera(model,W,H);
-    gl=new THREE.WebGLRenderer({antialias:true,alpha:true,preserveDrawingBuffer:true});gl.setPixelRatio(1);gl.setSize(W,H,false);
+    gl=gameRenderer(new THREE.WebGLRenderer({antialias:true,alpha:true,preserveDrawingBuffer:true}));gl.setPixelRatio(1);gl.setSize(W,H,false);
     gl.outputColorSpace=THREE.SRGBColorSpace;gl.toneMapping=renderer.toneMapping;gl.toneMappingExposure=renderer.toneMappingExposure*1.08;
     gl.setClearColor(0x000000,0);gl.render(photoScene,cam);
     const base=document.createElement('canvas');base.width=112;base.height=140;const ctx=base.getContext('2d');
@@ -648,7 +664,7 @@ $('crew-apply-mount').onclick=()=>toolOperation(()=>draftEditor.saveTurret()).ca
 transformControl.addEventListener('objectChange',()=>updateStaticSeats());
 
 // Tool panels own the gizmo; a late preview may redraw geometry but cannot steal focus.
-inspector=inspectorMenus({state,support:()=>supportEditor.active(),gun:()=>gunEditor.active(),movingMount:()=>draftEditor.active()&&$('operation-select').value==='turret',moveSelector:moveSelectField,
+inspector=inspectorMenus({state,support:()=>supportEditor.active(),gun:()=>gunEditor.active(),movingMount:()=>draftEditor.active()&&$('operation-select').value==='turret',poseAvailable:()=>!!poseTarget()&&!!editablePose(),moveSelector:moveSelectField,
   onEnter(tool,part){history.begin();updateHistoryButtons();selectEdit(part);if(tool==='crew'){state.show.crew=true;applyShow();}
     if(['operation','position','joints','crew'].includes(tool)&&state.hull?.eid&&!supportEditor.active()&&!gunEditor.active()&&!state.pendingTurret){
       draftEditor.ensure();

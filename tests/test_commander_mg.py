@@ -129,7 +129,7 @@ class CommanderMountTests(unittest.TestCase):
         self.assertEqual(direct,weapon_catalog(self.index))
         self.assertEqual(weapon_catalog(self.index,item='paid'),[])
 
-    def test_base_view_ignores_dlc_and_catalog_rejects_mod_override(self):
+    def test_base_view_ignores_dlc_and_catalog_offers_the_mod_version(self):
         self.index.close()
         archive(self.game, 'dlc3.pak', {'set/stuff/base_gun': '{from "pattern gun" {entity "base_gun"} {tag "-mountable"}}'})
         self.index = ResourceIndex(self.game).build()
@@ -140,7 +140,8 @@ class CommanderMountTests(unittest.TestCase):
         mod = self.root/'mod'
         archive(mod, 'mod.pak', {'set/stuff/base_gun': '{from "pattern gun" {entity "base_gun"} {range 999}}'})
         self.index = ResourceIndex(self.game,[mod]).build()
-        self.assertEqual(weapon_catalog(self.index), [])
+        # The active mod's version is the one the game uses.
+        self.assertEqual([w['id'] for w in weapon_catalog(self.index)], ['base_gun'])
 
     def test_rejects_other_operator_nonfinite_and_invalid_limits(self):
         for change in ({'operator':'driver'}, {'position':[float('nan'),0,0]},

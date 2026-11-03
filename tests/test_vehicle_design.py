@@ -13,6 +13,38 @@ from workshop.geometry import read_mesh,mesh_materials
 
 
 class VehicleDesignTests(unittest.TestCase):
+    def test_limit_overlay_reuses_geometry_and_still_validates_limits(self):
+        from workshop.app import AppState
+        from unittest.mock import patch
+        state=AppState(self.root/'display_workspace');state.index=self.index
+        body={'hull':'receiver','transform':{'assembly_draft':{'schema':1,'guns':[],'turrets':[]}}}
+        try:
+            data=state.design_preview_data(body);self.assertTrue(data['hull']['joints'])
+            name=data['hull']['joints'][0]['bone']
+            changed=copy.deepcopy(body);changed['transform']['joint_limits']={'hull':{name:[-15,25,42]}}
+            with patch('workshop.draft.compile_draft',side_effect=AssertionError('Limits recompiled geometry')):
+                again=state.design_preview_data(changed)
+            joint=next(j for j in again['hull']['joints'] if j['bone']==name)
+            self.assertEqual(joint['limits'],[-15,25]);self.assertEqual(joint['speed'],42)
+            self.assertEqual(data['hull']['meshes'],again['hull']['meshes'])
+            # A full compatibility check already compiled this exact geometry.
+            # Display may reuse it, but a later Reset must restore native limits.
+            state.clear_portrait_previews();state.design_context(changed)
+            with patch('workshop.draft.compile_draft',side_effect=AssertionError('Validated geometry recompiled for display')):
+                reused=state.design_preview_data(changed)
+            self.assertEqual(next(j for j in reused['hull']['joints'] if j['bone']==name)['limits'],[-15,25])
+            reset=state.design_preview_data(body)
+            self.assertEqual(next(j for j in reset['hull']['joints'] if j['bone']==name)['limits'],data['hull']['joints'][0]['limits'])
+            changed['transform']['joint_limits']['hull'][name]=[-190,25]
+            with self.assertRaises(ValueError):state.design_preview_data(changed)
+        finally:state.clear_portrait_previews();state.pool.shutdown(wait=True)
+
+    def test_a_design_without_saved_guns_does_not_discover_every_gun_interface(self):
+        from unittest.mock import patch
+        with patch('workshop.gun_assembly.discover',side_effect=AssertionError('No moved gun frames to discover')):
+            result=compile_assembly(self.index,'receiver','receiver',{'assembly_draft':{'schema':1,'turrets':[],'guns':[]}},self.root/'empty_design','mw_empty_design')
+        self.assertEqual(result['metadata']['draft_frames'],{})
+
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup);self.root=Path(self.temp.name)
         r=Resources();r.files['set/stuff/shell/mg_round.belt.ammo']=b'{ammo {entity "mg_bullet"}}'
@@ -161,6 +193,11 @@ class VehicleDesignTests(unittest.TestCase):
         try:
             first=state.design_preview_data(body);token=first['hull']['meshes'][0]['submeshes'][0]['texture_token']
             self.assertTrue(first['crew_visibility'],'crew controls arrive with the model, before compatibility')
+            with patch('workshop.geometry.build_preview',side_effect=AssertionError('Unchanged geometry must not be decoded again')):
+                repeated=state.design_preview_data(body)
+                self.assertEqual(repeated,first)
+                repeated['hull']['meshes'][0]['positions'][0]=987654
+                self.assertEqual(state.design_preview_data(body),first,'a caller must not mutate the cached geometry')
             excluded=copy.deepcopy(body);role=first['crew_visibility'][0]['place']
             excluded['transform']['crew_exclude']=[role]
             self.assertNotIn(role,[r['place'] for r in state.design_preview_data(excluded)['crew_visibility']])
@@ -168,7 +205,9 @@ class VehicleDesignTests(unittest.TestCase):
                 checked=state.check({**body,'donor':'donor'})
                 state.design_catalog(body)
                 moved=copy.deepcopy(body);moved['transform']['hull']={'position':[4,0,0],'rotation':[0,0,15],'pivot':[3,0,0]}
-                state.design_preview_data(moved);state.design_catalog(moved)
+                state.design_preview_data(moved)
+                with patch('workshop.gun_assembly.discover',side_effect=AssertionError('Unchanged mounts must reuse the catalog')):
+                    state.design_catalog(moved)
                 invalid=copy.deepcopy(body);invalid['transform']['hull']={'pivot':[float('nan'),0,0]}
                 with self.assertRaises(ValueError):state.design_context(invalid)
                 with self.assertRaises(ValueError):state.design_catalog(invalid)

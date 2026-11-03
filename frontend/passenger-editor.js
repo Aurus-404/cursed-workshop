@@ -23,7 +23,7 @@ export function passengerEditor({state,$,groups,scene,job,loading,remember,selec
     if(!value.added&&!value.native)delete state.transform.passenger_seats;}
   function dispose(node){node.traverse(n=>{if(!n.userData.keepGeometry)n.geometry?.dispose();for(const m of [n.material].flat())if(m&&!m.userData?.shared)m.dispose();});node.removeFromParent();}
   function sync(){for(const host of group.children){const row=rows()[host.userData.seatIndex];if(!row)continue;
-    const parent=hosts.find(p=>p.name===row.parent);host.visible=!!parent;if(parent)host.matrix.copy(matrix(parent.matrix));applyPose(host.children[0],row);}
+    const parent=hosts.find(p=>p.name===row.parent);host.visible=!!parent;host.userData.hostBone=parent?.name;if(parent)host.matrix.copy(matrix(parent.matrix));applyPose(host.children[0],row);}
     group.updateMatrixWorld(true);}
   function draw(){for(const n of [...group.children])dispose(n);
     rows().forEach((row,i)=>{const host=new THREE.Group(),fitting=new THREE.Group();host.matrixAutoUpdate=false;host.userData={seatIndex:i};host.add(fitting);

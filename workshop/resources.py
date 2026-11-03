@@ -8,11 +8,17 @@ mount order must still be checked during game acceptance, especially for DLC.
 from __future__ import annotations
 
 import hashlib
+import marshal
 import os
 import re
+import struct
 import threading
 import zipfile
+import zlib
+from array import array
+from collections import OrderedDict
 from dataclasses import dataclass, replace
+from functools import lru_cache
 from pathlib import Path, PurePosixPath
 from typing import Iterable
 
@@ -21,8 +27,57 @@ class ResourceError(ValueError):
     pass
 
 
+class _ReadCache:
+    """Bounded immutable bytes, shared by views of the same resource snapshot."""
+    def __init__(self, budget=64*1024*1024, max_item=8*1024*1024, max_entries=4096):
+        self.budget, self.max_item, self.max_entries = budget, max_item, max_entries
+        self.bytes = 0
+        self.items = OrderedDict()
+        self.lock = threading.Lock()
+
+    @staticmethod
+    def file_key(path, size, modified_ns):
+        name = os.path.normcase(os.path.abspath(path))
+        if name.startswith('\\\\?\\unc\\'): name = '\\\\' + name[8:]
+        elif name.startswith('\\\\?\\'): name = name[4:]
+        return ('file', name, size, modified_ns)
+
+    def key(self, entry):
+        if getattr(entry, 'physical_path', None):
+            return self.file_key(entry.physical_path, entry.size, entry.modified_ns)
+        return entry
+
+    def get(self, entry):
+        key = self.key(entry)
+        with self.lock:
+            value = self.items.get(key)
+            if value is not None: self.items.move_to_end(key)
+            return value
+
+    def put(self, entry, data, stamp):
+        self.store(self.key(entry), data, stamp)
+
+    def store(self, key, data, stamp):
+        if len(data) > min(self.budget, self.max_item): return
+        with self.lock:
+            old = self.items.pop(key, None)
+            if old is not None: self.bytes -= len(old[0])
+            self.items[key] = (data, stamp); self.bytes += len(data)
+            while self.bytes > self.budget or len(self.items) > self.max_entries:
+                _, old = self.items.popitem(last=False); self.bytes -= len(old[0])
+
+
+# An ASCII path the rules below would return unchanged: no separator to fix,
+# no surrounding space, no empty, "." or ".." part, no drive, NUL or
+# leading "resource/". Nearly every archive member is one.
+_NORMAL_PATH = re.compile(r"(?!(?i:resource)/)(?!\s)(?!\.\.?(?:/|$))[^/\\:\x00]+"
+                          r"(?:/(?!\.\.?(?:/|$))[^/\\:\x00]+)*(?<!\s)")
+
+
 def normalize_path(path: str) -> str:
     """Normalize a game-absolute or resource-relative path, without traversal."""
+    if type(path) is str and path.isascii() and _NORMAL_PATH.fullmatch(path):
+        return path
     value = str(path).replace("\\", "/").strip()
     if "\x00" in value or ":" in value or value.startswith("//"):
         raise ResourceError(f"Unsafe virtual path: {path!r}")
@@ -43,56 +98,183 @@ def normalize_path(path: str) -> str:
 # (open, install, portraits, reopen). Keyed by path, size and mtime.
 _PAK_MEMBERS: dict[tuple, list] = {}
 _PAK_LOCK = threading.Lock()
+# Keep one stock archive prefix across fresh builds. Loose files, DLC/mod
+# activation, localization and every overlay are still discovered each time.
+_STOCK_ARCHIVES = None
+_MOD_ARCHIVES = OrderedDict()
+_MOD_ARCHIVE_LIMIT = 250000
+
+def _archive_stamp(path):
+    stat = path.stat()
+    return (str(path), str(path.resolve()), stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+
 
 
 def _pak_members(pak: Path, mount: str) -> list:
     """(virtual path or None if unsafe, member name, size, crc) of a PAK."""
     stat = pak.stat()
-    key = (os.path.normcase(str(pak)), mount, stat.st_size, stat.st_mtime_ns)
+    key = (os.path.normcase(str(pak)), mount, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
     with _PAK_LOCK:
         cached = _PAK_MEMBERS.get(key)
     if cached is not None:
         return cached
     members = []
-    with zipfile.ZipFile(pak) as archive:
-        for item in archive.infolist():
-            if item.is_dir():
-                continue
-            try:
-                # ZIP members are never extracted; still reject malicious names.
-                if item.filename.startswith(("/", "\\")):
-                    raise ResourceError("Absolute ZIP member")
-                virtual = normalize_path(mount + item.filename)
-            except ResourceError:
-                virtual = None
-            members.append((virtual, item.filename, item.file_size, item.CRC))
+    for name, size, crc in _read_layout(pak, stat, listing=True):
+        try:
+            # ZIP members are never extracted; still reject malicious names.
+            if name.startswith(("/", "\\")):
+                raise ResourceError("Absolute ZIP member")
+            virtual = normalize_path(mount + name)
+        except ResourceError:
+            virtual = None
+        members.append((virtual, name, size, crc))
     with _PAK_LOCK:
         _PAK_MEMBERS[key] = members
     return members
 
 
-def _loose_files(folder: Path, root: Path, warnings: list) -> list[Path]:
-    """Files under folder without following links. Only a link can point
-    outside the source root, so only links are resolved and checked (one
-    realpath per file before)."""
+# Where each member lives inside its PAK, by archive path and identity. Reads
+# go straight to the member's bytes: a new index never parses a central
+# directory again, and no archive handle stays open (Steam can update a mod).
+_PAK_LAYOUTS: dict[str, tuple] = {}
+_LOCAL_HEADER = struct.Struct('<4s22xHH')
+
+
+def _layout_stamp(stat):
+    return stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+
+
+def _read_layout(pak, stat=None, *, listing=False):
+    """member name -> (header offset, method, compressed size, size, crc, flags),
+    the last of repeated names winning as in zipfile; listing: every file member
+    in directory order as (name, size, crc)."""
+    stat = stat or os.stat(pak)
+    key, stamp = os.path.normcase(str(pak)), _layout_stamp(stat)
+    if not listing:
+        with _PAK_LOCK:
+            cached = _PAK_LAYOUTS.get(key)
+        if cached is not None and cached[0] == stamp:
+            return cached[1]
+    columns = _stored_directory(key, stamp)
+    if columns is None:
+        names, numbers = [], [[] for _ in _DIRECTORY_ARRAYS]
+        with zipfile.ZipFile(pak) as archive:
+            for item in archive.infolist():
+                if item.is_dir():
+                    continue
+                names.append(item.filename)
+                for column, value in zip(numbers, (item.header_offset, item.compress_type, item.compress_size,
+                                                   item.file_size, item.CRC, item.flag_bits)):
+                    column.append(value)
+        if _layout_stamp(os.stat(pak)) != stamp:
+            raise ResourceError(f'Archive changed while reading its directory: {pak}')
+        columns = names, *numbers
+        _store_directory(key, stamp, columns)
+    names, offsets, methods, compressed, sizes, crcs, flags = columns
+    layout = dict(zip(names, zip(offsets, methods, compressed, sizes, crcs, flags)))
+    with _PAK_LOCK:
+        _PAK_LAYOUTS[key] = (stamp, layout)
+    return list(zip(names, sizes, crcs)) if listing else layout
+
+
+# A PAK's directory kept on disk between sessions (set by the application):
+# reading the 60-odd central directories of the game and big mods is most of a
+# cold index. Keyed by path, size and times; a missing, stale or damaged copy
+# is simply read again from the archive, and every member read checks its CRC.
+_DIRECTORY_FOLDER = None
+_DIRECTORY_SCHEMA = 1
+_DIRECTORY_ARRAYS = ('Q', 'H', 'Q', 'Q', 'I', 'H')  # offset, method, compressed, size, crc, flags
+
+
+def set_directory_cache(folder):
+    global _DIRECTORY_FOLDER
+    _DIRECTORY_FOLDER = Path(folder) if folder else None
+
+
+def _directory_file(key):
+    return _DIRECTORY_FOLDER / (hashlib.sha256(key.encode('utf-8')).hexdigest()[:32] + '.dir')
+
+
+def _stored_directory(key, stamp):
+    if _DIRECTORY_FOLDER is None:
+        return None
+    try:
+        schema, path, saved, names, *raw = marshal.loads(_directory_file(key).read_bytes())
+        if schema != _DIRECTORY_SCHEMA or path != key or tuple(saved) != stamp or len(raw) != len(_DIRECTORY_ARRAYS):
+            return None
+        numbers = []
+        for code, data in zip(_DIRECTORY_ARRAYS, raw):
+            column = array(code); column.frombytes(data)
+            if len(column) != len(names):
+                return None
+            numbers.append(column)
+        return names, *numbers
+    except (OSError, ValueError, EOFError, TypeError):
+        return None
+
+
+def _store_directory(key, stamp, columns):
+    if _DIRECTORY_FOLDER is None:
+        return
+    names, *numbers = columns
+    try:
+        payload = marshal.dumps((_DIRECTORY_SCHEMA, key, stamp, names,
+                                 *(array(code, values).tobytes() for code, values in zip(_DIRECTORY_ARRAYS, numbers))))
+        _DIRECTORY_FOLDER.mkdir(parents=True, exist_ok=True)
+        target = _directory_file(key)
+        temporary = target.with_name(target.name + f'.{os.getpid()}.{threading.get_ident()}.tmp')
+        temporary.write_bytes(payload)
+        os.replace(temporary, target)
+    except (OSError, OverflowError, ValueError) as exc:
+        import logging
+        logging.info('Archive directory not kept on disk: %s', exc)
+
+
+def _read_member(pak, member, layout):
+    offset, method, compressed, size, crc, flags = layout[member]
+    if flags & 0x1 or method not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
+        with zipfile.ZipFile(pak) as archive:  # encrypted or unusual: the library decides
+            return archive.read(member)
+    with open(pak, 'rb') as stream:
+        stream.seek(offset)
+        signature, name_length, extra_length = _LOCAL_HEADER.unpack(stream.read(_LOCAL_HEADER.size))
+        if signature != b'PK\x03\x04':
+            raise zipfile.BadZipFile(f'Bad local header for {member} in {pak}')
+        stream.seek(offset + _LOCAL_HEADER.size + name_length + extra_length)
+        raw = stream.read(compressed)
+    data = raw if method == zipfile.ZIP_STORED else zlib.decompress(raw, -15)
+    if len(data) != size or zlib.crc32(data) != crc:
+        raise zipfile.BadZipFile(f'Bad CRC-32 for {member} in {pak}')
+    return data
+
+
+def _loose_files(folder: Path, root: Path, warnings: list, *, records=False):
+    """Use enumeration metadata for ordinary files; resolve links before reading."""
     found = []
-    for current, directories, files in os.walk(folder, followlinks=False):
-        base = Path(current)
-        for name in list(directories):
-            path = base / name
-            if path.is_symlink() or os.path.isjunction(path):
-                directories.remove(name)
-                if not path.resolve().is_relative_to(root):
-                    warnings.append(f"Skipped loose file outside source root: {path}")
+    pending = [folder]
+    while pending:
+        current = pending.pop()
+        if not current.is_dir():
+            continue
+        with os.scandir(current) as entries:
+            for entry in entries:
+                path = Path(entry.path)
+                stat = entry.stat(follow_symlinks=False)
+                linked = entry.is_symlink() or bool(getattr(stat, 'st_file_attributes', 0) & 0x400)
+                if linked:
+                    if not path.resolve().is_relative_to(root):
+                        warnings.append(f"Skipped loose file outside source root: {path}")
+                        continue
+                    if entry.is_dir():
+                        for item in path.rglob("*"):
+                            if item.is_file() and item.resolve().is_relative_to(root):
+                                found.append((item,item.stat()) if records else item)
+                        continue
+                    stat = entry.stat()
+                if entry.is_dir(follow_symlinks=False):
+                    pending.append(path)
                 else:
-                    found.extend(item for item in path.rglob("*") if item.is_file()
-                                 and item.resolve().is_relative_to(root))
-        for name in files:
-            path = base / name
-            if path.is_symlink() and not path.resolve().is_relative_to(root):
-                warnings.append(f"Skipped loose file outside source root: {path}")
-                continue
-            found.append(path)
+                    found.append((path,stat) if records else path)
     return found
 
 
@@ -195,7 +377,8 @@ def game_version(game_root: str | Path):
     from .locations import game_log_path
     log = game_log_path()
     try:
-        header = re.search(r"GATES OF HELL - v(\d+\.\d+\.\d+)", log.read_bytes()[:8192].decode("latin-1"))
+        with log.open('rb') as stream:
+            header = re.search(r"GATES OF HELL - v(\d+\.\d+\.\d+)", stream.read(8192).decode("latin-1"))
         logged = _parse_game_version(header.group(1)) if header else None
         if logged and (version is None or logged[:2] == version[:2]):
             version = logged
@@ -244,7 +427,6 @@ class ResourceIndex:
         self.sources: list[dict] = []
         self.warnings: list[str] = []
         self.disabled_mods: list[dict] = []
-        self._archives: dict[str, zipfile.ZipFile] = {}
         self._units: list[dict] | None = None
         self._entity_by_id: dict[str, list[str]] = {}
         self._resolution_cache: dict[str, dict] = {}
@@ -252,9 +434,12 @@ class ResourceIndex:
         self._source_digests: dict[int, object] = {}
         self._lock = threading.RLock()
         self._base_lock = threading.Lock()  # the catalog warmup and the player may both ask for it
+        self._read_cache = _ReadCache()
         self.built = False
 
     def close(self):
+        self._read_cache = _ReadCache()
+        self.__dict__.pop('_catalog_source', None)
         registration=self.__dict__.pop('_registration_source_view',None)
         if registration is not None:registration.close()
         for view in self.__dict__.pop('_retired_mountable_views', []):
@@ -266,18 +451,16 @@ class ResourceIndex:
             for view in reversed(context['views']):view.close()
             context['temp'].cleanup()
         self.__dict__.pop('_registration_graphs', None)
+        self.__dict__.pop('_charge_contracts', None)
         self.__dict__.pop('_weapon_labels', None)
         self.__dict__.pop('_commander_weapons', None)
-        for key in ('_armor_catalog','_armor_items','_armor_material_includes','_armor_defines','_armor_base_volumes','_support_catalog',
+        for key in ('_include_documents','_armor_catalog','_armor_items','_armor_by_id','_armor_material_includes','_armor_defines','_armor_base_volumes','_support_catalog',
                     '_commander_weapon_items','_commander_support_items','_commander_supports','_rider_catalog',
                     '_dlc_log_stamp','_dlc_log_state','_mountable_state'):
             self.__dict__.pop(key,None)
         base = self.__dict__.pop('_base_game_view', None)
         if base is not None:
             base.close()
-        for archive in self._archives.values():
-            archive.close()
-        self._archives.clear()
 
     def base_game(self):
         """Archive-only stock view, before DLC overlays and mods (no disk writes).
@@ -285,17 +468,22 @@ class ResourceIndex:
         Common archives also contain DLC items. Callers must additionally use
         set/registry/dlc.reg; archive provenance alone is not an entitlement.
         """
+        owner = self.catalog_source()
+        if owner is not self: return owner.base_game()
         with self._base_lock:
             return self._build_base_game()
 
     def _build_base_game(self):
         if '_base_game_view' not in self.__dict__:
             base = ResourceIndex(self.game_root)
+            base._read_cache = self._read_cache
+            @lru_cache(maxsize=None)
+            def stock_archive(path):
+                return not re.search(r'(?:^|_)dlc\d+', Path(path).stem, re.I)
             for key, effective in self.entries.items():
                 candidates = self.collisions.get(key, [effective])
                 stock = [entry for entry in candidates if entry.source_id == 'vanilla'
-                         and entry.archive_path and not re.search(
-                             r'(?:^|_)dlc\d+', Path(entry.archive_path).stem, re.I)]
+                         and entry.archive_path and stock_archive(entry.archive_path)]
                 if stock:
                     base.entries[key] = stock[-1]
             for entry in base.entries.values():
@@ -312,13 +500,18 @@ class ResourceIndex:
             return read_availability(self)
 
     def mountable_game(self):
-        """Official weapon resources, including DLC verified in the last game run.
+        """Mountable weapon resources: the game's, including DLC verified in the
+        last game run, and those of the active mods (MACE's Japanese machine
+        guns: AGrievousGuy), never the tool's own built vehicles.
 
-        Mounts still use base_game(). Mods/loose overrides are never smuggled
-        into the official weapon catalog. A changed scan invalidates memory and
-        disk catalog identities, even if all installed PAKs stayed identical.
+        Mounts still use base_game(). Loose files outside mods are not weapons.
+        A changed scan invalidates memory and disk catalog identities, even if
+        all installed PAKs stayed identical.
         """
         from .dlc import read_availability, dlc_archive, _path
+        from .registration import is_own_mod
+        owner = self.catalog_source()
+        if owner is not self: return owner.mountable_game()
         with self._base_lock:
             state = read_availability(self)
             if self.__dict__.get('_mountable_state') != state:
@@ -331,16 +524,21 @@ class ResourceIndex:
                 self._mountable_state = state
             if '_mountable_game_view' not in self.__dict__:
                 view = ResourceIndex(self.game_root)
+                view._read_cache = self._read_cache
+                @lru_cache(maxsize=None)
+                def available_archive(path):
+                    return not dlc_archive(path) or _path(path) in state.archives
                 for key, effective in self.entries.items():
                     candidates = self.collisions.get(key, [effective])
-                    official = [e for e in candidates if e.source_id == 'vanilla' and e.archive_path
-                                and (not dlc_archive(e.archive_path) or _path(e.archive_path) in state.archives)]
+                    official = [e for e in candidates if (e.source_id == 'vanilla' and e.archive_path
+                                and available_archive(e.archive_path))
+                                or (e.source_id != 'vanilla' and not is_own_mod(e.source_id))]
                     if official:
                         view.entries[key] = official[-1]
                 for entry in view.entries.values():
                     if entry.path.startswith('entity/') and entry.path.endswith('.def'):
                         view._entity_by_id.setdefault(PurePosixPath(entry.path).stem.casefold(), []).append(entry.path)
-                view.sources = self.sources[:1]
+                view.sources = [s for s in self.sources if not is_own_mod(s['id'])]
                 view._available_dlc = frozenset(state.available)
                 view.built = True
                 self._mountable_game_view = view
@@ -358,16 +556,20 @@ class ResourceIndex:
         with self._base_lock:
             if '_registration_source_view' not in self.__dict__:
                 view=ResourceIndex(self.game_root,self.mod_roots)
+                view._read_cache = self._read_cache
+                view.entries = self.entries.copy()
+                view.collisions = self.collisions.copy()
+                view._entity_by_id = self._entity_by_id.copy()
                 for key,effective in self.entries.items():
-                    candidates=self.collisions.get(key,[effective])
                     registration=(key.startswith(('set/interaction_entity/','set/multiplayer/units/'))
                                   or key in ('set/registry/unit.reg','set/tp_control.set'))
                     if '/modular_workshop/' in key:registration=False
-                    kept=[e for e in candidates if not registration or not is_own_mod(e.source_id)]
-                    for entry in kept:view._put(entry)
-                for entry in view.entries.values():
-                    if entry.path.startswith('entity/') and entry.path.endswith('.def'):
-                        view._entity_by_id.setdefault(PurePosixPath(entry.path).stem.casefold(),[]).append(entry.path)
+                    if not registration:continue
+                    kept=[e for e in self.collisions.get(key,[effective]) if not is_own_mod(e.source_id)]
+                    if kept:view.entries[key]=kept[-1]
+                    else:view.entries.pop(key,None)
+                    if len(kept)>1:view.collisions[key]=kept
+                    else:view.collisions.pop(key,None)
                 view.sources=list(self.sources);view.disabled_mods=list(self.disabled_mods);view.built=True
                 view._registration_authority=True
                 self._registration_source_view=view
@@ -392,36 +594,72 @@ class ResourceIndex:
         # localization rules. Only this generated directory is enumerated.
         scanned=ResourceIndex(root).build()
         view=ResourceIndex(self.game_root,[p for p in self.mod_roots if str(p).casefold() not in excluded]+[root])
+        view._read_cache = self._read_cache
         try:
+            shared_snapshot = not any(str(Path(s['root']).resolve()).casefold() in excluded for s in self.sources)
             with self._lock:
                 view.sources=[dict(s) for s in self.sources if str(Path(s['root']).resolve()).casefold() not in excluded]
-                for key,effective in self.entries.items():
-                    checkpoint()
-                    entries=[e for e in self.collisions.get(key,[effective]) if e.source_root.casefold() not in excluded]
-                    if entries:
-                        view.entries[key]=entries[-1]
-                        if len(entries)>1:view.collisions[key]=list(entries)
+                if shared_snapshot:
+                    # ResourceEntry is immutable. Copy the maps in C and detach
+                    # only lists an overlay changes, instead of rebuilding the
+                    # entire game's resource/entity maps at every design step.
+                    view.entries = self.entries.copy()
+                    view.collisions = self.collisions.copy()
+                    view._entity_by_id = self._entity_by_id.copy()
+                else:
+                    for key,effective in self.entries.items():
+                        checkpoint()
+                        entries=[e for e in self.collisions.get(key,[effective]) if e.source_root.casefold() not in excluded]
+                        if entries:
+                            view.entries[key]=entries[-1]
+                            if len(entries)>1:view.collisions[key]=list(entries)
                 view.warnings=list(self.warnings)
             priority=max(s['priority'] for s in view.sources)+1
             source=_mod_metadata(root);source['priority']=priority
             source['fingerprint']=scanned.sources[0]['fingerprint']
             view.sources.append(source)
             for key,effective in scanned.entries.items():
+                if shared_snapshot and key in view.collisions:
+                    view.collisions[key] = list(view.collisions[key])
                 for entry in scanned.collisions.get(key,[effective]):
                     checkpoint()
                     view._put(replace(entry,source_id=source['id'],origin=source['name'],version=source['version'],priority=priority))
-            for entry in view.entries.values():
+            definitions = (view.entries[key] for key in scanned.entries) if shared_snapshot else view.entries.values()
+            for entry in definitions:
                 if entry.path.casefold().startswith('entity/') and entry.path.casefold().endswith('.def'):
-                    view._entity_by_id.setdefault(PurePosixPath(entry.path).stem.casefold(),[]).append(entry.path)
+                    identifier = PurePosixPath(entry.path).stem.casefold()
+                    if shared_snapshot:
+                        paths = view._entity_by_id.get(identifier, [])
+                        if any(p.casefold() == entry.path.casefold() for p in paths):
+                            paths = [entry.path if p.casefold() == entry.path.casefold() else p for p in paths]
+                        else: paths = [*paths, entry.path]
+                        view._entity_by_id[identifier] = paths
+                    else:
+                        view._entity_by_id.setdefault(identifier,[]).append(entry.path)
             view.built=True
+            # Temporary compiled entities do not change the native game/mod
+            # catalogs. All design stages must use the same prepared catalogs,
+            # rather than scan the entire game again for every seed or fitting.
+            # A native override or an excluded native mod keeps its own scope.
+            owner = self.catalog_source()
+            from .registration import is_own_mod
+            if (scanned.entries and all(p.startswith('entity/-vehicle/workshop/') for p in scanned.entries)
+                    and not any(str(Path(s['root']).resolve()).casefold() in excluded
+                                for s in owner.sources if not is_own_mod(s['id']))):
+                view._catalog_source = owner
             return view
         except BaseException:
             view.close();raise
         finally:
             scanned.close()
 
+    def catalog_source(self):
+        return self.__dict__.get('_catalog_source', self)
+
     def _put(self, entry: ResourceEntry):
-        digest = self._source_digests.setdefault(entry.priority, hashlib.sha256())
+        digest = self._source_digests.get(entry.priority)
+        if digest is None:
+            digest = self._source_digests[entry.priority] = hashlib.sha256()
         stamp = entry.modified_ns if entry.physical_path else entry.crc
         digest.update(f"{entry.path.casefold()}\0{entry.size}\0{stamp}\n".encode("utf-8"))
         key = entry.path.casefold()
@@ -476,31 +714,73 @@ class ResourceIndex:
                     # still index localizations, and never invent missing files.
                     self.warnings.append(f"Mod {source['name']} has no resource folder; metadata and any localizations are indexed: {root}")
                 pak_paths = sorted(resource_root.rglob("*.pak"), key=_pak_order)
-                for pak in pak_paths:
-                    if not pak.resolve().is_relative_to(root):
-                        self.warnings.append(f"Skipped archive outside source root: {pak}")
-                        continue
-                    mount = pak.parent.relative_to(resource_root).as_posix()
-                    mount = "" if mount == "." else mount + "/"
-                    try:
-                        members = _pak_members(pak, mount)
-                    except (zipfile.BadZipFile, OSError) as exc:
-                        raise ResourceError(f"Unreadable PAK {pak}: {exc}") from exc
-                    checkpoint()
-                    pak_name = str(pak)
-                    for virtual, member, size, crc in members:
-                        if virtual is None:
-                            self.warnings.append(f"Skipped unsafe member: {pak.name}:{member}")
+                global _STOCK_ARCHIVES
+                stamp = None
+                prefix = None
+                if pak_paths:
+                    stamp = (str(root), priority, source['id'], source['name'], source['version'],
+                             tuple(_archive_stamp(pak) for pak in pak_paths))
+                    with _PAK_LOCK:
+                        prefix = _MOD_ARCHIVES.get(str(root)) if priority else _STOCK_ARCHIVES
+                hit = prefix is not None and prefix[0] == stamp
+                if not hit:
+                    # Build each mod's archive layer independently of earlier priorities.
+                    layer = ResourceIndex(root) if priority and pak_paths else self
+                    warning_start = len(self.warnings)
+                    for pak in pak_paths:
+                        if not pak.resolve().is_relative_to(root):
+                            self.warnings.append(f"Skipped archive outside source root: {pak}")
                             continue
-                        self._put(ResourceEntry(virtual, str(root), source["name"], source["id"],
-                                                source["version"], size, priority,
-                                                archive_path=pak_name, archive_member=member, crc=crc))
-                for loose in sorted(_loose_files(resource_root, root, self.warnings), key=lambda item: str(item).casefold()):
+                        mount = pak.parent.relative_to(resource_root).as_posix()
+                        mount = "" if mount == "." else mount + "/"
+                        try:
+                            members = _pak_members(pak, mount)
+                        except (zipfile.BadZipFile, OSError) as exc:
+                            raise ResourceError(f"Unreadable PAK {pak}: {exc}") from exc
+                        checkpoint()
+                        pak_name = str(pak)
+                        for virtual, member, size, crc in members:
+                            if virtual is None:
+                                self.warnings.append(f"Skipped unsafe member: {pak.name}:{member}")
+                                continue
+                            layer._put(ResourceEntry(virtual, str(root), source["name"], source["id"],
+                                                    source["version"], size, priority,
+                                                    archive_path=pak_name, archive_member=member, crc=crc))
+                    if stamp and priority in layer._source_digests:
+                        prefix = (stamp, layer.entries.copy() if layer is self else layer.entries,
+                                  {k:tuple(v) for k,v in layer.collisions.items()},
+                                  layer._source_digests[priority].copy(), tuple(self.warnings[warning_start:]))
+                        with _PAK_LOCK:
+                            if not priority and len(layer.entries) <= 400000:
+                                _STOCK_ARCHIVES = prefix
+                            elif priority and len(layer.entries) <= _MOD_ARCHIVE_LIMIT:
+                                _MOD_ARCHIVES[str(root)] = prefix
+                                _MOD_ARCHIVES.move_to_end(str(root))
+                                while sum(len(row[1]) for row in _MOD_ARCHIVES.values()) > _MOD_ARCHIVE_LIMIT:
+                                    _MOD_ARCHIVES.popitem(last=False)
+                    else:
+                        prefix = None
+                if prefix and (hit or priority):
+                    _, entries, collisions, digest, warnings = prefix
+                    if priority:
+                        for key in self.entries.keys() & entries.keys():
+                            previous = self.collisions.setdefault(key, [self.entries[key]])
+                            previous.extend(collisions.get(key, (entries[key],)))
+                        for key, values in collisions.items():
+                            if key not in self.entries:
+                                self.collisions[key] = list(values)
+                    else:
+                        self.collisions.update({k:list(v) for k,v in collisions.items()})
+                    self.entries.update(entries)
+                    self._source_digests[priority] = digest.copy()
+                    if hit:self.warnings.extend(warnings)
+                loose_files = _loose_files(resource_root, root, self.warnings, records=True)
+                prefix_length = len(str(resource_root)) + 1
+                for loose, loose_stat in sorted(loose_files, key=lambda item: str(item[0]).casefold()):
                     checkpoint()
                     if loose.suffix.casefold() == ".pak":
                         continue
-                    virtual = normalize_path(loose.relative_to(resource_root).as_posix())
-                    loose_stat = loose.stat()
+                    virtual = normalize_path(str(loose)[prefix_length:])
                     self._put(ResourceEntry(virtual, str(root), source["name"], source["id"], source["version"],
                                             loose_stat.st_size, priority, physical_path=str(loose), modified_ns=loose_stat.st_mtime_ns))
                 localization_root = root / "localizations"
@@ -552,20 +832,55 @@ class ResourceIndex:
         if entry.size > max_bytes:
             raise ResourceError(f"Resource exceeds read limit ({max_bytes} bytes): {entry.path}")
         with self._lock:
+            cached = self._read_cache.get(entry)
+            if cached is not None:
+                self._check_cached(entry, cached[1])
+                return cached[0]
             self._check_unchanged(entry)
             if entry.physical_path:
                 with Path(entry.physical_path).open("rb") as file:
                     data = file.read(max_bytes + 1)
                 if len(data) > max_bytes:
                     raise ResourceError("Resource grew beyond the read limit")
+                self._read_cache.put(entry, data, None)
                 return data
-            return self._archives[entry.archive_path].read(entry.archive_member)
+            stamp = self._archive_stamp(entry)
+            try:
+                data = _read_member(entry.archive_path, entry.archive_member, _read_layout(entry.archive_path))
+            except (zipfile.BadZipFile, zlib.error, struct.error) as exc:
+                raise ResourceError(f"Unreadable PAK member {entry.archive_member} in {entry.archive_path}: {exc}") from exc
+            if self._archive_stamp(entry) != stamp:
+                raise ResourceError('Archive resource changed while reading; rebuild the resource index')
+            self._read_cache.put(entry, data, stamp)
+            return data
 
     def verify_unchanged(self, path: str) -> None:
         """The change guards of read_bytes, without reading the content."""
         entry = self.resolve(path)
         with self._lock:
+            cached = self._read_cache.get(entry)
+            if cached is not None: self._check_cached(entry, cached[1])
+            else: self._check_unchanged(entry)
+
+    def remember_written(self, path, data, stat):
+        """Remember immutable compiler output observed through its write handle.
+
+        Indexing and subsequent reads still check the physical path, size and
+        mtime. Modified files cannot hit this entry. This method writes no file.
+        """
+        if stat.st_size == len(data):
+            self._read_cache.store(self._read_cache.file_key(path, stat.st_size, stat.st_mtime_ns), bytes(data), None)
+
+    @staticmethod
+    def _archive_stamp(entry):
+        stat = os.stat(entry.archive_path)
+        return stat.st_size, stat.st_mtime_ns
+
+    def _check_cached(self, entry, stamp):
+        if entry.physical_path:
             self._check_unchanged(entry)
+        elif self._archive_stamp(entry) != stamp:
+            raise ResourceError('Archive resource changed after indexing; rebuild the resource index')
 
     def _check_unchanged(self, entry: ResourceEntry) -> None:
         if entry.physical_path:
@@ -576,11 +891,10 @@ class ResourceIndex:
             if current_stat.st_size != entry.size or current_stat.st_mtime_ns != entry.modified_ns:
                 raise ResourceError("Loose resource changed after indexing; rebuild the resource index")
             return
-        archive = self._archives.get(entry.archive_path)
-        if archive is None:
-            archive = self._archives[entry.archive_path] = zipfile.ZipFile(entry.archive_path)
-        current = archive.getinfo(entry.archive_member)
-        if current.CRC != entry.crc or current.file_size != entry.size:
+        current = _read_layout(entry.archive_path).get(entry.archive_member)
+        if current is None:
+            raise KeyError(f"There is no item named {entry.archive_member!r} in the archive")
+        if current[4] != entry.crc or current[3] != entry.size:
             raise ResourceError("Archive resource changed after indexing; rebuild the resource index")
 
     read = read_bytes
@@ -716,6 +1030,8 @@ class ResourceIndex:
         return template_id.casefold() in self._entity_by_id
 
     def label_for(self, template_id: str) -> str:
+        owner = self.catalog_source()
+        if owner is not self: return owner.label_for(template_id)
         if self._labels is None:
             self._labels = {}
             # Current game uses gettext POT, not legacy SDL translations. Labels
@@ -739,6 +1055,8 @@ class ResourceIndex:
         return self._labels.get(template_id.casefold(), template_id.replace("_", " "))
 
     def weapon_label(self, identifier):
+        owner = self.catalog_source()
+        if owner is not self: return owner.weapon_label(identifier)
         if not hasattr(self,'_weapon_labels'):
             labels={}
             entries=sorted((e for k,e in self.entries.items() if k.startswith('localizations/default/') and k.endswith('.pot') and '/desc/' in k),key=lambda e:(e.priority,e.path))

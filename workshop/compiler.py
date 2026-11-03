@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import posixpath
 import re
 import struct
@@ -22,6 +23,15 @@ from .geometry import (GeometryError, FREE_MOUNT, whole_model_mount, donor_mount
 
 class CompileError(ValueError):
     pass
+
+
+def _write_generated(resources, path, raw):
+    """Write output once and retain its bytes for the next compilation stage."""
+    with path.open('wb') as file:
+        file.write(raw); file.flush()
+        stat = os.fstat(file.fileno())
+    if hasattr(resources, 'remember_written'):
+        resources.remember_written(path, raw, stat)
 
 
 def _set_matrix(node, matrix):
@@ -48,14 +58,21 @@ def _camera_sockets(resources, template, source, document, source_joint, target_
         if not isinstance(error, KeyError):
             diagnostics.append({'code': 'camera_profile_unavailable', 'level': 'warning', 'message': str(error)})
         return {}, {}
+    refs = {n.args[0] for level in profile.find_all('level')[1:] for n in level.walk('linkBone') if n.args}
+    aliases = _optical_sockets(source, document, source_joint, target_joint, mapping, refs,
+                               diagnostics, external_parent=external_parent)
+    return aliases, {row['path']: row['sha256'] for row in provenance}
+
+
+def _optical_sockets(source, document, source_joint, target_joint, mapping, refs, diagnostics, *, external_parent=None):
+    """Keep native camera/vision frames without carrying the removed geometry."""
     final = parse_model(document.render())
     aliases = {}
     if source_joint not in source['bones'] or target_joint not in final['bones']:
-        return aliases, {}
+        return aliases
     frame = multiply(final['bones'][target_joint]['world'], inverse(source['bones'][source_joint]['world']))
     parent = external_parent if external_parent in final['bones'] else target_joint
     source_names = {name.casefold(): name for name in source['bones']}
-    refs = {n.args[0] for level in profile.find_all('level')[1:] for n in level.walk('linkBone') if n.args}
     for original in sorted(refs):
         source_name = source_names.get(original.casefold())
         emitted = mapping.get(source_name)
@@ -78,7 +95,7 @@ def _camera_sockets(resources, template, source, document, source_joint, target_
         diagnostics.append({'code': 'camera_socket_preserved', 'level': 'info',
                             'bone': name, 'source_bone': original,
                             'message': 'Native aiming camera frame retained without donor hull geometry.'})
-    return aliases, {row['path']: row['sha256'] for row in provenance}
+    return aliases
 
 
 def _parameters(node):
@@ -172,6 +189,35 @@ def _allowed_damage_ids(resources, root, model, extensions=()):
 
 def _values(node):
     return {item.value for item in node.items if isinstance(item, Atom)} | {value for child in node.children for value in _values(child)}
+
+
+# The engine stands a vehicle on bones it reads as ground contacts: support
+# points by name (aircraft gear, mortar and tripod feet: support, support1..3)
+# and wheels by their {parameters "radius=..."}. Carried over from a donor,
+# the whole vehicle is planted on them: a mortar's feet 13 units up the hull
+# sank Sd.Kfz. 250, Bren, M3 and Opel mortar carriers to the module, and a
+# towed gun's wheels a T-28. Only the chassis touches the ground: a donor's
+# contacts are renamed and its wheels lose their radius.
+_GROUND_POINT = re.compile(r"support\d*", re.I)
+
+
+def _ground_points(names, model=None):
+    bones = (model or {}).get("bones", {})
+    return {name for name in names if _GROUND_POINT.fullmatch(name)
+            or (name in bones and "radius" in _parameters(bones[name]["node"]))}
+
+
+def _drop_wheel_radius(node, names):
+    """Keep a donor's wheels as plain geometry: no radius, no physics wheel."""
+    for bone in node.walk("bone"):
+        if bone_name(bone) not in names:
+            continue
+        for parameters in list(bone.children):
+            if parameters.head.casefold() != "parameters":
+                continue
+            for atom in parameters.atoms[1:]:
+                atom.set(";".join(pair for pair in atom.value.split(";")
+                                  if pair.partition("=")[0].strip().casefold() != "radius"))
 
 
 def _volume_mapping(names, reserved, mapping=None):
@@ -276,6 +322,7 @@ def _bind_renamed_volumes(resources, root, mapping):
 
 
 def _selected_places(root, model, names):
+    from .weapon_binding import weapon_link
     weaponry = root.find("Weaponry")
     result, unknown = [], []
     if weaponry is None:
@@ -287,7 +334,8 @@ def _selected_places(root, model, names):
         fallback = place.args[0] if place.args else ""
         if not references and fallback in model["bones"]:
             references = [fallback]
-        owners = [name for name in references if name in model["bones"]]
+        link = weapon_link(place, model)
+        owners = [link] if link else [name for name in references if name in model["bones"]]
         if owners:
             # A place belongs where the bone carrying it is (LinkBone first,
             # then bone/foresight/shooter): references may straddle turret and
@@ -470,6 +518,25 @@ def _macro_arguments(call):
     return values
 
 
+def _shared_include(resources, path):
+    """A global property library, parsed once per resource snapshot and shared:
+    its macro definitions are only read (rendered or cloned), never edited.
+    The catalogs asked for the same few files thousands of times, and copying
+    them was most of a minute. The loose-file change guard still runs."""
+    resolve = getattr(resources, "resolve", None)
+    if resolve is None:
+        return parse(resources.read(path))
+    entry = resolve(path)
+    cache = resources.__dict__.setdefault("_include_documents", {})
+    cached = cache.get(entry)
+    if cached is not None:
+        resources.verify_unchanged(path)
+        return cached
+    document = parse(resources.read(path))
+    cache[entry] = document
+    return document
+
+
 def _include_defines(resources, document, base="", seen=None, depth=0):
     """Macro definitions visible through a document's include chain, in order.
 
@@ -491,7 +558,7 @@ def _include_defines(resources, document, base="", seen=None, depth=0):
             continue
         seen.add(path.casefold())
         try:
-            included = parse(resources.read(path))
+            included = _shared_include(resources, path)
         except (KeyError, OSError, ValueError):
             continue
         definitions.update(_include_defines(resources, included, path, seen, depth+1))
@@ -563,6 +630,47 @@ def _restore_independent_mount_capabilities(root, model):
             if not props.args and not props.children:
                 root.remove(props)
         root.append(block('{props "'+name+'"}'))
+
+
+def _apply_traverse_class(resources, root, model, carriages=()):
+    """Turret tank or casemate, from where the main gun can actually turn.
+
+    Natively the class follows the gun: every vehicle whose main weapon has a
+    free yaw joint is a turret tank, and the casemates and SPGs whose yaw is
+    limited (StuG, Hetzer, Elefant, Archer, Bishop) carry no "turret" prop, so
+    the driver turns the hull to aim. A built vehicle kept its chassis class:
+    a Pz 38(t) with a QF 25-pdr traversing 4.5 degrees stayed a turret tank
+    and never turned to a target outside that arc. Only a gun decides this,
+    never a machine gun; a towed gun's carriage (carriages) is no turret ring.
+    Returns "casemate", "turret" or None when the class was left as it was.
+    """
+    from .gun_assembly import _primary_place
+    from .articulation import weapon_joints
+    from .registration import _stuff_definition, RegistrationError
+    primary = _primary_place(root)
+    place = next((p for w in root.find_all('Weaponry') for p in w.find_all('place')
+                  if p.args and p.args[0] == primary), None)
+    weapon = place.find('weapon') if place is not None else None
+    if weapon is None or not weapon.args or not hasattr(resources, 'entries'):
+        return None
+    try:
+        kind = _stuff_definition(resources, weapon.args[0]).split('/')[2]
+    except (RegistrationError, FileNotFoundError, ValueError, IndexError):
+        return None
+    if kind != 'gun':
+        return None
+    yaw = [j for j in weapon_joints(model, root) if primary in j['weapons'] and j['bone'] not in carriages
+           and abs(j['matrix'][2][2]) > 0.9]  # a yaw joint turns about the vertical
+    if not yaw:
+        return None
+    turret = any(abs(j['limits'][1] - j['limits'][0]) >= 180 for j in yaw)
+    keep, drop = ('turret', '-turret') if turret else ('-turret', 'turret')
+    for props in root.find_all('props'):
+        props.items = [item for item in props.items if not (isinstance(item, Atom) and item.value in (keep, drop))]
+        if not props.args and not props.children:
+            root.remove(props)
+    root.append(block('{props "' + keep + '"}'))  # after inherited class props (tank.ext adds "turret")
+    return 'turret' if turret else 'casemate'
 
 
 def _explicit_weapon_operators(resources, root):
@@ -1368,7 +1476,7 @@ def seat_markers(resources, template):
         if not place.args or not place.args[0]: continue
         values = effective.setdefault(place.args[0], {})
         for node in place.children:
-            if node.head.casefold() in ('group', 'linkbone'):
+            if node.head.casefold() in ('group', 'linkbone', 'entity'):
                 values[node.head.casefold()] = node.args[0] if node.args else ''
     # A place linked to another place is the same soldier elsewhere: a towed
     # gun's crew pushing it (driver1 -> gunner) or riding it (seat1 -> driver1).
@@ -1376,7 +1484,8 @@ def seat_markers(resources, template):
                   if len(link.args) >= 2 and link.args[0] in effective and link.args[1] in effective}
     seats = []
     for role, values in effective.items():
-        if role in alternates:
+        # Entity sockets display their attached item, not a human actor.
+        if role in alternates or values.get('entity'):
             continue
         seats.append({'place': role, 'group': values.get('group', 'crew').casefold() or 'crew',
                       'bone': values.get('linkbone', ''),
@@ -1823,6 +1932,8 @@ class _Assets:
         self.animation_context = {}
         self.animation_names = {}
         self.mesh_flips = {}
+        self.mesh_filters = {}
+        self.mesh_context = {}
         # Materials a source mesh already lacks (e.g. MACE char_2c_xx/fan1_xx.ply):
         # the reference is kept as-is, so the part looks exactly like the original.
         self.missing_materials = set()
@@ -1851,6 +1962,13 @@ class _Assets:
             name: multiply(final_model["bones"][bone_mapping.get(name,name)]["local"], inverse(bone["local"]))
             for name,bone in source_model["bones"].items()
             if name not in exclude and bone_mapping.get(name,name) in final_model["bones"]}
+        from .geometry import linear_determinant
+        self.mesh_context[owner] = {
+            bone_mapping.get(name, name): (
+                linear_determinant(final_model['bones'][bone_mapping.get(name, name)]['world']) *
+                linear_determinant(bone['world']) < 0)
+            for name, bone in source_model['bones'].items()
+            if name not in exclude and bone_mapping.get(name, name) in final_model['bones']}
 
     def prune(self, document):
         """Drop sequences whose animation lost every track: the engine aborts
@@ -1877,13 +1995,17 @@ class _Assets:
                     parent.remove(animation)
         return dropped
 
-    def add(self, path, owner, *, animation_delta=None):
-        key = (path, owner)
+    def add(self, path, owner, *, animation_delta=None, mesh_flip=None):
+        suffix = posixpath.splitext(path)[1].lower()
+        flip = bool(self.mesh_flips.get(owner)) if mesh_flip is None else mesh_flip
+        # A source mesh can occur on both reflected and ordinary bones. Keep
+        # its two index buffers separate while sharing all material resources.
+        key = (path, owner, bool(flip)) if suffix == '.ply' else (path, owner)
         if key in self.names:
             return self.names[key]
-        suffix = posixpath.splitext(path)[1].lower()
         digest = hashlib.sha256(path.encode()).hexdigest()[:10]
-        name = f"{owner}_{digest}{suffix}"
+        variant = ('_faces' if suffix == '.ply' and flip else '') + ('_shell' if suffix == '.ply' and (path, owner) in self.mesh_filters else '')
+        name = f"{owner}_{digest}{variant}{suffix}"
         try:
             raw = self.resources.read(path)
         except (KeyError, OSError):
@@ -1891,7 +2013,13 @@ class _Assets:
         self.names[key] = name
         self.sources[path] = hashlib.sha256(raw).hexdigest()
         if suffix == ".ply":
-            if self.mesh_flips.get(owner):
+            keep = self.mesh_filters.get((path, owner))
+            if keep is not None:
+                # A fitting that is only part of its source mesh (a mantlet
+                # sharing gun_rot.ply with the breech): the rest is hidden.
+                from .geometry import hide_mesh_faces
+                raw=hide_mesh_faces(raw, keep.__getitem__)
+            if flip:
                 from .geometry import reverse_mesh_winding
                 raw=reverse_mesh_winding(raw)
             materials = sorted({name for _, name in mesh_materials(raw)})
@@ -1937,6 +2065,22 @@ class _Assets:
         return name
 
     def rewrite(self, doc, path, owner, animation_delta=None):
+        if path.lower().endswith('.mtl'):
+            from .textures import texture_path, TEXTURE_CHANNELS
+            for node in doc.walk():
+                if node.head.casefold() not in TEXTURE_CHANNELS or not node.args:continue
+                reference=node.args[0]
+                if reference.startswith(('$','/','%')):continue
+                source=texture_path(self.resources,path,reference)
+                if source is None:
+                    self.diagnostics.append({'code':'source_missing_texture','level':'warning','path':path,
+                        'message':f'Source material already lacks texture {reference}; kept as in the original'})
+                    continue
+                # Preserve the resource authority explicitly. A copied material
+                # no longer lives beside its source textures; extensionless
+                # names must be resolved before relocating it, for every map.
+                node.atoms[1].set('/'+source)
+                self.sources[source]=hashlib.sha256(self.resources.read(source)).hexdigest()
         # A sequence without {file} plays "<name>.anm" from its model's folder,
         # wherever it is declared (bone animations included: the MACE triple
         # Polsten's fire00-02). The workshop model lives elsewhere, so name the
@@ -1950,14 +2094,24 @@ class _Assets:
                     except (KeyError, OSError):
                         continue
                     sequence.append(block("{file " + quote(sequence.args[0] + ".anm") + "}"))
-        for node in doc.walk():
+        def instances(scope, inherited):
+            if isinstance(scope, Node):
+                name = bone_name(scope) if scope.head.casefold() == 'bone' else None
+                inherited = self.mesh_context.get(owner, {}).get(name, inherited)
+                yield scope, inherited
+            for child in scope.children:
+                yield from instances(child, inherited)
+
+        for node, mesh_flip in instances(doc, bool(self.mesh_flips.get(owner))):
             for atom in node.atoms:
                 suffix = posixpath.splitext(atom.value)[1].lower()
-                if suffix not in (".ply", ".vol", ".anm", ".mtl", ".dds", ".tga", ".png") or atom.value.startswith("/"):
+                if suffix not in (".ply", ".vol", ".anm", ".mtl", ".dds", ".tga", ".png"):
+                    continue
+                if atom.value.startswith('/') and not (suffix == '.ply' and mesh_flip):
                     continue
                 source = resolve_path(path, atom.value)
                 try:
-                    name = self.add(source, owner, animation_delta=animation_delta)
+                    name = self.add(source, owner, animation_delta=animation_delta, mesh_flip=mesh_flip)
                 except (KeyError, OSError):
                     # Texture names may be global resources, resolved by the active resource stack.
                     if suffix in (".dds", ".tga", ".png"):
@@ -2006,13 +2160,15 @@ def _compile_wreck(resources, recipient_id, donor_id, recipient_mount, donor_mou
         parent = model["bones"][recipient_mount]["parent"]
     has_donor = not blown_off and donor_mount in donor_model["bones"] and donor_mount in intact_donor_model["bones"]
     donor_names = descendants(donor_model["bones"], donor_mount) if has_donor else set()
-    bone_mapping = _volume_mapping(donor_names, set(model["bones"])-receiver_names-roles)
+    contacts = _ground_points(donor_names, donor_model)
+    bone_mapping = _volume_mapping(donor_names, (set(model["bones"])-receiver_names-roles) | contacts)
     receiver_parent = model["bones"][parent]["node"] if parent else model["skeleton"]
     copied = None
     if has_donor:
         copied = donor_model["bones"][donor_mount]["node"].clone()
         donor_names -= _prune_hull_systems(copied)
         _rename_bone_refs(copied, bone_mapping)
+        _drop_wheel_radius(copied, {bone_mapping.get(name, name) for name in contacts})
         # Keep the donor damage displacement relative to its intact rest posture.
         rest_correction = multiply(local_mount, inverse(intact_donor_model["bones"][donor_mount]["local"]))
         wreck_local = multiply(rest_correction, donor_model["bones"][donor_mount]["local"])
@@ -2227,6 +2383,9 @@ def _compile_vehicle_edit(resources, template, transform, output_dir, new_id):
         model=parse_model(model['document'].render())
         skipped=apply_limits(model,root,transform['joint_limits'],{'hull':{n:n for n in model['bones']},'turret':{}})
         if skipped:diagnostics.append(skipped_limits_diagnostic(skipped))
+    if transform.get('mobility') is not None:
+        from .mobility import apply as apply_mobility
+        apply_mobility(root,transform['mobility'],diagnostics)
     contract = None
     if transform.get('commander_mg') is not None:
         from .commander_mg import apply_mount
@@ -2296,6 +2455,9 @@ def _compile_vehicle_edit(resources, template, transform, output_dir, new_id):
               'recipient_mount':'@full','donor_mount':'@full','bone_mapping':{},'bone_map':{},
               'state_profile':profile,'wrecks':wrecks,'validation':{'structural':'passed','dependencies':validation,
                 'game_runtime':'pending','campaign_acceptance':'pending'}}
+    from .weapon_effects import capture, transplant, interaction_source
+    metadata['weapon_effects'] = transplant(capture(resources, template), {p:p for p in profile['weapon_places']})
+    metadata['interaction_donor'] = interaction_source(resources, template)
     if contract:
         metadata['commander_mg']=contract
         profile['commander_mg']=contract
@@ -2332,7 +2494,7 @@ def _compile_vehicle_edit(resources, template, transform, output_dir, new_id):
             prepared[name]=raw.replace(b'\r\n',b'\n').replace(b'\n',b'\r\n')
     metadata['file_hashes']={name:hashlib.sha256(raw).hexdigest() for name,raw in prepared.items()}
     assets.target.mkdir(parents=True)
-    for name,raw in prepared.items(): (assets.target/name).write_bytes(raw)
+    for name,raw in prepared.items(): _write_generated(resources,assets.target/name,raw)
     result={'id':new_id,'output_dir':str(output_dir),'entity_path':'-vehicle/workshop/'+new_id,
             'definition_path':'entity/-vehicle/workshop/'+new_id+'/'+new_id+'.def',
             'model_path':'entity/-vehicle/workshop/'+new_id+'/'+new_id+'.mdl',
@@ -2461,8 +2623,30 @@ def compile_assembly(resources, recipient_template, donor_template, transform, o
     else:
         recipient_places, recipient_unknown = _selected_places(recipient_root, recipient_model, recipient_names)
     donor_places, donor_unknown = _selected_places(donor_root, donor_model, donor_names)
+    from .weapon_binding import weapon_link, barrel_bones
     donor_place_bones = {id(p):p.args[0] for p in donor_places if p.args and p.args[0] in donor_model['bones']}
+    # The common ancestor of several muzzles establishes ownership, not a
+    # native attachment socket. Keep that inference out of the emitted place.
     donor_place_names = {id(p):p.args[0] for p in donor_places if p.args}
+    weapon_reference_sources = {}
+    for place in donor_places:
+        if not barrel_bones(place, donor_model) or place.find('foresight') is not None:
+            continue
+        weapon=place.find('weapon')
+        if weapon is None:continue
+        from .gun_assembly import _fillings
+        from .registration import RegistrationError
+        references={}
+        try:
+            _,dependencies=_fillings(resources,weapon,references)
+        except (KeyError,FileNotFoundError,RegistrationError):
+            continue
+        weapon_reference_sources.update(dependencies)
+        sight=references.get('foresight')
+        if sight in donor_names:
+            # Stuff's default sight is resolved against the combined model at
+            # runtime. Bind the donor's own socket before collision renaming.
+            place.append(block('{foresight '+quote(sight)+'}'))
     if recipient_unknown or donor_unknown:
         unknown = [node.args[0] if node.args else "?" for node in recipient_unknown+donor_unknown]
         raise CompileError("Weapon ownership requires a profile for places: "+", ".join(unknown))
@@ -2678,9 +2862,13 @@ def compile_assembly(resources, recipient_template, donor_template, transform, o
     if articulation:
         diagnostics.append({'code': 'aiming_ancestors_preserved', 'level': 'info',
                             'bones': articulation, 'message': 'Driven parent pivots retained without donor carriage geometry; battle aiming acceptance pending.'})
-    bone_mapping = {name: value for name, value in _volume_mapping(donor_names, kept_bones | kept_slots).items()
+    contacts = _ground_points(donor_names, donor_model)
+    bone_mapping = {name: value for name, value in _volume_mapping(donor_names, kept_bones | kept_slots | contacts).items()
                     if name not in roles | {"driver"}}
+    from .weapon_binding import bind_barrels
+    bind_barrels(donor_places, donor_model, bone_mapping, kept_bones | kept_slots)
     _rename_bone_refs(mounted, bone_mapping)
+    _drop_wheel_radius(mounted, {bone_mapping.get(name, name) for name in contacts})
     overrides = _crew_positions(
         transform.get("crew_seats") or {}, roles, excluded, crew_rename, donor_link_bones,
         donor_model, bone_mapping, multiply(donor_adjustment, translation(source_anchor)))
@@ -2747,6 +2935,15 @@ def compile_assembly(resources, recipient_template, donor_template, transform, o
     if weaponry is None:
         weaponry = block("{Weaponry}")
         recipient_root.append(weaponry)
+    # The module is the vehicle's main weapon when it replaces the main turret
+    # (a kept hull gun then follows it: Char B2) or takes the place the player
+    # commands directly, whatever its mount is called (a mortar leveler inside
+    # the turret, a half-track's MG ring). A secondary turret (T-35) keeps the
+    # chassis primary. Same primary place as gun changes.
+    from .gun_assembly import _primary_place
+    primary_place = _primary_place(recipient_root)
+    primary_replacement = not free and (recipient_mount == recipient_model["anchor_name"] or primary_place is None or
+                                        any(place.args and place.args[0] == primary_place for place in recipient_places))
     for place in recipient_places:
         weaponry.remove(place)
     kept = next((item for item in weaponry.items if isinstance(item, Node) and item.head.casefold() == "place"), None)
@@ -2763,17 +2960,17 @@ def compile_assembly(resources, recipient_template, donor_template, transform, o
             # donor gun would aim through the chassis gun's sight instead.
             place.append(block('{foresight '+quote(sight)+'}'))
         _rename_bone_refs(place, bone_mapping)
-        if free and place.find('type') is None and place.find('basic') is None:
+        if not primary_replacement and place.find('type') is None and place.find('basic') is None:
             # The implicit primary slot works while first in native Weaponry.
             # Added behind the chassis primary it needs the same explicit
             # selectable marker as the Nb.Fz's native second cannon (gun2).
             # Keep its weapon class, operators, ammunition and aiming intact.
             place.append(block('{basic}'))
-        if free and place.find('ai_in_manual') is None:
+        if not primary_replacement and place.find('ai_in_manual') is None:
             # Native independently crewed auxiliary guns (T-35) retain AI
             # control even when another place is the selected primary weapon.
             place.append(block('{ai_in_manual}'))
-        if not free and place.find("type") is None and kept is not None:
+        if primary_replacement and place.find("type") is None and kept is not None:
             # A new turret's gun is the vehicle's main gun. Direct control and
             # the weapon bar offer only the first untyped place: after a kept
             # hull gun (Char B1/B2 "gun1") the turret gun fired for the AI
@@ -2794,7 +2991,7 @@ def compile_assembly(resources, recipient_template, donor_template, transform, o
     hull_props, donor_props = recipient_root.find("props"), donor_root.find("props")
     property_prefixes = ("muzzle_", "vision_", "nvw", "nwg")
     exposure = {"open_top", "with_gun", "sq_autocannon", "-hatch"}
-    if hull_props and donor_props:
+    if hull_props and donor_props and primary_replacement:
         for atom in list(hull_props.atoms[1:]):
             if atom.value.startswith(property_prefixes) or atom.value in exposure:
                 hull_props.items.remove(atom)
@@ -2995,6 +3192,7 @@ def compile_assembly(resources, recipient_template, donor_template, transform, o
             recipient_root.remove(node)
     _place_model_extension(recipient_root, new_id+".mdl", block("(include "+quote(new_id+".ext")+")"))
     sources = {}
+    sources.update(weapon_reference_sources)
     sources.update(camera_sources)
     for info in (recipient, donor):
         for source_path in sorted(set([info["definition_path"], info["model_path"], *info.get("extension_paths", [])])):
@@ -3054,8 +3252,12 @@ def compile_assembly(resources, recipient_template, donor_template, transform, o
     replaces_hatches = not free and recipient_mount == recipient_model["anchor_name"]
     chassis_sequences = {node.args[0] for node in animation.find_all("sequence") if node.args}
     donor_sequence_names = {node.args[0] for node in donor_animation.find_all("sequence") if node.args and node.args[0].startswith(("fire", "aim", "open"))
-                            and (replaces_hatches or not node.args[0].startswith("open") or "open" not in chassis_sequences)} if donor_animation else set()
+                            and (replaces_hatches or not node.args[0].startswith("open") or node.args[0] not in chassis_sequences)} if donor_animation else set()
     emitted_names = {name: clip_rename.get(name, name) for name in donor_sequence_names}
+    if free:
+        for name, emitted in list(emitted_names.items()):
+            if emitted in chassis_sequences and not name.startswith('open'):
+                emitted_names[name] = new_id + '_' + emitted
     for node in list(animation.find_all("sequence")):
         if node.args and node.args[0] in emitted_names.values():
             animation.remove(node)
@@ -3127,6 +3329,9 @@ def compile_assembly(resources, recipient_template, donor_template, transform, o
                                {'hull':{n:n for n in kept_bones},'turret':{n:bone_mapping.get(n,n) for n in donor_names}})
         if skipped:
             diagnostics.append(skipped_limits_diagnostic(skipped))
+    if transform.get('mobility') is not None:
+        from .mobility import apply as apply_mobility
+        apply_mobility(recipient_root, transform['mobility'], diagnostics)
     commander_mg = None
     if transform.get('commander_mg') is not None:
         from .commander_mg import apply_mount
@@ -3156,10 +3361,19 @@ def compile_assembly(resources, recipient_template, donor_template, transform, o
     final_model = parse_model(recipient_model["document"].render())
     if free:
         _restore_independent_mount_capabilities(recipient_root, final_model)
+    carriages = {bone_mapping.get(name, name) for name, bone in donor_model["bones"].items()
+                 if bone["parent"] is None and name in donor_names}
+    traverse_class = _apply_traverse_class(resources, recipient_root, final_model, carriages)
+    if traverse_class == 'casemate':
+        diagnostics.append({'code': 'casemate_traverse', 'level': 'info',
+                            'message': 'The main gun traverses a limited arc: the vehicle turns its hull to aim, like a native casemate.'})
     allowed_ids = _allowed_damage_ids(resources,recipient_root,final_model,(armor,))
     recipient_source = _load_entity(resources, recipient_template)[2]
-    orphan_slots = _drop_orphan_slots(recipient_root, {p.args[0] for w in recipient_source.find_all("Weaponry")
-                                                       for p in w.find_all("place") if p.args}, diagnostics)
+    # A slot may come from either part: the StuG III G's roof MG slot came with
+    # its casemate while its "mgun" place stayed behind (Kenway: crash spawning).
+    orphan_slots = _drop_orphan_slots(recipient_root, {p.args[0] for source in (recipient_source, _load_entity(resources, donor_template)[2])
+                                                       for w in source.find_all("Weaponry") for p in w.find_all("place") if p.args},
+                                      diagnostics)
     # Seats of either vehicle on bones that did not make it into the new one.
     _rebase_lost_seats(resources, recipient_root,
                        set(parse_model(resources.read(recipient["model_path"]))["bones"]) | set(donor_model["bones"]),
@@ -3205,12 +3419,20 @@ def compile_assembly(resources, recipient_template, donor_template, transform, o
                                   "hull_authority": recipient_template, "turret_authority": donor_template},
                 "validation": {"structural": "passed", "game_runtime": "pending", "campaign_acceptance": "pending"}}
     metadata["validation"]["dependencies"] = dependency_validation
+    from .weapon_effects import interaction_source
+    metadata['interaction_donor'] = interaction_source(resources, recipient_template if free else donor_template)
     if assembly_contract is not None:
         metadata['weapon_assembly'] = assembly_contract
         diagnostics.append({'code': 'complete_assembly_runtime_gate', 'level': 'warning',
                             'message': 'Complete native artillery; carriage geometry is passive. Battle acceptance pending.'})
     from .weapon_state import weapon_places
     metadata['state_profile']['weapon_places'] = weapon_places(recipient_root)
+    from .weapon_effects import capture, transplant
+    retained_places = {p.args[0]:p.args[0] for p in chassis_weapons if p.args}
+    imported_places = {donor_place_names[id(p)]:p.args[0] for p in donor_places if p.args}
+    metadata['weapon_effects'] = [
+        *transplant(capture(resources, recipient_template), retained_places),
+        *transplant(capture(resources, donor_template), imported_places, bone_mapping, emitted_names, new_id, owned=donor_names)]
     if orphan_slots:
         metadata['state_profile']['retired_inventory_users'] = sorted(orphan_slots)
     if smoke_launchers:
@@ -3234,7 +3456,7 @@ def compile_assembly(resources, recipient_template, donor_template, transform, o
     metadata["file_hashes"] = {name: hashlib.sha256(raw).hexdigest() for name,raw in prepared.items()}
     asset_target.mkdir(parents=True)
     for name, raw in prepared.items():
-        (asset_target/name).write_bytes(raw)
+        _write_generated(resources,asset_target/name,raw)
     files = [str(path.relative_to(output_dir)).replace("\\", "/") for path in asset_target.rglob("*") if path.is_file()]
     result = {"id": new_id, "output_dir": str(output_dir), "entity_path": "-vehicle/workshop/"+new_id,
               "definition_path": "entity/-vehicle/workshop/"+new_id+"/"+new_id+".def",

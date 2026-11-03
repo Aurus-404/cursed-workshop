@@ -69,23 +69,27 @@ def awaited():
     return _WAITING > 0
 
 
+def catalog_source(index):
+    """Native catalogs belong to the source snapshot, not a compiled preview."""
+    return index.catalog_source() if hasattr(index, 'catalog_source') else index
+
+
 def code_identity():
-    """The packaged source hash, or a hash of the source files when run from a checkout."""
+    """Backend identity; documentation/UI rebuilds do not change native catalogs."""
     global _CODE
     if _CODE is None:
-        from .build_info import read_build_info
-        packaged = read_build_info().get('source_sha256')
+        from .build_info import read_build_info, source_code_sha256
+        metadata = read_build_info()
+        packaged = metadata.get('catalog_code_sha256') or metadata.get('source_sha256')
         if packaged:
             _CODE = packaged
         else:
-            digest = hashlib.sha256()
-            for path in sorted(Path(__file__).parent.glob('*.py')):
-                digest.update(path.name.encode() + b'\0' + path.read_bytes())
-            _CODE = digest.hexdigest()
+            _CODE = source_code_sha256(Path(__file__).parent)
     return _CODE
 
 
 def stack_key(view):
+    view = catalog_source(view)
     # The tool's own built vehicles are not catalog material (readers skip
     # them) and change with every build: keying on them read the whole game
     # again after each build, minutes during which previews waited.
@@ -102,8 +106,22 @@ def _lock(view, name):
         return locks.setdefault(name, threading.Lock())
 
 
+STACKS_KEPT = 4
+
+
+def _prune(folder, name, current):
+    """Keep the stacks used last; drop older ones and the single-file layout."""
+    saved = sorted(folder.glob(f'{name}-*.json'), key=lambda p: p.stat().st_mtime_ns, reverse=True)
+    for path in [p for p in saved if p != current][STACKS_KEPT - 1:] + [folder / f'{name}.json']:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def load(index, name, folder):
     """The catalog for this index: from memory, from disk, or read now and saved."""
+    index = catalog_source(index)
     if name in ('commander_weapons', 'rider_mgs'):
         index.mountable_game()
     pick, attribute, reader = CATALOGS[name]
@@ -121,11 +139,14 @@ def load(index, name, folder):
     try:
         if attribute not in view.__dict__ and folder is not None:
             key = stack_key(view)
-            path = Path(folder) / f'{name}.json'
+            # One file per stack: switching between campaigns with different
+            # mods (with and without MACE) never reads the whole game again.
+            path = Path(folder) / f'{name}-{key[:24]}.json'
             try:
                 saved = json.loads(path.read_text(encoding='utf-8'))
                 if isinstance(saved, dict) and saved.get('key') == key:
                     setattr(view, attribute, saved['value'])
+                    os.utime(path)  # recently used: kept when older stacks are dropped
             except (OSError, ValueError):
                 pass
             if attribute not in view.__dict__:
@@ -140,6 +161,7 @@ def load(index, name, folder):
                     temporary = path.with_suffix('.tmp')
                     temporary.write_text(json.dumps({'key': key, 'value': value}), encoding='utf-8')
                     os.replace(temporary, path)
+                    _prune(Path(folder), name, path)
                 except OSError as error:
                     logging.warning('Catalog %s not saved: %s', name, error)
         return reader(index)

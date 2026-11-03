@@ -251,6 +251,13 @@ def posed_soldier(resources, pose: str | None = None) -> dict:
     # Boarding attaches the actor root to the seat, replacing its standalone
     # basis. Skinning above still needs that basis; remove it only afterwards.
     attachment = attached_actor_frame(model, identity())
+    if clip:
+        roots=[name for name,bone in skeleton['bones'].items() if bone['parent'] is None]
+        if len(roots)==1:
+            # Boarding replaces the actor's animated root, not its bind root.
+            # Some seated clips rotate basis by 180 degrees; retaining that
+            # standalone frame turned the entire preview soldier upside down.
+            attachment=inverse(posed[roots[0]])
     # Pose clips can offset the pelvis far from the boarding socket. Keep that
     # authored placement separate from the correction of mirrored actor axes.
     body = posed.get('body') if clip else (model['bones'].get('body') or {}).get('world')

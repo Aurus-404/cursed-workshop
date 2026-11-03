@@ -33,6 +33,8 @@ def _finite(node, head):
 
 def catalog(resources):
     """Discover finite native packages and passive cargo geometry, cached per stack."""
+    from .catalog_cache import catalog_source
+    resources = catalog_source(resources)
     if hasattr(resources, '_support_catalog'):
         return resources._support_catalog
     from .compiler import _include_defines, _load_entity
@@ -181,17 +183,8 @@ def strip_turret(resources, root, model, mount, *, wreck=False):
         if mount not in model['bones'] or not model['bones'][mount]['parent']:
             raise SupportError('No se puede separar esa torreta del chasis.')
         if not wreck:
-            candidates = {n for n in model['mounts'] if model['bones'][n]['parent']}
-            for w in root.find_all('Weaponry'):
-                for place in w.find_all('place'):
-                    name = weapon_link(place, model)
-                    while name in model['bones']:
-                        b = model['bones'][name]
-                        if b['parent'] and b['node'].args[0].casefold() == 'revolute':
-                            candidates.add(name)
-                        name = b['parent']
-            top_mounts = {n for n in candidates if not any(
-                other != n and n in descendants(model['bones'], other) for other in candidates)}
+            from .geometry import editable_mounts
+            top_mounts = set(editable_mounts(model, root))
             if mount not in top_mounts:
                 raise SupportError('No se puede separar esa torreta del chasis.')
         removed = descendants(model['bones'], mount)

@@ -13,17 +13,15 @@ import zlib
 from .syntax import parse
 
 TEXTURE_ROOT = "texture/common/"
+TEXTURE_CHANNELS = frozenset(('diffuse','diffuse1','bump','specular','lightmap','mask','envmap','height','glow'))
 
 
 class TextureError(ValueError):
     pass
 
 
-def diffuse_path(resources, mtl_path: str) -> str | None:
-    document = parse(resources.read(mtl_path))
-    reference = next((node.args[0] for node in document.walk("diffuse") if node.args), None)
-    if not reference:
-        return None
+def texture_path(resources, mtl_path: str, reference: str) -> str | None:
+    """Resolve GEM texture aliases and implicit extensions in the source folder."""
     reference = reference.replace("\\", "/")
     if reference.startswith("$/"):
         candidates = [TEXTURE_ROOT + reference[2:]]
@@ -33,10 +31,20 @@ def diffuse_path(resources, mtl_path: str) -> str | None:
         candidates = [posixpath.normpath(posixpath.join(posixpath.dirname(mtl_path), reference)),
                       TEXTURE_ROOT + reference]
     for candidate in candidates:
-        for path in ((candidate,) if candidate.lower().endswith(".dds") else (candidate + ".dds", candidate)):
-            if resources.exists(path):
+        paths=(candidate,) if posixpath.splitext(candidate)[1].casefold() in ('.dds','.tga','.png') else (candidate+'.dds',candidate+'.tga',candidate+'.png',candidate)
+        for path in paths:
+            try:
+                exists=resources.exists(path) if hasattr(resources,'exists') else resources.read(path) is not None
+            except (KeyError,OSError):exists=False
+            if exists:
                 return path
     return None
+
+
+def diffuse_path(resources, mtl_path: str) -> str | None:
+    document = parse(resources.read(mtl_path))
+    reference = next((node.args[0] for node in document.walk() if node.head.casefold()=='diffuse' and node.args), None)
+    return texture_path(resources,mtl_path,reference) if reference else None
 
 
 def _rgb565(value):
@@ -140,4 +148,9 @@ def material_png(resources, mtl_path: str, limit: int = 512) -> bytes:
     path = diffuse_path(resources, mtl_path)
     if path is None:
         raise TextureError(f"No diffuse texture for {mtl_path}")
-    return png(*decode_dds(resources.read(path), limit))
+    raw=resources.read(path)
+    if path.casefold().endswith('.png'):return raw
+    if path.casefold().endswith('.tga'):
+        from .icons import read_tga
+        return png(*read_tga(raw))
+    return png(*decode_dds(raw, limit))

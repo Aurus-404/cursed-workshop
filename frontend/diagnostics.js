@@ -82,6 +82,7 @@ export function diagnosticReport(data,state,lastError='',now=new Date()) {
     }
   }
   if(lastError)lines.push('', 'Latest UI error:',text(englishError(lastError)));
+  if(data.load_timings)lines.push('',data.load_timings);
   if(data.unavailable)lines.push('', 'Backend diagnostic unavailable; editor information only.');
   return lines.join('\n');
 }
@@ -99,8 +100,17 @@ export async function copyPart(area,clipboard) {
   catch{area.focus();area.select();return false;}
 }
 
-export function diagnosticUI({state,api,$,selection=()=>state}) {
-  let lastError='',loading=false;
+export async function downloadReport(url,token) {
+  const response=await fetch(url,{headers:{'X-Workshop-Token':token}});
+  if(!response.ok)throw new Error('Report download failed.');
+  const objectUrl=URL.createObjectURL(await response.blob());
+  const link=document.createElement('a');link.href=objectUrl;link.download=new URL(url,location.href).searchParams.get('name')||'diagnostic.zip';
+  document.body.appendChild(link);link.click();link.remove();
+  setTimeout(()=>URL.revokeObjectURL(objectUrl),60000);
+}
+
+export function diagnosticUI({state,api,$,selection=()=>state,download=downloadReport}) {
+  let lastError='',loading=false,editorReport='';
   const requireCampaign=()=>{
     if(state.campaign)return true;
     $('diagnostic-text').value='';
@@ -120,7 +130,8 @@ export function diagnosticUI({state,api,$,selection=()=>state}) {
       $('diagnostic-dialog').showModal();return;
     }
     $('diagnostic-save').disabled=false;$('diagnostic-copy').disabled=false;
-    $('diagnostic-text').value=diagnosticReport(data,selection(),lastError);
+    editorReport=diagnosticReport({...data,load_timings:null},selection(),lastError);
+    $('diagnostic-text').value=data.load_timings?editorReport+'\n\n'+data.load_timings:editorReport;
     $('diagnostic-copy').textContent=t('Copiar todo');$('diagnostic-status').textContent='';$('diagnostic-dialog').showModal();
   };
   $('diagnostic-button').onclick=open;$('error-diagnostic').onclick=open;
@@ -133,9 +144,14 @@ export function diagnosticUI({state,api,$,selection=()=>state}) {
   $('diagnostic-save').onclick=async()=>{
     if(!requireCampaign())return;
     $('diagnostic-save').disabled=true;
+    $('diagnostic-status').textContent=t('Generando el reporte…');
     try{
-      const result=await api('/api/error-report',{diagnostic:$('diagnostic-text').value});
+      const result=await api('/api/error-report',{diagnostic:editorReport});
       $('diagnostic-status').textContent=t(`Reporte guardado: ${result.path}. Subilo a #bug-reports en el Discord del mod.`);
+      if(result.download_url){
+        try{await download(result.download_url,state.token);}
+        catch{ $('diagnostic-status').textContent+=' '+t('No se pudo iniciar la descarga. El ZIP sigue guardado en la ruta indicada.'); }
+      }
     }catch(error){$('diagnostic-status').textContent=t('No se pudo guardar el reporte: ')+cleanText(error?.message||error,state.token);}
     finally{$('diagnostic-save').disabled=!state.campaign;}
   };

@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import base64
 import copy
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime
 import hashlib
@@ -24,7 +24,7 @@ import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse, parse_qs, unquote
+from urllib.parse import urlparse, parse_qs, unquote, quote as urlquote
 import webbrowser
 import zlib
 
@@ -34,11 +34,12 @@ from .locations import GAME_APP_ID, config_dirs, documents_dir, game_log_path, r
 from .registration import ADDON_ID, ADDON_MOD, is_own_mod
 from .profile import activate_addon, profile_for_save
 from .depot import Depot
-from .transactions import long_path
-from .diagnostics import Diagnostics
+from .transactions import long_path, copy_tree
+from .diagnostics import Diagnostics, timing_job
 
 GAME_FOLDER = 'Call to Arms - Gates of Hell'
 WEB_ROOT = Path(__file__).parent / 'web'
+FAVORITE_LISTS, FAVORITES_PER_LIST = 200, 5000
 
 def app_directory() -> Path:
     return Path(sys.executable).parent if getattr(sys,'frozen',False) else Path(__file__).resolve().parent.parent
@@ -168,7 +169,7 @@ def unreadable_save(error) -> str:
 
 def friendly_error(exc) -> str:
     """Spanish explanation for known failures; the technical text stays below it."""
-    text=str(exc)
+    text=str(exc) or type(exc).__name__
     for pattern,message in FRIENDLY_ERRORS:
         if pattern.casefold() in text.casefold():
             return message+'\n\nDetalle técnico: '+text
@@ -191,11 +192,15 @@ class AppState:
         self.pool=ThreadPoolExecutor(max_workers=1,thread_name_prefix='workshop')
         self.last_result=None
         self.portrait_previews={}
-        self.diagnostics=Diagnostics()
+        self.diagnostics=Diagnostics(self.workspace/'load-timings.log')
+        from .resources import set_directory_cache
+        set_directory_cache(self.workspace/'cache'/'archives')
         self.latest_jobs={}
         self.preview_futures={}
         self.foreground=0
         self.storage_lock=threading.Lock()
+        self.art_lookup_lock=threading.Lock()
+        self.asset_requests={}
 
     def record_error(self, exc, operation):
         with self.lock:
@@ -203,18 +208,26 @@ class AppState:
 
     def diagnostic(self):
         with self.lock:
-            return self.diagnostics.snapshot(self.index, self.snapshot is not None, (self.token, str(Path.home())))
+            result=self.diagnostics.snapshot(self.index, self.snapshot is not None, (self.token, str(Path.home())))
+            result['load_timings']=self.diagnostics.timing_report()
+            return result
 
     @contextmanager
     def phase(self,label):
+        from .cancellation import JobCancelled
         started=time.perf_counter();state='done'
         try:yield
+        except JobCancelled:
+            state='cancelled'
+            raise
         except Exception:
             state='error'
             raise
         finally:
             elapsed=(time.perf_counter()-started)*1000
-            with self.lock:self.diagnostics.record_phase(label,state,elapsed,(self.token,str(Path.home())))
+            # Never under the application lock: a file append per texture or
+            # image request would hold up every other request.
+            self.diagnostics.record_phase(label,state,elapsed,(self.token,str(Path.home())))
             logging.info('Phase timing: %s | %s | elapsed_ms=%.0f',label,state,elapsed)
 
     def closed(self): return require_game_idle(self.settings.get('game_root') or None)
@@ -244,7 +257,13 @@ class AppState:
                  'theme':('graphite','paper','olive','earth','contrast','classic'),
                  'size':('normal','large')}
         booleans={'motion','help','sound','maximized'}
+        def favorites(value):
+            # Starred options per list: {list id: [option values]}.
+            return (isinstance(value,dict) and len(value)<=FAVORITE_LISTS and all(
+                isinstance(k,str) and 0<len(k)<=80 and isinstance(v,list) and len(v)<=FAVORITES_PER_LIST
+                and all(isinstance(x,str) and 0<len(x)<=400 for x in v) for k,v in value.items()))
         def valid(key,value):
+            if key=='favorites':return favorites(value)
             return (isinstance(value,str) and value in choices[key]) if key in choices else key in booleans and type(value) is bool
         with self.lock:
             saved=self.settings.get('ui_preferences',{})
@@ -293,6 +312,7 @@ class AppState:
                     self.jobs[key].update(status='superseded',finished=time.time()); current_cancel.reset(context); current_progress.reset(progress_context); return
                 self.jobs[key]['status']='running'
                 self.foreground+=1
+            timing_context=timing_job.set(key)
             try:
                 checkpoint()
                 result=serial(operation())
@@ -303,7 +323,7 @@ class AppState:
             except Exception as exc:
                 logging.exception('Operation failed: %s',label)
                 self.record_error(exc,label)
-                with self.lock: self.jobs[key].update(status='error',error=friendly_error(exc),detail=str(exc),error_type=type(exc).__name__,finished=time.time())
+                with self.lock: self.jobs[key].update(status='error',error=friendly_error(exc),detail=str(exc) or type(exc).__name__,error_type=type(exc).__name__,finished=time.time())
             finally:
                 with self.lock:self.foreground-=1
                 current_cancel.reset(context)
@@ -314,6 +334,7 @@ class AppState:
                     status=self.jobs[key]['status']
                     self.diagnostics.record_operation(label,status,elapsed_ms,queued_ms,(self.token,str(Path.home())))
                 logging.info('Operation timing: %s | %s | elapsed_ms=%.0f | queued_ms=%.0f',label,status,elapsed_ms,queued_ms)
+                timing_job.reset(timing_context)
         with self.lock:
             future=self.pool.submit(work)
             self.__dict__.setdefault('job_futures',{})[key]=future
@@ -336,29 +357,31 @@ class AppState:
 
     def unit_image(self, template):
         """Artwork from the effective local stack, never arbitrary user paths."""
-        if self.index is None:raise ValueError('Read resources first')
+        index=self.index
+        if index is None:raise ValueError('Read resources first')
         if not re.fullmatch(r'[A-Za-z0-9_().-]{1,96}',template):raise ValueError('Invalid unit image identifier')
-        self.index.resolve_entity(template)
+        index.resolve_entity(template)
         base=re.sub(r'\([^()]*\)$','',template)
-        signature=tuple((s.get('id'),s.get('fingerprint')) for s in self.index.sources)
-        cached=getattr(self.index,'_unit_art_lookup',None)
-        if cached is None or cached[0]!=signature:
-            lookup={}
-            for path in self.index.entries:
-                if path.startswith('interface/scene/') and path.endswith(('_00.png','_00.tga')):
-                    name=path.rsplit('/',1)[-1].rsplit('_00.',1)[0]
-                    key=(path.rsplit('/',1)[0],re.sub(r'\([^()]*\)$','',name))
-                    lookup.setdefault(key,[]).append(path)
-            self.index._unit_art_lookup=(signature,lookup)
-        lookup=self.index._unit_art_lookup[1]
+        signature=tuple((s.get('id'),s.get('fingerprint')) for s in index.sources)
+        with self.art_lookup_lock:
+            cached=getattr(index,'_unit_art_lookup',None)
+            if cached is None or cached[0]!=signature:
+                lookup={}
+                for path in index.entries:
+                    if path.startswith('interface/scene/') and path.endswith(('_00.png','_00.tga')):
+                        name=path.rsplit('/',1)[-1].rsplit('_00.',1)[0]
+                        key=(path.rsplit('/',1)[0],re.sub(r'\([^()]*\)$','',name))
+                        lookup.setdefault(key,[]).append(path)
+                index._unit_art_lookup=(signature,lookup)
+            lookup=index._unit_art_lookup[1]
         for kind,suffix in (('unit_icon','tga'),('unit_icon_small','tga'),('portrait_squad','png')):
             prefix='interface/scene/'+kind+'/'
             candidates=[prefix+name+'_00.'+suffix for name in dict.fromkeys((template,base))]
             matches=lookup.get((prefix[:-1],base.casefold()),[])
             if len(matches)==1:candidates+=matches
             for path in candidates:
-                if not self.index.exists(path):continue
-                raw=self.index.read_bytes(path,max_bytes=2*1024*1024)
+                if not index.exists(path):continue
+                raw=index.read_bytes(path,max_bytes=2*1024*1024)
                 if suffix=='png':
                     if raw[:8]!=b'\x89PNG\r\n\x1a\n':continue
                     return raw
@@ -433,7 +456,8 @@ class AppState:
         from .resources import ResourceIndex
         if not is_game_root(self.settings.get('game_root')): raise ValueError(GAME_NOT_FOUND)
         self.closed()
-        index=ResourceIndex(self.settings['game_root'],self.settings['mod_roots']).build()
+        with self.phase('Resources: index game and active mods'):
+            index=ResourceIndex(self.settings['game_root'],self.settings['mod_roots']).build()
         # Previews contain independent overlays and parsed contracts from the
         # old source snapshot. They must not survive opening/reindexing sources.
         self.clear_portrait_previews()
@@ -450,7 +474,8 @@ class AppState:
         path=Path(body['path']).resolve()
         if path.suffix.casefold()!='.sav': raise ValueError('Elegí un archivo de campaña .sav.')
         try:
-            snapshot=load_campaign(path)
+            with self.phase('Campaign: read and parse save'):
+                snapshot=load_campaign(path)
         except OSError as error:
             raise ValueError(unreadable_save(error)) from error
         repaired=self.repair_save_syntax(snapshot)
@@ -464,7 +489,8 @@ class AppState:
         if legacy:
             raise ValueError('Esta partida usa un mod de una versión anterior del taller ('+', '.join(legacy)+
                              '). Generá de nuevo desde la partida original: ahora todos los vehículos van en un único mod.')
-        installed=discover_installed_mods(self.settings['game_root'])
+        with self.phase('Campaign: discover installed mods'):
+            installed=discover_installed_mods(self.settings['game_root'])
         def installed_root(original):
             raw=str(original).rsplit(':',1)[0]
             variants={raw.casefold(),raw.removeprefix('mod_').casefold(),raw.removeprefix('mod:').casefold()}
@@ -490,7 +516,9 @@ class AppState:
         if roots!=self.settings['mod_roots']:
             self.settings['mod_roots']=roots; self.save_settings(); self.index_resources()
         elif self.index is None: self.index_resources()
-        try:fitted=self.reconcile_crews(snapshot)
+        try:
+            with self.phase('Campaign: reconcile crew assignments'):
+                fitted=self.reconcile_crews(snapshot)
         except Exception as error:  # the game open, a read-only folder: the campaign still opens
             logging.warning('Crews not fitted to their seats in %s: %s',path,error);fitted=[]
         if fitted:
@@ -507,7 +535,7 @@ class AppState:
         # Mods the game itself switches off (game version outside their range):
         # the tool ignores them too, so nothing built depends on their files.
         data['disabled_mods']=[{'name':m['name'],'reason':m['reason']} for m in getattr(self.index,'disabled_mods',[])]
-        data['mod_stack_problem']=self.mod_stack_problem()
+        self.stack_check()  # read in the background; /api/mod-stack reports it
         data['repaired_save']=repaired
         data['crew_fitted']=fitted
         self.unresolved_mods=missing
@@ -656,7 +684,7 @@ class AppState:
         addon=self.addon_root();hashes=self.owned_addon(addon) if addon.exists() else None
         staging=operation/ADDON_ID
         if addon.exists():
-            shutil.copytree(long_path(addon),long_path(staging),ignore=lambda directory,names:[OWNERSHIP_FILE] if OWNERSHIP_FILE in names else [])
+            copy_tree(long_path(addon),long_path(staging),ignore=lambda directory,names:[OWNERSHIP_FILE] if OWNERSHIP_FILE in names else [])
         else:
             from .registration import describe_addon
             staging.mkdir(parents=True);describe_addon(staging)
@@ -796,18 +824,53 @@ class AppState:
             self.previews[key]=value
         return self.previews[key]
 
+    def shared_asset(self,key,load):
+        """Share only in-flight work; failures are retried on the next request."""
+        with self.lock:
+            future=self.asset_requests.get(key)
+            owner=future is None
+            if owner:
+                future=self.asset_requests[key]=Future()
+        if not owner:return future.result()
+        try:
+            result=load()
+            future.set_result(result)
+            return result
+        except BaseException as error:
+            future.set_exception(error)
+            raise
+        finally:
+            with self.lock:self.asset_requests.pop(key,None)
+
     def crew_model(self,pose):
         """Generic soldier meshes in a seat pose for the 3D view (cached)."""
         from .crew_model import posed_soldier
         if self.index is None: raise ValueError('Leé los recursos primero.')
         pose=str(pose or '')[:120]
         if pose and not re.fullmatch(r'[A-Za-z0-9_\-]+',pose): raise ValueError('Pose inválida.')
+        index=self.index
         cache=self.__dict__.setdefault('crew_models',{})
-        key=(id(self.index),pose)
-        if key not in cache:
-            cache.clear() if len(cache)>64 else None
-            cache[key]=posed_soldier(self.index,pose or None)
-        return cache[key]
+        key=(id(index),pose)
+        def load():
+            with self.lock:
+                if key in cache:return cache[key]
+            from .catalog_cache import stack_key
+            # Same game, mods and tool code: the posed soldier is kept on disk.
+            stored=self.workspace/'cache'/'crew_models'/(hashlib.sha256(json.dumps([stack_key(index),pose]).encode()).hexdigest()[:32]+'.json')
+            try:result=json.loads(stored.read_text(encoding='utf-8'));os.utime(stored)
+            except (OSError,ValueError):
+                result=posed_soldier(index,pose or None)
+                try:
+                    stored.parent.mkdir(parents=True,exist_ok=True)
+                    temporary=stored.with_name(stored.name+'.'+secrets.token_hex(4)+'.tmp')
+                    temporary.write_text(json.dumps(result),encoding='utf-8');os.replace(temporary,stored)
+                    for old in sorted(stored.parent.glob('*.json'),key=lambda p:p.stat().st_mtime_ns)[:-64]:old.unlink(missing_ok=True)
+                except OSError as error:logging.info('Crew model not kept on disk: %s',error)
+            with self.lock:
+                if len(cache)>=64:cache.pop(next(iter(cache)))
+                cache[key]=result
+            return result
+        return self.shared_asset(('crew',key),load)
 
     def texture(self,mtl,portrait_token=None):
         """Diffuse map of a material as PNG for the 3D view, cached on disk by source identity."""
@@ -828,10 +891,18 @@ class AppState:
         entry=index.resolve(source).as_dict()
         key=hashlib.sha256(json.dumps([source,entry.get('size'),entry.get('crc'),entry.get('modified_ns'),entry.get('source_root')]).encode()).hexdigest()[:24]
         cache=self.workspace/'texture_cache'/(key+'.png')
-        if cache.is_file(): return cache.read_bytes()
-        data=material_png(index,mtl)
-        cache.parent.mkdir(parents=True,exist_ok=True); cache.write_bytes(data)
-        return data
+        def load():
+            if cache.is_file(): return cache.read_bytes()
+            data=material_png(index,mtl)
+            cache.parent.mkdir(parents=True,exist_ok=True)
+            with tempfile.NamedTemporaryFile(dir=cache.parent,delete=False) as stream:
+                temporary=Path(stream.name)
+            try:
+                temporary.write_bytes(data)
+                os.replace(temporary,cache)
+            finally:temporary.unlink(missing_ok=True)
+            return data
+        return self.shared_asset(('texture',key),load)
 
     def screenshot(self,body):
         """Save a capture of the 3D view to Pictures/Cursed Workshop and show it in Explorer."""
@@ -850,8 +921,7 @@ class AppState:
         return {'path':str(target)}
 
     def error_report(self,body):
-        """The zip a player posts in #bug-reports, shown selected in Explorer.
-        Only the newest ten reports are kept."""
+        """Create a report with a download URL; retain the original on disk."""
         save=self.report_save()
         if save is None:
             raise ValueError('Seleccioná primero una campaña.')
@@ -859,12 +929,24 @@ class AppState:
         folder=self.workspace/'reports'
         game=config_dirs(self.settings.get('game_root'))[0]  # where the game really writes (AppData, OneDrive, Linux)
         addon=self.addon_root() if self.settings.get('game_root') else None
-        result=build_report(folder,game,self.workspace,str(body.get('diagnostic') or '')[:400_000],addon=addon,save=save)
-        for old in sorted(folder.glob('Cursed Workshop report *.zip'),reverse=True)[10:]:
-            old.unlink(missing_ok=True)
+        with self.lock:timings=self.diagnostics.timing_report()
+        diagnostic=str(body.get('diagnostic') or '')[:400_000]+'\n\n'+timings
+        result=build_report(folder,game,self.workspace,diagnostic,addon=addon,save=save)
+        result['download_url']='/api/error-report?name='+urlquote(Path(result['path']).name)
         if os.name=='nt' and not body.get('quiet'):
-            subprocess.Popen(['explorer','/select,',result['path']])
+            try: subprocess.Popen(['explorer','/select,',result['path']])
+            except OSError: logging.exception('Report saved, but Explorer could not be opened')
         return result
+
+    def report_file(self,name):
+        folder=(self.workspace/'reports').resolve()
+        if (not isinstance(name,str) or '/' in name or '\\' in name
+                or not name.startswith('Cursed Workshop report ') or not name.endswith('.zip')):
+            raise ValueError('Reporte inválido.')
+        path=folder/name
+        if path.is_symlink() or path.resolve().parent!=folder or not path.is_file():
+            raise ValueError('Reporte inexistente.')
+        return path
 
     def report_save(self):
         """Only the campaign explicitly open in this session can be reported."""
@@ -904,12 +986,12 @@ class AppState:
             current_cancel.set(Yielding())
             for name in CATALOGS:
                 if cancel.is_set() or self.index is not index:return
-                started=time.perf_counter()
-                try:load(index,name,self.catalog_folder())
+                try:
+                    with self.phase('Prepare catalog '+name):
+                        load(index,name,self.catalog_folder())
                 except Exception as error:
                     if not cancel.is_set():logging.warning('Catalog %s not prepared: %s',name,error)
                     return
-                logging.info('Phase timing: Prepare catalog %s | done | elapsed_ms=%.0f',name,(time.perf_counter()-started)*1000)
         threading.Thread(target=work,name='workshop-catalogs',daemon=True).start()
 
     def passenger_listing(self,root,model,frame):
@@ -1020,7 +1102,7 @@ class AppState:
                     display_frame=inverse(pose_matrix(transform.get('hull') or {})) if transform.get('assembly_draft') else identity()
                     hosts=[{'name':name,'matrix':multiply(display_frame,model['bones'][name]['world'])} for name in sorted(parents) if name in model['bones']]
                     locator=next((model['bones'][name] for name in ('commander_rot','commander') if name in model['bones']),None)
-                    from .extra_armor import parents as armor_parents
+                    from .extra_armor import parents as armor_parents, elevation_joint
                     from .syntax import parse, entity_root
                     from .compiler import _explicit_weapon_operators
                     from .commander_mg import operator_weapon_problem, operator_loader_warning
@@ -1034,6 +1116,7 @@ class AppState:
                            'commander_bones':(result.get('metadata',{}).get('commander_mg') or {}).get('bones',{}),
                            'commander_warning':operator_loader_warning(final_root),
                            'armor_hosts':[{**host,'matrix':multiply(display_frame,host['matrix'])} for host in armor_parents(model)],
+                           'gun_elevation':elevation_joint(final_root,model),
                            'crew_visibility':result.get('metadata',{}).get('crew_visibility',[]),
                            'passengers':self.passenger_listing(final_root,model,display_frame),
                            'commander_position':point(display_frame,point(locator['world'],[0,0,2]) if locator else model['anchor'])}
@@ -1118,7 +1201,13 @@ class AppState:
                 'preview_valid':True,'runtime_verified':False}
         return preview_parts(self.index,body['hull'],body['donor'],body['gun_swap'])
 
-    def design_context(self,body):
+    @staticmethod
+    def design_limits_key(body):
+        transform=body['transform'];rows=(transform.get('assembly_draft') or {}).get('turrets') or []
+        return json.dumps([transform.get('joint_limits') or {},
+            [(r.get('recipient_mount') or 'turret',r['joint_limits']) for r in rows if r.get('native') and r.get('joint_limits')]],sort_keys=True)
+
+    def design_context(self,body,*,display=False,limit_body=None):
         from .draft import compile_draft
         if self.index is None:self.index_resources()
         transform=body['transform'];signature=copy.deepcopy(transform)
@@ -1126,10 +1215,20 @@ class AppState:
         from .pivots import pose_matrix
         pose_matrix(hull)  # An identity cache hit must not hide an invalid pivot.
         if not any(hull.get('position',[])) and not any(hull.get('rotation',[])):signature.pop('hull',None)
-        key=json.dumps([body['hull'],signature,self.index.dlc_availability().key()],sort_keys=True)
+        availability=self.index.dlc_availability().key()
+        key=json.dumps([body['hull'],signature,availability],sort_keys=True)
+        geometry=self.design_geometry_body({'hull':body['hull'],'transform':signature})['transform']
+        geometry_key=json.dumps([body['hull'],geometry,availability],sort_keys=True)
+        limit_key=self.design_limits_key(body)
+        requested_limits=self.design_limits_key(limit_body or body)
+        default_limits=json.dumps([{},[]],sort_keys=True)
         contexts=self.__dict__.setdefault('design_previews',{})
         if key in contexts:
             cached=contexts.pop(key);contexts[key]=cached;return cached
+        if display:
+            for source,cached in reversed(list(contexts.items())):
+                if cached.get('geometry_key')==geometry_key and cached.get('limit_key') in (requested_limits,default_limits):
+                    contexts.pop(source);contexts[source]=cached;return cached
         temp=tempfile.TemporaryDirectory(prefix='cw_design_preview_');view=None
         try:
             from .draft import design_turrets
@@ -1138,7 +1237,7 @@ class AppState:
                 result=compile_draft(self.index,body['hull'],donor,transform,Path(temp.name)/'compiled','mw_design_preview')
             with self.phase('Design: index compiled output'):
                 view=self.index.with_overlay(Path(temp.name)/'compiled')
-            context={'key':key,'index':view,'temp':temp,'token':secrets.token_urlsafe(24),'result':result}
+            context={'key':key,'geometry_key':geometry_key,'limit_key':limit_key,'index':view,'temp':temp,'token':secrets.token_urlsafe(24),'result':result}
             if len(contexts)>=3:
                 old=contexts.pop(next(iter(contexts)));old['index'].close();old['temp'].cleanup()
             contexts[key]=context;return context
@@ -1148,17 +1247,40 @@ class AppState:
 
     def design_catalog(self,body):
         from .gun_assembly import discover
+        limit_body=body
         body=self.design_display_body(body)
-        context=self.design_context(body)
-        with self.phase('Design: discover weapons'):
-            return discover(context['index'],'mw_design_preview')
+        context=self.design_context(body,display=True,limit_body=limit_body)
+        if 'weapon_catalog' not in context:
+            with self.phase('Design: discover weapons'):
+                context['weapon_catalog']=discover(context['index'],'mw_design_preview')
+        return copy.deepcopy(context['weapon_catalog'])
+
+    @staticmethod
+    def design_geometry_body(body):
+        """Separate image-neutral limits from the actual geometry inputs."""
+        body=copy.deepcopy(body)
+        from .articulation import validate_limits
+        from .pivots import pose_matrix
+        transform=body['transform'];validate_limits(transform.get('joint_limits'),('hull','turret'))
+        transform.pop('joint_limits',None)
+        draft=transform.get('assembly_draft') or {}
+        if 'turrets' in draft:
+            kept=[]
+            for row in draft['turrets']:
+                if row.get('native'):
+                    validate_limits({'turret':row.get('joint_limits') or {}},('turret',))
+                    row.pop('joint_limits',None)
+                    pose=row.get('pose') or {};pose_matrix(pose)
+                    if not any(pose.get('position',[])) and not any(pose.get('rotation',[])) and not any(pose.get('pivot',[])):continue
+                kept.append(row)
+            draft['turrets']=kept
+        return body
 
     @staticmethod
     def design_display_body(body):
         """Catalog and display share the same unposed source context."""
-        body=copy.deepcopy(body)
-        # The crew editor applies these live over the unadjusted seats. Baking
-        # them here would rotate twice and remove unchecked workers from the UI.
+        body=AppState.design_geometry_body(body)
+        # Crew movement is applied locally over the original sockets.
         body['transform'].pop('crew_seats',None)
         body['transform'].pop('crew_exclude',None)
         hull_pose=body['transform'].get('hull') or {}
@@ -1168,10 +1290,37 @@ class AppState:
             body['transform']['hull']={'position':[0,0,0],'rotation':[0,0,0]}
         return body
 
+    @staticmethod
+    def display_joint_limits(result,body):
+        """Limits/speeds change overlays, not geometry or compiled textures."""
+        transform=body.get('transform') or {};pending=body.get('pending') or {}
+        rows=(transform.get('assembly_draft') or {}).get('turrets') or []
+        for part in ('hull','turret'):
+            data=result.get(part) or {};parents={b['name']:b.get('parent') for b in data.get('bones',[])}
+            def within(name,mount):
+                seen=set()
+                while name and name not in seen:
+                    if name==mount:return True
+                    seen.add(name);name=parents.get(name)
+                return False
+            for joint in data.get('joints',[]):
+                value=None
+                for row in rows:
+                    if not row.get('native'):continue
+                    mount=row.get('recipient_mount') or 'turret'
+                    if part=='turret' and (pending.get('kind')!='native' or pending.get('recipient_mount')!=mount):continue
+                    if within(joint['bone'],mount):value=(row.get('joint_limits') or {}).get(joint['bone'],value)
+                value=((transform.get('joint_limits') or {}).get(part) or {}).get(joint['bone'],value)
+                if value is not None:
+                    joint['limits']=list(value[:2])
+                    if len(value)==3:joint['speed']=value[2]
+        return result
+
     def design_preview_data(self,body):
         from .geometry import build_preview
         from .compiler import seat_markers
         from .gun_assembly import preview_parts
+        limit_body=body
         excluded=set((body.get('transform') or {}).get('crew_exclude') or [])
         body=self.design_display_body(body)
         pending=body.get('pending')
@@ -1183,8 +1332,18 @@ class AppState:
             draft['turrets']=[row for row in design_turrets(draft) if (row.get('recipient_mount') or 'turret')!=target]
             draft['removals']=[row for row in draft.get('removals',[]) if row['mount']!=target]
             draft.pop('turret',None)
-            if pending['kind']=='turret':draft['guns']=[]
-        context=self.design_context(body);index=context['index'];template='mw_design_preview'
+            if pending['kind']=='turret':
+                draft['guns']=[]
+                # This temporary hull omits the donor and its crew sockets.
+                # Fixed-seat choices belong to the assembled vehicle.
+                body['transform'].pop('crew_fixed',None)
+        context=self.design_context(body,display=True,limit_body=limit_body);index=context['index'];template='mw_design_preview'
+        displays=context.setdefault('displays',{})
+        display_key=json.dumps(pending,sort_keys=True)
+        if display_key in displays:
+            result=copy.deepcopy(displays[display_key])
+            result['crew_visibility']=[r for r in result['crew_visibility'] if r['place'] not in excluded]
+            return self.display_joint_limits(result,limit_body)
         if pending and pending['kind']=='gun':
             result=preview_parts(index,template,pending['donor_template'],pending,
                 recipient_frame=context['result']['metadata']['draft_frames'].get(pending['recipient_place']))
@@ -1221,15 +1380,29 @@ class AppState:
         for fitting in (metadata.get('smoke_launchers') or {}).get('mounts',[]):editable_bones.add(fitting['root'])
         editable_bones.update((metadata.get('commander_mg') or {}).get('bones',{}).values())
         for mount in (metadata.get('rider_mgs') or {}).get('mounts',[]):editable_bones.update(mount.get('bones',{}).values())
+        for seat in (metadata.get('passenger_seats') or {}).get('added',[]):
+            if seat.get('bone'):editable_bones.add(seat['bone'])
         for part in ('hull','turret'):
-            result[part]['meshes']=[m for m in result[part]['meshes'] if m.get('bone') not in editable_bones]
+            parents={b['name']:b.get('parent') for b in result[part].get('bones',[])}
+            def editable(name):
+                seen=set()
+                while name and name not in seen:
+                    if name in editable_bones:return True
+                    seen.add(name);name=parents.get(name)
+                return False
+            result[part]['meshes']=[m for m in result[part]['meshes'] if not editable(m.get('bone'))]
+            if 'seats' in result[part]:result[part]['seats']=[s for s in result[part]['seats'] if not editable(s.get('bone'))]
+            if 'joints' in result[part]:result[part]['joints']=[j for j in result[part]['joints'] if not editable(j.get('bone'))]
             for mesh in result[part]['meshes']:
                 for sub in mesh.get('submeshes',[]):sub['texture_token']=context['token']
         result['saved_weapons']=[{'recipient_place':c['recipient']['place'],'donor_place':c['donor']['place'],
             'donor_template':c['donor'].get('template'),'label':index.weapon_label(c['donor']['weapon'])}
             for c in context['result']['metadata'].get('gun_assemblies',[])]
-        result.update(preview_valid=True,runtime_verified=False,
-                      crew_visibility=[r for r in metadata.get('crew_visibility',[]) if r['place'] not in excluded]);return result
+        result.update(preview_valid=True,runtime_verified=False,crew_visibility=metadata.get('crew_visibility',[]))
+        if len(displays)>=2:displays.pop(next(iter(displays)))
+        displays[display_key]=copy.deepcopy(result)
+        result['crew_visibility']=[r for r in result['crew_visibility'] if r['place'] not in excluded]
+        return self.display_joint_limits(result,limit_body)
 
     def clear_gun_preview(self):
         draft=self.__dict__.pop('gun_draft_preview',None)
@@ -1396,9 +1569,9 @@ class AppState:
         if existing.is_dir():
             with self.phase('Build: validate and copy existing addon'):
                 self.owned_addon(existing)
-                shutil.copytree(long_path(existing),long_path(staging),ignore=lambda directory,names:[OWNERSHIP_FILE] if OWNERSHIP_FILE in names else [])
+                copy_tree(long_path(existing),long_path(staging),ignore=lambda directory,names:[OWNERSHIP_FILE] if OWNERSHIP_FILE in names else [])
             recorded=recorded_stack(staging)
-            if recorded is None or recorded!=stack_signature(self.index) or self.mod_stack_problem():
+            if recorded is None or recorded!=stack_signature(self.index) or self.stack_problem():
                 # The shared addon was registered for other mods (e.g. built
                 # with MACE, now used without): re-register every vehicle.
                 with self.phase('Build: register every vehicle again (mods changed)'):
@@ -1633,7 +1806,7 @@ class AppState:
     def shop_listing(self):
         """Workshop vehicles and whether each is sold in the Conquest shop, with
         the price and research stage it gets. Reading it changes nothing."""
-        from .registration import RegistrationError, _recipes, shop_offer, shop_prices, vehicle_parts
+        from .registration import RegistrationError, _recipes, shop_offer, shop_prices, vehicle_parts, SHOP_POLICY
         addon=self.addon_root();rows=[]
         if not (addon/'mod.info').is_file():return {'vehicles':rows,'priced':False}
         # Reading only: applying (set_shop) verifies the addon is ours.
@@ -1649,11 +1822,15 @@ class AppState:
             if identifier not in recipes:continue
             parts=vehicle_parts(recipes[identifier])
             row={'id':identifier,'name':data.get('display_name') or identifier,'on':bool(data.get('shop')),'parts':parts,
-                 'campaign':data.get('campaign')}
+                 'campaign':data.get('campaign'),'needs_update':bool(data.get('shop')) and data['shop'].get('policy')!=SHOP_POLICY}
+            stored=data.get('shop') or {};row['custom_cost']=stored.get('cost')
+            row['cost']=stored.get('cost',(stored.get('offer') or {}).get('cost',0))
+            row['suggested_cost']=(stored.get('offer') or {}).get('suggested_cost',row['cost'])
             if self.index is not None:
                 try:
-                    offer=shop_offer(self.index,parts,recipes,prices=prices)
-                    row.update(cost=offer['cost'],stage=offer['stage'],unpriced=offer['unpriced'])
+                    custom=(data.get('shop') or {}).get('cost')
+                    offer=shop_offer(self.index,parts,recipes,prices=prices,cost=custom)
+                    row.update(cost=offer['cost'],suggested_cost=offer['suggested_cost'],custom_cost=custom,stage=1,unpriced=offer['unpriced'])
                 except RegistrationError as error:row['problem']=str(error)
             rows.append(row)
         return {'vehicles':rows,'priced':self.index is not None}
@@ -1717,9 +1894,9 @@ class AppState:
         staging=operation/ADDON_ID;original=None;rebuilt=None
         if existing.is_dir():
             original=self.owned_addon(existing)
-            shutil.copytree(long_path(existing),long_path(staging),ignore=lambda directory,names:[OWNERSHIP_FILE] if OWNERSHIP_FILE in names else [])
+            copy_tree(long_path(existing),long_path(staging),ignore=lambda directory,names:[OWNERSHIP_FILE] if OWNERSHIP_FILE in names else [])
             recorded=recorded_stack(staging)
-            if recorded is None or recorded!=stack_signature(self.index) or self.mod_stack_problem():
+            if recorded is None or recorded!=stack_signature(self.index) or self.stack_problem():
                 with self.phase('Creative: register every vehicle again (mods changed)'):
                     base=ResourceIndex(self.settings['game_root'],[root for root in self.settings['mod_roots'] if not is_own_mod(Path(root).name)]).build()
                     try:rebuilt=rebuild_registrations(base,staging)
@@ -1752,7 +1929,7 @@ class AppState:
         take them out. Only the shared addon changes, never a save: the shop
         sells them in every campaign that uses the addon. The previous addon is
         archived in the operation folder and restored if publishing fails."""
-        from .registration import SHOP_SHARE, _recipes, describe_addon, rebuild_registrations, vehicle_parts
+        from .registration import SHOP_SHARE, _recipes, describe_addon, rebuild_registrations, vehicle_parts, shop_cost
         from .resources import ResourceIndex
         from .transactions import OWNERSHIP_FILE, _owned_addon, _tree_hashes
         changes=body.get('changes')
@@ -1765,13 +1942,23 @@ class AppState:
         for identifier in changes:
             if not isinstance(identifier,str) or not re.fullmatch(r'mw_[A-Za-z0-9_-]+',identifier) or identifier not in recipes:
                 raise ValueError('Vehículo del taller inválido.')
+            value=changes[identifier]
+            if type(value) is not bool:
+                if not isinstance(value,dict) or type(value.get('on')) is not bool:
+                    raise ValueError('Configuración de tienda inválida.')
+                if value.get('cost') is not None:shop_cost(value['cost'])
         operation=self.workspace/'operations'/(datetime.now().strftime('%Y%m%d_%H%M%S')+'_shop_'+secrets.token_hex(3))
         staging=operation/ADDON_ID
-        shutil.copytree(long_path(addon),long_path(staging),ignore=lambda directory,names:[OWNERSHIP_FILE] if OWNERSHIP_FILE in names else [])
-        for identifier,on in changes.items():
+        copy_tree(long_path(addon),long_path(staging),ignore=lambda directory,names:[OWNERSHIP_FILE] if OWNERSHIP_FILE in names else [])
+        for identifier,value in changes.items():
             path=staging/f'workshop_manifest_{identifier}.json'
             data=json.loads(path.read_text(encoding='utf-8'))
-            if on:data['shop']={'parts':vehicle_parts(recipes[identifier]),'share':SHOP_SHARE}
+            on=value if type(value) is bool else value['on']
+            if on:
+                previous_shop=data.get('shop') or {}
+                data['shop']={'parts':vehicle_parts(recipes[identifier]),'share':SHOP_SHARE}
+                cost=previous_shop.get('cost') if type(value) is bool else value.get('cost',previous_shop.get('cost'))
+                if cost is not None:data['shop']['cost']=shop_cost(cost)
             else:data.pop('shop',None)
             path.write_text(json.dumps(data,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
         roots=[root for root in self.settings.get('mod_roots',[]) if not is_own_mod(Path(root).name)]
@@ -1994,15 +2181,37 @@ class AppState:
 
     GLOBAL_FILES=('set/interaction_entity/entity.set','set/multiplayer/units/roster_conquest.set')
 
-    def mod_stack_problem(self,*,include_generated=True):
+    def stack_check(self):
+        """The full mod stack check of the current index, read once in the
+        background: it parses every registration include (seconds with big
+        mods) and only warns, so opening a campaign never waits for it."""
+        with self.lock:
+            index=self.index
+            if index is None:return None
+            current=self.__dict__.get('stack_check_state')
+            if current is not None and current[0] is index:return current[1]
+            future=Future();self.stack_check_state=(index,future)
+        def work():
+            try:future.set_result(self.mod_stack_problem(index=index))
+            except Exception as error:  # a warning-only check never fails an operation
+                logging.warning('Mod stack check unavailable: %s',error);future.set_result(None)
+        threading.Thread(target=work,name='workshop-mod-stack',daemon=True).start()
+        return future
+
+    def stack_problem(self):
+        future=self.stack_check()
+        return future.result() if future is not None else None
+
+    def mod_stack_problem(self,*,include_generated=True,index=None):
         """A file the active mods include but none provides, typically because a
         mod depends on another the game switches off by version. The game then
         closes at start with or without the workshop; say so plainly instead."""
         from .cancellation import JobCancelled
         from .registration import _load_include_graph
-        exists=getattr(self.index,'exists',None)
+        index=self.index if index is None else index
+        exists=getattr(index,'exists',None)
         if exists is None: return None
-        source=self.index.registration_sources() if hasattr(self.index,'registration_sources') else self.index
+        source=index.registration_sources() if hasattr(index,'registration_sources') else index
         for start in self.GLOBAL_FILES:
             if not exists(start): continue
             try:
@@ -2012,7 +2221,7 @@ class AppState:
                 missing,owner=(match.group(1),match.group(2)) if match else (str(error),start)
                 try: by=source.resolve(owner).origin
                 except Exception: by='?'
-                disabled=', '.join(m['name'] for m in getattr(self.index,'disabled_mods',[]))
+                disabled=', '.join(m['name'] for m in getattr(index,'disabled_mods',[]))
                 return (f'Tus mods activos están incompletos: «{missing}» no existe y lo pide «{by}» ({owner}). '
                         'El juego se va a cerrar al iniciar, con o sin el taller.'
                         +(f' Probablemente falta {disabled}, que el juego desactiva por la versión.' if disabled else '')
@@ -2021,10 +2230,10 @@ class AppState:
                 raise
             except Exception:  # a check that only warns must never stop opening a campaign
                 logging.exception('Mod stack check skipped for %s',start)
-        if include_generated and source is not self.index:
+        if include_generated and source is not index:
             for start in self.GLOBAL_FILES:
                 if not exists(start):continue
-                try:_load_include_graph(self.index,start,generated=True)
+                try:_load_include_graph(index,start,generated=True)
                 except FileNotFoundError:
                     return ('El addon local «Cursed Workshop - Built Vehicles» conserva referencias de otra combinación de mods. '
                             'Pulsá «Actualizar vehículos» para reconstruirlo con los mods actuales. Se conserva una copia de recuperación.')
@@ -2142,7 +2351,7 @@ class AppState:
         original_hashes=self.owned_addon(addon)
         operation=self.workspace/'operations'/(datetime.now().strftime('%Y%m%d_%H%M%S')+'_repair_'+secrets.token_hex(3))
         staging=operation/ADDON_ID
-        shutil.copytree(long_path(addon),long_path(staging),ignore=lambda directory,names:[OWNERSHIP_FILE] if OWNERSHIP_FILE in names else [])
+        copy_tree(long_path(addon),long_path(staging),ignore=lambda directory,names:[OWNERSHIP_FILE] if OWNERSHIP_FILE in names else [])
         roots=[root for root in self.settings.get('mod_roots',[]) if not is_own_mod(Path(root).name)]
         base=ResourceIndex(self.settings['game_root'],roots).build()
         rebuilt,skipped=[],[]
@@ -2278,61 +2487,81 @@ class Handler(BaseHTTPRequestHandler):
         try:
             self.authorized()
             parsed=urlparse(self.path); query=parse_qs(parsed.query); path=parsed.path
-            if path=='/api/session': return self.send_json({'token':self.state.token,'version':__version__})
-            if path.startswith('/api/'):
-                if self.headers.get('X-Workshop-Token')!=self.state.token: raise PermissionError('Sesión inválida.')
-                if path=='/api/config': return self.send_json(self.state.config())
-                if path=='/api/ui-preferences': return self.send_json(self.state.ui_preferences())
-                if path=='/api/diagnostic': return self.send_json(self.state.diagnostic())
-                if path=='/api/status':
-                    game=self.state.settings.get('game_root') or None
-                    status=game_state(game)
-                    return self.send_json({'game_processes':running_game_processes(game),'game':status,'linux':running_under_wine(),
-                                           'addon_readiness':self.state.addon_readiness(status)})
-                if path=='/api/job':
-                    with self.state.lock: job=dict(self.state.jobs.get(query.get('id',[''])[0],{}))
-                    return self.send_json(job,200 if job else 404)
-                if path=='/api/catalog':
-                    if self.state.index is None: return self.send_json({'units':[],'indexed':False})
-                    # Vehicles only, uncapped: with MACE the ~5,500 infantry breeds
-                    # filled a 2,000-row cap sorted by kind and no tank reached the list.
-                    units=[row for row in self.state.index.list_units(search=query.get('search',[''])[0]) if row['kind']!='infantry']
-                    return self.send_json({'units':units,'indexed':True})
-                if path=='/api/unit-image':
-                    try:data=self.state.unit_image(query.get('template',[''])[0])
-                    except FileNotFoundError:
-                        self.send_response(404);self.send_header('Content-Length','0');self.end_headers();return
-                    self.send_response(200);self.send_header('Content-Type','image/png');self.send_header('Content-Length',str(len(data)))
-                    self.send_header('Cache-Control','private, max-age=300');self.send_header('X-Content-Type-Options','nosniff');self.end_headers()
-                    self.wfile.write(data);return
-                if path=='/api/campaign': return self.send_json(self.state.campaign_data() if self.state.snapshot else {})
-                if path=='/api/generated-vehicles': return self.send_json(self.state.generated_vehicles())
-                if path=='/api/shop': return self.send_json(self.state.shop_listing())
-                if path=='/api/crew-model': return self.send_json(self.state.crew_model(query.get('pose',[''])[0]))
-                if path=='/api/commander-mg': return self.send_json(self.state.commander_catalog())
-                if path=='/api/texture':
-                    data=self.state.texture(query.get('mtl',[''])[0],query.get('portrait_token',[None])[0])
-                    if data is None:
-                        self.send_response(204); self.send_header('Cache-Control','private, max-age=3600'); self.end_headers(); return
-                    self.send_response(200); self.send_header('Content-Type','image/png'); self.send_header('Content-Length',str(len(data)))
-                    self.send_header('Cache-Control','private, max-age=3600'); self.send_header('X-Content-Type-Options','nosniff'); self.end_headers()
-                    return self.wfile.write(data)
-                return self.send_json({'error':'Ruta inexistente'},404)
-            relative=unquote(path).lstrip('/') or 'index.html'
-            target=(WEB_ROOT/relative).resolve()
-            if not target.is_relative_to(WEB_ROOT.resolve()) or not target.is_file(): return self.send_json({'error':'Archivo inexistente'},404)
-            data=target.read_bytes(); self.send_response(200); self.send_header('Content-Type',mimetypes.guess_type(target.name)[0] or 'application/octet-stream')
-            self.send_header('Content-Length',str(len(data))); self.send_header('Cache-Control','no-cache'); self.send_header('X-Content-Type-Options','nosniff')
-            self.send_header('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
-            self.end_headers(); self.wfile.write(data)
+            from contextlib import nullcontext
+            timed=path in ('/api/catalog','/api/unit-image','/api/campaign','/api/generated-vehicles',
+                           '/api/shop','/api/crew-model','/api/commander-mg','/api/texture')
+            with self.state.phase('Load '+path) if timed else nullcontext():
+                return self.get_resource(path,query)
         except ConnectionError:
-            # A superseded read-only preview can close its socket normally.
-            # Never report it as a compiler failure or send a second response.
             self.close_connection=True
         except PermissionError as exc: self.send_json({'error':str(exc)},403)
         except Exception as exc:
             self.state.record_error(exc,'HTTP GET')
             logging.exception('GET failed'); self.send_json({'error':str(exc)},400)
+
+    def get_resource(self,path,query):
+        if path=='/api/session': return self.send_json({'token':self.state.token,'version':__version__})
+        if path.startswith('/api/'):
+            if self.headers.get('X-Workshop-Token')!=self.state.token: raise PermissionError('Sesión inválida.')
+            if path=='/api/config': return self.send_json(self.state.config())
+            if path=='/api/ui-preferences': return self.send_json(self.state.ui_preferences())
+            if path=='/api/design-templates':
+                from .design_templates import listing
+                return self.send_json({'templates':listing(self.state.workspace)})
+            if path=='/api/diagnostic': return self.send_json(self.state.diagnostic())
+            if path=='/api/error-report':
+                report=self.state.report_file(query.get('name',[''])[0])
+                with report.open('rb') as stream:
+                    self.send_response(200)
+                    self.send_header('Content-Type','application/zip')
+                    self.send_header('Content-Length',str(os.fstat(stream.fileno()).st_size))
+                    self.send_header('Content-Disposition','attachment; filename="diagnostic.zip"')
+                    self.send_header('Cache-Control','no-store')
+                    self.send_header('X-Content-Type-Options','nosniff')
+                    self.end_headers();shutil.copyfileobj(stream,self.wfile)
+                return
+            if path=='/api/status':
+                game=self.state.settings.get('game_root') or None
+                status=game_state(game)
+                return self.send_json({'game_processes':running_game_processes(game),'game':status,'linux':running_under_wine(),
+                                       'addon_readiness':self.state.addon_readiness(status)})
+            if path=='/api/job':
+                with self.state.lock: job=dict(self.state.jobs.get(query.get('id',[''])[0],{}))
+                return self.send_json(job,200 if job else 404)
+            if path=='/api/catalog':
+                if self.state.index is None: return self.send_json({'units':[],'indexed':False})
+                # Vehicles only, uncapped: with MACE the ~5,500 infantry breeds
+                # filled a 2,000-row cap sorted by kind and no tank reached the list.
+                units=[row for row in self.state.index.list_units(search=query.get('search',[''])[0]) if row['kind']!='infantry']
+                return self.send_json({'units':units,'indexed':True})
+            if path=='/api/unit-image':
+                try:data=self.state.unit_image(query.get('template',[''])[0])
+                except FileNotFoundError:
+                    self.send_response(404);self.send_header('Content-Length','0');self.end_headers();return
+                self.send_response(200);self.send_header('Content-Type','image/png');self.send_header('Content-Length',str(len(data)))
+                self.send_header('Cache-Control','private, max-age=300');self.send_header('X-Content-Type-Options','nosniff');self.end_headers()
+                self.wfile.write(data);return
+            if path=='/api/campaign': return self.send_json(self.state.campaign_data() if self.state.snapshot else {})
+            if path=='/api/generated-vehicles': return self.send_json(self.state.generated_vehicles())
+            if path=='/api/shop': return self.send_json(self.state.shop_listing())
+            if path=='/api/crew-model': return self.send_json(self.state.crew_model(query.get('pose',[''])[0]))
+            if path=='/api/commander-mg': return self.send_json(self.state.commander_catalog())
+            if path=='/api/mod-stack': return self.send_json({'problem':self.state.stack_problem()})
+            if path=='/api/texture':
+                data=self.state.texture(query.get('mtl',[''])[0],query.get('portrait_token',[None])[0])
+                if data is None:
+                    self.send_response(204); self.send_header('Cache-Control','private, max-age=3600'); self.end_headers(); return
+                self.send_response(200); self.send_header('Content-Type','image/png'); self.send_header('Content-Length',str(len(data)))
+                self.send_header('Cache-Control','private, max-age=3600'); self.send_header('X-Content-Type-Options','nosniff'); self.end_headers()
+                return self.wfile.write(data)
+            return self.send_json({'error':'Ruta inexistente'},404)
+        relative=unquote(path).lstrip('/') or 'index.html'
+        target=(WEB_ROOT/relative).resolve()
+        if not target.is_relative_to(WEB_ROOT.resolve()) or not target.is_file(): return self.send_json({'error':'Archivo inexistente'},404)
+        data=target.read_bytes(); self.send_response(200); self.send_header('Content-Type',mimetypes.guess_type(target.name)[0] or 'application/octet-stream')
+        self.send_header('Content-Length',str(len(data))); self.send_header('Cache-Control','no-cache'); self.send_header('X-Content-Type-Options','nosniff')
+        self.send_header('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
+        self.end_headers(); self.wfile.write(data)
 
     def do_POST(self):
         try:
@@ -2351,6 +2580,10 @@ class Handler(BaseHTTPRequestHandler):
             if route=='/api/ui-preferences':
                 if not isinstance(body,dict): raise ValueError('Invalid interface preferences.')
                 return self.send_json(self.state.ui_preferences(body))
+            if route=='/api/design-templates':
+                from . import design_templates
+                if not isinstance(body,dict) or body.get('action') not in ('save','delete'): raise ValueError('Acción de plantilla inválida.')
+                return self.send_json({'templates':getattr(design_templates,body['action'])(self.state.workspace,body)})
             if route=='/api/cancel-job':return self.send_json(self.state.cancel_job(body))
             actions={'/api/configure':('Leer recursos',self.state.configure),'/api/load-save':('Abrir campaña',self.state.load_save),
                      '/api/preview':('Cargar modelo 3D',self.state.preview),'/api/free-anchor':('Calcular apoyo',self.state.free_anchor),'/api/generate':('Crear mod y campaña',self.state.generate),

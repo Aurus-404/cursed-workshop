@@ -24,7 +24,7 @@ def design_turrets(draft):
     return rows if isinstance(rows,list) else []
 
 
-EXTRAS=('commander_mg','extra_armor','smoke_launchers','towing','charge','rider_mgs','passenger_seats','crew_hidden','crew_seats','crew_exclude','crew_static','crew_fixed','joint_limits')
+EXTRAS=('commander_mg','extra_armor','smoke_launchers','towing','charge','rider_mgs','passenger_seats','crew_hidden','crew_seats','crew_exclude','crew_static','crew_fixed','joint_limits','mobility')
 
 
 def weapon_identity(transform):
@@ -107,7 +107,7 @@ def specification(transform):
 def compile_draft(resources,recipient,donor,transform,output,identifier):
     from .compiler import compile_assembly
     from .gun_assembly import compile_guns
-    draft=specification(transform);output=Path(output);steps=[];hashes={};views=[];view=resources;current=recipient;seed_camera={};removals=[];assemblies=[]
+    draft=specification(transform);output=Path(output);steps=[];hashes={};views=[];view=resources;current=recipient;seed_camera={};seed_interaction=None;removals=[];assemblies=[]
     if draft.get('removals'):
         return _compile_removed_design(resources,recipient,donor,transform,output,identifier,draft)
     extras={k:copy.deepcopy(transform[k]) for k in EXTRAS if k in transform}
@@ -133,6 +133,7 @@ def compile_draft(resources,recipient,donor,transform,output,identifier):
             if seed:
                 core={k:v for k,v in seed['transform'].items() if k not in ('commander_mg','extra_armor','smoke_launchers','rider_mgs','passenger_seats','crew_hidden')}
                 initial=compile_assembly(view,seed['recipient'],seed['donor'],core,temp/'seed','mw_draft_seed')
+                seed_interaction=initial['metadata'].get('interaction_donor')
                 seed_camera={k:copy.deepcopy(initial['metadata'][k]) for k in
                     ('gun_camera_donor','camera_bone_mapping','bone_mapping','bone_map') if k in initial['metadata']}
                 remember(initial,'seed');overlay(initial)
@@ -174,11 +175,15 @@ def compile_draft(resources,recipient,donor,transform,output,identifier):
             # saved turret, never to another gun's newly moved elevation pivot.
             frames={}
             from .gun_assembly import discover
-            for row in discover(view,current)['weapons']:
+            guns=draft.get('guns') or []
+            # Only saved gun replacements can change the structural receiver
+            # frames used while positioning another replacement. An untouched
+            # gun is already in its authoritative frame in the final model.
+            for row in discover(view,current)['weapons'] if guns else []:
                 if row['available']:
                     _,_,_,model,_,spec=selected(view,current,row['place'])
                     frames[row['place']]=model['bones'][spec['pivot']]['world']
-            guns=draft.get('guns') or [];assembled=temp/'assembled' if move_hull else output
+            assembled=temp/'assembled' if move_hull else output
             if guns:
                 result=compile_guns(view,current,guns[0]['donor_template'],{**extras,'_design_crew':True,'gun_swaps':guns},assembled,identifier,stage_profiles=True)
                 for row,entry in zip(guns,result['metadata']['gun_profiles']):
@@ -207,6 +212,12 @@ def compile_draft(resources,recipient,donor,transform,output,identifier):
             metadata['state_profile'].update(hull_authority=recipient,turret_authority=donor)
             if guns:metadata['operation']='gun_swap'
             if main:metadata['draft_turret_donor']=main[0].get('donor_template') or recipient
+            # A roof addition leaves the original main gun and its sounds in
+            # place. It is not the authority for all the chassis' interactions.
+            replacement = next((r for r in turrets if not r.get('native') and (r.get('recipient_mount') or 'turret') == 'turret'), None)
+            from .weapon_effects import interaction_source
+            authority = replacement['donor_template'] if replacement else seed_interaction or recipient
+            metadata['interaction_donor'] = interaction_source(resources, authority or recipient)
             if main and not guns:metadata['bone_mapping']=main[1]['metadata'].get('bone_mapping') or main[1]['metadata'].get('bone_map') or {}
             if main and not guns:metadata['camera_bone_mapping']=main[1]['metadata'].get('camera_bone_mapping',{})
             # Editing fittings does not replace the seed's aiming weapon. Its

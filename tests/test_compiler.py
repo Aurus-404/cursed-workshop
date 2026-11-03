@@ -6,7 +6,7 @@ from pathlib import Path
 from workshop.compiler import (compile_assembly, CompileError, _animation_layout,
                                _retarget_animation, _quat_matrix, _allocate_crew_roles,
                                _rename_crew_and_places)
-from workshop.geometry import parse_model, point, euler_matrix, multiply, translation
+from workshop.geometry import parse_model, point, euler_matrix, multiply, translation, descendants
 from tests.test_geometry import eply
 
 
@@ -34,6 +34,58 @@ class FakeResources:
 
 
 class CompilerTests(unittest.TestCase):
+    def test_a_donor_never_brings_ground_contacts_to_the_vehicle(self):
+        # Sd.Kfz. 250, Bren, M3 and Opel + 8 cm mortar sank to the module: the
+        # engine stood them on the mortar's feet (support1..3). A towed gun's
+        # wheels ({parameters "radius=..."}) do the same.
+        from workshop.geometry import parse_model
+        r = FakeResources()
+        key = 'entity/donor/donor.mdl'
+        r.files[key] = r.files[key].replace(b'{bone "gunner"}', b'{bone "gunner"}{bone "support1"}{bone "support"}'
+                                            b'{bone "wheell" {parameters "id=wheell;radius=0.5;"}{VolumeView "turret.ply"}}')
+        key = 'entity/hull/hull.mdl'
+        r.files[key] = r.files[key].replace(b'{bone "driver"}', b'{bone "driver"}{bone "support2"}')
+        with tempfile.TemporaryDirectory() as temp:
+            result = compile_assembly(r, 'hull', 'donor', {}, temp, 'mw_grounded')
+            model = parse_model((Path(temp)/'resource'/result['model_path']).read_bytes())
+        donor_side = descendants(model['bones'], 'turret')
+        self.assertFalse({'support', 'support1', 'wheell'} & set(model['bones']))
+        self.assertTrue({'module_support', 'module_support1', 'module_wheell'} <= donor_side)
+        self.assertIn('support2', model['bones'], "the chassis' own contacts stay")
+        self.assertNotIn('radius', model['bones']['module_wheell']['node'].render())
+
+    def test_a_main_gun_with_a_limited_traverse_turns_the_hull_like_a_casemate(self):
+        # Pz 38(t) + QF 25-pdr: 4.5 degrees of traverse, yet still a turret tank
+        # (tank.ext "turret"): it never turned to aim. Natives: StuG, Hetzer, Archer.
+        from types import SimpleNamespace
+        from workshop.compiler import _apply_traverse_class
+        from workshop.syntax import block
+        stuff = {'set/stuff/gun/qf25.weapon': SimpleNamespace(path='set/stuff/gun/qf25.weapon'),
+                 'set/stuff/mgun/mg34.weapon': SimpleNamespace(path='set/stuff/mgun/mg34.weapon')}
+        resources = SimpleNamespace(entries=stuff)
+        model = parse_model(b'{skeleton {bone "basis" {bone "body" {bone revolute "turret" {bone revolute "gun_rot" {bone "gun"}}}}}}')
+        def built(weapon, limits):
+            return block('{game_entity {props "tank" "turret"} {Weaponry {place "gun" {weapon "' + weapon + '"} {gunner "gunner"}}}'
+                         + ''.join('{bone "%s" {limits %s}}' % row for row in limits) + '}')
+        def last(root):
+            return [a for n in root.walk('props') for a in n.args if a in ('turret', '-turret')][-1]
+        root = built('qf25', [('turret', '-4.5 4.5'), ('gun_rot', '-5 15')])
+        self.assertEqual(_apply_traverse_class(resources, root, model), 'casemate')
+        self.assertEqual(last(root), '-turret')
+        root = built('qf25', [('gun_rot', '-5 15')])
+        self.assertEqual(_apply_traverse_class(resources, root, model), 'turret')
+        self.assertEqual(last(root), 'turret')
+        # A free yaw above a limited one: a turret ring, unless it is a towed
+        # gun's carriage (the QF 25-pdr's module_basis).
+        root = built('qf25', [('gun_rot', '-4.5 4.5')])
+        self.assertEqual(_apply_traverse_class(resources, root, model), 'turret')
+        root = built('qf25', [('gun_rot', '-4.5 4.5')])
+        self.assertEqual(_apply_traverse_class(resources, root, model, carriages={'turret'}), 'casemate',
+                         "a towed gun's carriage is no turret ring")
+        root = built('mg34', [('turret', '-10 10'), ('gun_rot', '-5 15')])
+        self.assertIsNone(_apply_traverse_class(resources, root, model), 'machine guns never decide the class')
+        self.assertEqual(last(root), 'turret')
+
     def test_component_contracts_in_exported_sidecar_keep_saved_state(self):
         from workshop.campaign import _migrate_state, CampaignError
         from workshop.syntax import block
@@ -585,6 +637,12 @@ class CompilerTests(unittest.TestCase):
         self._truck(resources,b'{props "tractor" "tractor_light" "wheeled"}')
         for path in ('set/stuff/explosive/goliath.weapon','set/stuff/explosive/goliath.60kg.ammo','set/stuff/explosive/goliath.100kg.ammo'):
             resources.files[path]=b'{weapon_bullet}'
+        resources.files['set/interaction_entity/entity.set']=b'{entities {"charge_class" {on fire "payload" {components "body" destroy}{delay 0.1 {delete}}}} {"charge_source" {on "explosion_blastwave" {blastwave c4 45 r0 2.6 r1 5.2}}}}'
+        resources.files['entity/charge_source/charge_source.def']=b'{game_entity {props "charge_class"}{Weaponry {place "payload" {weapon "weapon goliath" filling "ammo goliath 60kg" 1}}}}'
+        resources.read_text=lambda path:resources.read(path).decode()
+        from types import SimpleNamespace
+        resources.resolve=lambda path:SimpleNamespace(as_dict=lambda:{'path':path},source_root='unused-fixture-source')
+        resources.verify_unchanged=lambda path:None
         transform={'commander_only':True,
                    'towing':{'tier':'heavy','parent':'body','position':[-30,0,-5],'rotation':[0,0,180]},
                    'charge':{'charge':'60kg','parent':'body','position':[20,0,5],'rotation':[0,0,0]}}
@@ -1061,11 +1119,11 @@ class CompilerTests(unittest.TestCase):
         self.assertIn('{place "mw_rider1" {group "passenger"} {linkbone "rider1_seat"} {visor "mw_rider1_top"}}',text)
         self.assertIn('{link "emit1" "mw_rider1" {anm "mw_rider1"} {forward putoff} {reverse puton}}',text)
         self.assertIn('{anm "mw_rider1" {forward {begin "board_HighArmor"} {end "pose_ring"}} {reverse {end "emit_tank_1"}}}',text)
-        self.assertIn('{place "mgun_rider1" {type "aa"} {gunner "mw_rider1"} {charger "mw_rider1"} {LinkBone "rider1_mgun"}',text)
-        self.assertIn('{weapon "mgun_rider2" {mask "mountable"}}',text)
-        self.assertIn('{item "mg42_belt" filled {user "mgun_rider2"}}',text)
+        self.assertIn('{place "mgun1" {type "aa"} {gunner "mw_rider1"} {charger "mw_rider1"} {LinkBone "rider1_weapon"}',text)
+        self.assertIn('{weapon "mgun2" {mask "mountable"}}',text)
+        self.assertIn('{item "mg42_belt" filled {user "mgun2"}}',text)
         self.assertIn('(include "/properties/abm.inc")',text)
-        self.assertIn('mgun_rider1',result['metadata']['state_profile']['weapon_places'])
+        self.assertIn('mgun1',result['metadata']['state_profile']['weapon_places'])
 
     def test_passenger_mgs_have_no_count_cap(self):
         resources=self._rider_resources()

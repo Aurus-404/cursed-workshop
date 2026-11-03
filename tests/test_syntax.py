@@ -3,6 +3,49 @@ from workshop.syntax import parse, block, bone_name, SyntaxError, replace_atoms,
 
 
 class SyntaxTests(unittest.TestCase):
+    def test_repeated_parsing_never_shares_mutable_tokens_or_ignores_parse_mode(self):
+        text='; header\n{a "original" {b 3}}'
+        first=parse(text);first.find('a').atoms[1].set('changed')
+        first.find('a').find('b').atoms[1].set('4')
+        self.assertEqual(parse(text).render(),text)
+        self.assertEqual(parse(text.encode()).render(),text)
+        parse('{a {b {c}}}',max_depth=5)
+        with self.assertRaises(SyntaxError):parse('{a {b {c}}}',max_depth=1)
+        parse('{a})',lenient=True)
+        with self.assertRaises(SyntaxError):parse('{a})')
+
+    def test_cached_trees_stay_pristine_after_the_repeat_that_stores_them(self):
+        text='{cached_once "x" {inner 1}}'
+        for _ in range(4):
+            document=parse(text)
+            self.assertEqual(document.render(),text)
+            document.children[0].atoms[1].set('mutated');document.children[0].remove(document.children[0].find('inner'))
+
+    def test_clones_share_no_mutable_token_with_their_source(self):
+        import copy
+        document=parse('; c\n{a "q" (m x) {b 1 [k]}}')
+        document.children[0].marker='kept'
+        for clone in (document.clone(),document.children[0].clone()):
+            source=document if hasattr(clone,'opener')==False else document.children[0]
+            self.assertEqual(clone.render(),source.render())
+            self.assertEqual(clone,copy.deepcopy(source))
+            ids={id(n) for n in source.walk()}|{id(a) for n in source.walk() for a in n.atoms}
+            self.assertFalse(ids&({id(n) for n in clone.walk()}|{id(a) for n in clone.walk() for a in n.atoms}))
+        clone=document.children[0].clone()
+        self.assertEqual(clone.marker,'kept')
+        clone.find('b').atoms[1].set('2');clone.items.append(block('{new}'))
+        self.assertEqual(document.render(),'; c\n{a "q" (m x) {b 1 [k]}}')
+
+    def test_token_rules_match_the_game_text_layout(self):
+        text='﻿{a/b c//x\r\nd;y\re /*z*/f "q\\\\\\"\\n"}'
+        document=parse(text)
+        self.assertEqual(document.render(),text)
+        self.assertEqual([a.value for a in document.children[0].atoms],['a/b','c','d','e','f','q\\"\\n'])
+        with self.assertRaisesRegex(SyntaxError,'Unterminated quoted string at line 1, column 2'):parse('{"open')
+        with self.assertRaisesRegex(SyntaxError,'Unterminated block comment'):parse('{/* x')
+        with self.assertRaisesRegex(SyntaxError,"Missing closing '\\)'"):parse('{a (b}',lenient=True)
+        with self.assertRaisesRegex(SyntaxError,"Unexpected '\\]'"):parse('{a ]}')
+
     def test_lossless_nested_comments_escapes_and_macros(self):
         text = '; {ignored}\n{Bone revolute "turret" /* } */ {File "a\\\\b\\\"c.ply"} ("crew" place(gunner))}\n'
         document = parse(text)

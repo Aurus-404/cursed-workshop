@@ -160,6 +160,29 @@ assert.equal($('turret-target').value,'turret');
 assert.equal(wrappedState.pendingTurret.recipient_mount,'turret');
 assert.deepEqual(wrappedDesign.draft().guns,[wrappedGun],'previewing a turret must retain saved gun changes');
 console.log('Wrapped tank: real turret remains selectable beneath a structural rotation root.');
+// A built roof turret is nested beneath the main turret. Its independent
+// module boundary comes from the backend; hierarchy filtering must not hide it.
+const nestedState={busy:false,campaign:{units:[base,a,b]},hull:base,
+  transform:{hull:{},turret:{},assembly_draft:{schema:1,guns:[],turrets:[]}}};
+const nestedDesign=vehicleDesign({state:nestedState,$,job:async(path,body)=>path==='/api/preview'
+  ?{anchor_name:'turret',mounts:['turret','gun_rot','module_turret','module_pitch','@free'],
+    module_mounts:['turret','module_turret'],bones:[{name:'turret',parent:'body'},{name:'gun_rot',parent:'turret'},
+      {name:'module_turret',parent:'turret'},{name:'module_pitch',parent:'module_turret'}]}
+  :{hull:{anchor_name:body.pending?.recipient_mount||'turret'},turret:{anchor_name:body.pending?'module_turret':''}},
+  displayPart(){},updateSelection(){},remember(){},reportError(e){throw e;},confirm:()=>true});
+await nestedDesign.loadChassis();nestedDesign.controls();
+assert.ok($('design-turret-pos').options.some(o=>o.value==='module_turret'));
+assert.ok($('design-turret-limits').options.some(o=>o.value==='module_turret'));
+await nestedDesign.editTurret('module_turret');
+assert.equal(nestedState.pendingTurret.recipient_mount,'module_turret');
+nestedState.transform.turret.position=[4,0,3];nestedState.transform.joint_limits.turret={module_pitch:[-5,20]};
+await nestedDesign.saveTurret();
+assert.deepEqual(nestedDesign.turrets()[0].pose.position,[4,0,3]);
+// A saved donor with no overrides cannot inherit those of the previous donor.
+nestedDesign.draft().turrets.push({recipient_mount:'@free',donor_template:'mg_donor',donor_eid:'3',pose:{position:[0,0,0],rotation:[0,0,0]}});
+await nestedDesign.editTurret('module_turret');await nestedDesign.editTurret('@free');
+assert.deepEqual(nestedState.transform.joint_limits.turret,{});
+console.log('Nested turret selection, saved pose/limits, and independent limit state passed.');
 // Post-build reload clears both selected units but used to keep Turret mode.
 carrierState.hull=null;carrierState.turret=null;carrierState.pick='turret';carrierState.transform={hull:{},turret:{}};
 await carrierDesign.select(carrier,'turret');

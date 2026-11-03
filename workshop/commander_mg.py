@@ -36,6 +36,8 @@ def _blocked(base):
 
 def weapon_catalog(index, *, item=None):
     """Official mountable weapons, including DLC available in the last game run."""
+    from .catalog_cache import catalog_source
+    index = catalog_source(index)
     base = index.mountable_game()
     cached = index.__dict__.get('_commander_weapons')
     if cached is not None:
@@ -50,7 +52,10 @@ def weapon_catalog(index, *, item=None):
             continue
         name = posixpath.basename(key)
         if '.' not in name or name.endswith('.pattern'):
-            documents[key] = parse(base.read(key))
+            try:
+                documents[key] = parse(base.read(key))
+            except (ValueError, KeyError, OSError):
+                continue  # a mod's unreadable item is not offered; the rest still are
             if name.endswith('.pattern'):
                 patterns[name[:-8]].append(key)
             else:
@@ -95,6 +100,8 @@ def weapon_catalog(index, *, item=None):
         cache[path] = result
         return result
 
+    ammunition_paths=[(path,posixpath.basename(path)[:-5].split('.')) for path in base.entries
+                      if path.startswith('set/stuff/') and path.endswith('.ammo')]
     rows = []
     for name, path in sorted(items.items()):
         if item is not None and name!=item:continue
@@ -117,12 +124,15 @@ def weapon_catalog(index, *, item=None):
             continue
         filling = values.get('filling') or []
         family = (filling[0].removeprefix('ammo ').split() if filling else [])
-        ammunition = []
-        for ammo_path in base.entries:
-            if not ammo_path.startswith('set/stuff/') or not ammo_path.endswith('.ammo'):
+        ammunition, broader = [], []
+        for ammo_path,tokens in ammunition_paths:
+            if not family:
                 continue
-            tokens = posixpath.basename(ammo_path)[:-5].split('.')
-            if tokens[:len(family)] != family or not family:
+            if tokens[:len(family)] != family:
+                # MACE's Type 92 HMG fills "type_92_hmg_magazine clip" from
+                # type_92_hmg_magazine.ammo: a file naming the family's start.
+                if family[:len(tokens)] == tokens and index.read(ammo_path) == base.read(ammo_path):
+                    broader.append((-len(tokens), tokens, ammo_path))
                 continue
             if index.read(ammo_path) != base.read(ammo_path):
                 continue
@@ -132,6 +142,9 @@ def weapon_catalog(index, *, item=None):
                 continue
             ammunition.append((len(tokens), tokens, ammo_path))
         ammunition.sort()
+        if not ammunition and broader:
+            broader.sort()  # the most specific file first
+            ammunition = [broader[0]]
         ammo_item = 'ammo ' + ' '.join(ammunition[0][1]) if ammunition else None
         if not ammo_item:
             continue
@@ -372,6 +385,8 @@ def apply_mount(index, root, model, spec, assets, diagnostics):
         mapping[name] = _unique_name('cmdmg_' + name, taken | set(mapping.values()))
     copied = native['bones'][support['yaw']]['node'].clone()
     _rename_bone_refs(copied, mapping)
+    from .weapon_binding import isolate_aiming
+    isolate_aiming(copied,mapping[support['yaw']])
     _set_matrix(copied, pose_matrix(spec))
     for name, limits in ((support['yaw'], spec['yaw']), (support['pitch'], spec['pitch'])):
         bone = next(n for n in copied.walk('bone') if n.args[-1] == mapping[name])
@@ -450,9 +465,8 @@ def apply_mount(index, root, model, spec, assets, diagnostics):
     if inventory is None:
         inventory = block('{extender "inventory" {box}}')
         root.append(inventory)
-    names = {n.args[0] for n in root.walk('place') if n.args} | {n.args[0] for n in inventory.find_all('weapon') if n.args}
-    names.add('mgun')  # Generic inherited slot in properties/vehicle.ext.
-    slot = _unique_name('mgun_cmd', names)
+    from .weapon_binding import mountable_slot
+    slot = mountable_slot(root)
     inventory.append(block('{weapon %s {mask "mountable"}}' % quote(slot)))
     box = inventory.find('box')
     if box is None:

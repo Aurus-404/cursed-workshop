@@ -1,9 +1,9 @@
-import tempfile,unittest,zipfile,json
+import tempfile,unittest,zipfile,json,shutil
 from pathlib import Path
 from unittest.mock import patch
 from workshop.campaign import load_campaign,apply_plan,build_save_copy,_one,_entity_nodes,_node_eids
 from workshop.vehicle_storage import plan_storage,plan_restoration,VehicleStorage,StorageError
-from workshop.transactions import prepare_transaction,commit_transaction,rollback_transaction
+from workshop.transactions import prepare_transaction,commit_transaction,rollback_transaction,long_path
 from tests.test_campaign import make_save,SCENE,STATUS
 
 class StorageTests(unittest.TestCase):
@@ -17,7 +17,11 @@ class StorageTests(unittest.TestCase):
 
     def setUp(self):
         guard=patch('workshop.transactions.running_game_processes',return_value=[]);guard.start();self.addCleanup(guard.stop)
-        self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup);self.root=Path(self.temp.name)
+        # Restores nest operation copies past 260 characters under %TEMP%, as
+        # the tool itself does with long user names: remove them the way the
+        # tool does, with extended-length paths.
+        self.temp=tempfile.TemporaryDirectory();self.root=Path(self.temp.name)
+        self.addCleanup(self.temp.cleanup);self.addCleanup(shutil.rmtree,long_path(self.root),ignore_errors=True)
         self.source=make_save(self.root/'campaign.sav');self.original=load_campaign(self.source)
     def stored(self):
         replacements=apply_plan(self.original,plan_storage(self.original,'0x9000'))

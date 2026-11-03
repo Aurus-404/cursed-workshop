@@ -21,7 +21,7 @@ function checkFrame(name,model){
   });
   assert.ok(vertices>0);assert.ok(largest>=limit-1e-5,`${name}: model should fill the usable frame`);
   const center=new THREE.Box3().setFromObject(model).getCenter(new THREE.Vector3()),view=camera.position.clone().sub(center);
-  assert.ok(view.x>view.y&&view.y>0&&view.z>0,`${name}: favor the nose and hide more of the rear`);
+  assert.ok(view.x>-view.y&&view.y<0&&view.z>0,`${name}: favor the nose and hide more of the rear, from the left side`);
   cases.push({name,vertices,largestProjectedCoordinate:Number(largest.toFixed(6))});
   model.traverse(object=>{object.geometry?.dispose();object.material?.dispose();});
 }
@@ -54,6 +54,10 @@ for(const [width,height] of [[112,140],[144,72],[112,48]]){
   const camera=portraitCamera(model,width,height,config.margin,config.direction);
   const nose=new THREE.Vector3(100,0,30).project(camera),rear=new THREE.Vector3(-100,0,30).project(camera);
   assert.ok(nose.x<rear.x,'vehicle must face left on screen');
+  // Game frame: +Y is the right side. Seen from the left, the nose left and the
+  // roof up, a right-handed (mirrored) image would put the right side nearer.
+  const right=new THREE.Vector3(0,40,30).project(camera),left=new THREE.Vector3(0,-40,30).project(camera);
+  assert.ok(left.z<right.z,'the photo shows the left side, as in the game, not its mirror image');
   const limit=1-2*config.margin;
   model.traverse(mesh=>{if(!mesh.isMesh)return;const points=mesh.geometry.attributes.position;
     for(let i=0;i<points.count;i++){const p=new THREE.Vector3().fromBufferAttribute(points,i).applyMatrix4(mesh.matrixWorld).project(camera);

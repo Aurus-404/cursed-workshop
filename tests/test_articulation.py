@@ -10,6 +10,13 @@ from tests.test_commander_mg import fixture
 
 
 class ArticulationTests(unittest.TestCase):
+    def test_empty_native_limits_keep_the_weapon_joint_editable(self):
+        model=parse_model('{skeleton {bone "body" {bone revolute "turret" {bone revolute "gun_rot" {bone "gun"}}}}}')
+        root=parse('{game_entity {bone "turret" {limits}} {Weaponry {place "gun" {weapon "cannon"}}}}').find('game_entity')
+        joints={j['bone']:j for j in weapon_joints(model,root)}
+        self.assertEqual(joints['turret']['limits'],[-180,180])
+        apply_limits(model,root,{'hull':{'turret':[-45,60]}},{'hull':{'turret':'turret'}})
+        self.assertEqual(root.find('bone').find('limits').args,['-45','60'])
     def test_locator_ownership_and_definition_limits_override_model(self):
         model=parse_model('{skeleton {bone revolute "basis" {bone revolute "traverse" {limits -90 90} {bone "aimpoint"}}}}')
         root=parse('{game_entity {bone "traverse" {limits -30 50} {speed2 20}} {Weaponry {place "mgun2" {weapon "mg"} {foresight "aimpoint"}} {place "vision" {type "commander"} {weapon "binoculars"} {LinkBone "basis"}}}}').find('game_entity')
@@ -19,6 +26,28 @@ class ArticulationTests(unittest.TestCase):
         apply_limits(model,root,{'turret':{'traverse':[-20,40]}},{'turret':{'traverse':'traverse'}})
         self.assertEqual(root.find('bone').find('limits').args,['-20','40'])
         self.assertEqual(model['bones']['traverse']['node'].find('limits').args,['-20','40'])
+    def test_traverse_speed_is_read_from_macros_and_can_be_set(self):
+        # TheOppsAreOntoMe: the Panther's turret traverse; the speed a macro sets is shown and can be changed.
+        model=parse_model('{skeleton {bone revolute "basis" {bone revolute "turret" {bone "gun"}}}}')
+        root=parse('{game_entity {bone "turret" ("turret_heavy" power_traverse(9))} {Weaponry {place "gun" {weapon "cannon"} {LinkBone "gun"}}}}').find('game_entity')
+        defines={'turret_heavy':parse('(define "turret_heavy" {speed2 (+ 4 (/ %power_traverse 3))})').children[0]}
+        self.assertAlmostEqual(weapon_joints(model,root,defines=defines)[0]['speed'],7.0)
+        apply_limits(model,root,{'turret':{'turret':[-180,180,24]}},{'turret':{'turret':'turret'}})
+        self.assertEqual(root.find('bone').find_all('speed2')[-1].args,['24'])
+        self.assertEqual(root.find('bone').children[-1].head,'speed2')  # read after the macro, it wins
+        self.assertEqual(model['bones']['turret']['node'].find('speed2').args,['24'])
+        with self.assertRaises(ValueError):
+            apply_limits(model,root,{'turret':{'turret':[-180,180,0]}},{'turret':{'turret':'turret'}})
+
+    def test_a_joint_never_turns_slower_than_the_game_accepts(self):
+        # LVT(A)-1 + 155 mm: module_basis at 0.1 deg/s closed the game loading the
+        # campaign ("Zero speed in ik-bone"); no native joint goes below 0.5.
+        model=parse_model('{skeleton {bone revolute "basis" {bone revolute "turret" {bone "gun"}}}}')
+        root=parse('{game_entity {Weaponry {place "gun" {weapon "cannon"} {LinkBone "gun"}}}}').find('game_entity')
+        apply_limits(model,root,{'turret':{'turret':[0,0,0.1]}},{'turret':{'turret':'turret'}})
+        self.assertEqual(root.find('bone').find('speed2').args,['0.5'],'a saved recipe still builds, at the slowest native speed')
+        self.assertEqual(model['bones']['turret']['node'].find('speed2').args,['0.5'])
+
     def test_only_weapon_ancestors_with_their_actual_reflected_frames(self):
         model=parse_model('{skeleton {bone "body" {bone revolute "wheel"} {bone revolute "hatch"}'
                           '{bone revolute "turret" {limits -180 180} {position 0 0 10}'

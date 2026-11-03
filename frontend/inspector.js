@@ -5,6 +5,7 @@ export const INSPECTOR_TOOLS={
   chassis:{label:'Posición del chasis',fields:[],part:'hull',pose:true},
   position:{label:'Posición y montaje',fields:['design-turret-pos-field','mount-select'],pose:true},
   joints:{label:'Límites de torreta y cañón',fields:['design-turret-limits-field','weapon-joints']},
+  mobility:{label:'Movilidad del chasis',fields:['mobility-field'],part:'hull'},
   crew:{label:'Tripulantes',fields:['design-module-crew-field','crew-pending-field','crew-static-field','crew-field','crew-visibility-field']},
   commander:{label:'Arma del comandante',fields:['commander-field'],part:'commander_mg',pose:true},
   armor:{label:'Blindaje extra',fields:['armor-section'],part:'extra_armor',pose:true},
@@ -20,7 +21,7 @@ export const INSPECTOR_TOOLS={
 export function inspectorNavigation({busy=()=>false,support=()=>false,gun=()=>false,movingMount=()=>false,focusPart=()=>null,ready=()=>true,onEnter=()=>{},onLeave=()=>{},onChange=()=>{}}={}){
   let section='hull',tool=null;
   const part=()=>INSPECTOR_TOOLS[tool]?.part||(['position','joints','crew'].includes(tool)&&focusPart())||((tool==='crew'||tool==='position'&&(gun()||movingMount()))?'turret':section);
-  const available=name=>!!INSPECTOR_TOOLS[name]&&(name!=='chassis'||section==='hull')&&(!['commander','cargo'].includes(name)||
+  const available=name=>!!INSPECTOR_TOOLS[name]&&(!['chassis','mobility'].includes(name)||section==='hull')&&(!['commander','cargo'].includes(name)||
     (name==='commander'?section==='turret'&&!support():section==='hull'&&support()));
   return {
     get section(){return section;},get tool(){return tool;},part,available,
@@ -33,7 +34,7 @@ export function inspectorNavigation({busy=()=>false,support=()=>false,gun=()=>fa
   };
 }
 
-export function inspectorMenus({document=globalThis.document,state,support,gun=()=>false,movingMount=()=>false,onEnter,onLeave,onChange,moveSelector=(select,field)=>{const label=select.labels?.[0];if(label)field.append(label);field.append(select);}}){
+export function inspectorMenus({document=globalThis.document,state,support,gun=()=>false,movingMount=()=>false,poseAvailable=()=>null,onEnter,onLeave,onChange,moveSelector=(select,field)=>{const label=select.labels?.[0];if(label)field.append(label);field.append(select);}}){
   const $=id=>document.getElementById(id),home=$('inspector-home'),content=$('inspector-tool-content');
   const panels={},buttons={};
   const context=$('working-target-slot'),selectors={};
@@ -84,7 +85,7 @@ export function inspectorMenus({document=globalThis.document,state,support,gun=(
     const placed={commander:!!state.transform.commander_mg,armor:!!state.transform.extra_armor?.length,
       smoke:!!state.transform.smoke_launchers?.length,towing:!!state.transform.towing,charge:!!state.transform.charge,rider:!!state.transform.rider_mgs?.length,passengers:!!state.transform.passenger_seats?.added?.length,cargo:!!state.transform.support_vehicle?.cargo?.length};
     const gunReady=navigation.tool!=='position'||!gun()||!!(state.transform.gun_swap?.recipient_place&&state.transform.gun_swap?.donor_place);
-    const pose=navigation.pose()&&(placed[navigation.tool]??true)&&gunReady;
+    const pose=navigation.pose()&&(poseAvailable()??placed[navigation.tool]??true)&&gunReady;
     $('inspector-transforms').classList.toggle('hidden',!pose);
     $('inspector-tool').setAttribute('aria-busy',String(state.inspectorPending>0));content.inert=busy;$('inspector-transforms').inert=busy;$('inspector-history').inert=busy;
     for(const id of ['mode-move','mode-rotate'])$(id).disabled=busy||!(pose||navigation.tool==='crew');

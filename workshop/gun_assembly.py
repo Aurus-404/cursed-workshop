@@ -16,24 +16,19 @@ from pathlib import Path
 from .pivots import pose_matrix, pivot_of, rebase_joint, level_pose, level_joint
 from .syntax import parse, block, quote, bone_name, Node
 from .geometry import (parse_model, descendants, multiply, inverse, identity,
-                       euler_matrix, translation, point, resolve_path, is_carried_weapon)
+                       euler_matrix, translation, point, resolve_path, is_carried_weapon, transform_mesh)
 from .compiler import (CompileError, _load_entity, _state_template, _explicit_weapon_operators, _crew_expansion,
     _include_defines, _set_matrix, _remove_bone, _rename_bone_refs, _module_ids,
     _volume_mapping, _rename_volume, _bind_renamed_volumes, _parameters, _values,
     _edit_complete_crew, _Assets, _validate_export, _animation_map, _animation_layout, _animation_is_empty, _place_model_extension, _allowed_damage_ids, _prioritize_crew, _camera_sockets, _crew_roles, _validate_carriage_crew,
-    _append_inherited_crew)
+    _append_inherited_crew, _optical_sockets, _write_generated)
 
 
 class GunError(CompileError):
     pass
 
 
-def weapon_link(place, model):
-    for head in ('LinkBone','bone','shooter','foresight'):
-        for node in place.find_all(head):
-            if node.args and _bone(model,node.args[0]):
-                return _bone(model,node.args[0])
-    return _bone(model,place.args[0]) if place.args else None
+from .weapon_binding import weapon_link, reference_bones, barrel_bones
 
 
 def _bone(model,name):
@@ -147,8 +142,10 @@ def _contract(root, model, place, resources=None):
     owned=names-shared
     for head in ('LinkBone','bone','shooter','foresight'):
         for reference in place.find_all(head):
-            if reference.args and _bone(model,reference.args[0]) not in owned:
-                raise GunError('GunAssembly: Una referencia requerida queda fuera del conjunto desmontable.\n'+head+': '+reference.args[0])
+            if reference.args:
+                targets=reference_bones(place,model,head,reference.args[0])
+                if not targets or not set(targets)<=owned:
+                    raise GunError('GunAssembly: Una referencia requerida queda fuera del conjunto desmontable.\n'+head+': '+reference.args[0])
     if not any(model['bones'][n]['assets'] for n in owned):
         raise GunError('GunAssembly: El conjunto desmontable no tiene geometría visible.')
     # The barrel: the piece right under the elevation pivot on the way to the
@@ -212,6 +209,39 @@ def _flip_limits(node):
         for atom,value in zip(limits.atoms[1:3],(-high,-low)):atom.set(('%g'%value))
 
 
+def _receiver_housings(model, spec):
+    """Visible socket ancestors and armor branches outside the firing branch."""
+    owned=set(spec['bones'])
+    link=spec['link']
+    path=set()
+    cursor=link
+    while cursor in owned:
+        path.add(cursor)
+        cursor=model['bones'][cursor]['parent']
+    result=set()
+    for name in owned:
+        bone=model['bones'][name]
+        if not bone['assets']:continue
+        children=descendants(model['bones'],name)-{name}
+        armored=any(v['bone']==name for v in model['volumes'].values())
+        if name==spec['pivot'] or (name in path and any(model['bones'][n]['assets'] for n in children)):
+            result.add(name)
+        elif name not in path and armored and not children:
+            result.add(name)
+    return result
+
+
+def _primary_place(root):
+    """The place the player commands directly. Direct control and the weapon
+    bar offer the first place without a {type}; {basic} marks a selectable
+    secondary (Nb.Fz gun2). {type main} only names an MG mount position
+    ("main", "left", "right": Sexton's Bren, the M2 half-track's MGs), never
+    the vehicle's main weapon. With every place typed, the first one leads."""
+    places=_places(root)
+    return next((p.args[0] for p in places if p.find('type') is None and p.find('basic') is None),
+                places[0].args[0] if places else None)
+
+
 def preview_parts(resources, recipient, donor, spec, *, recipient_frame=None):
     from .geometry import build_preview, bounds_of
     from .compiler import seat_markers
@@ -227,26 +257,22 @@ def preview_parts(resources, recipient, donor, spec, *, recipient_frame=None):
     # leaves the original mantlet out. Keep it visible while positioning the
     # replacement too; the other weapon owns its branch.
     mantlet=not spec.get('drop_mantlet')
+    housings=_receiver_housings(rm,rs) if mantlet else set()
     hull['meshes']=[m for m in hull['meshes'] if m['bone'] not in rs['bones']
-                    or (mantlet and rs['shared'] and m['bone']==rs['pivot'])
+                    or m['bone'] in housings
                     or (mantlet and m['bone'].startswith('cw_mantlet_'))]
     shown=set(ds['barrel']) if spec.get('barrel_only') and ds.get('barrel') else set(ds['bones'])
     module['meshes']=[m for m in module['meshes'] if m['bone'] in shown]
     if not module['meshes'] or any(d.get('code')=='mesh_unavailable' for d in module['diagnostics']):
         raise GunError('GunAssembly: La vista previa no puede resolver la geometría del cañón donante.')
-    normal=inverse(frame)
     for mesh in module['meshes']:
-        mesh['positions']=[v for p in zip(*[iter(mesh['positions'])]*3) for v in point(frame,p)]
-        values=[]
-        for p in zip(*[iter(mesh['normals'])]*3):
-            n=[sum(normal[c][r]*p[c] for c in range(3)) for r in range(3)]
-            length=sum(v*v for v in n)**.5 or 1;values.extend(v/length for v in n)
-        mesh['normals']=values
+        transform_mesh(mesh, frame)
     # Armour follows the same parts as the meshes and the export (Lazarus_Opti:
     # the 75 mm carriage's armour showed around a gun change until it was saved).
-    hull['armor']=[a for a in hull.get('armor',[]) if a['bone'] not in rs['bones'] or (mantlet and rs['shared'] and a['bone']==rs['pivot'])]
+    hull['armor']=[a for a in hull.get('armor',[]) if a['bone'] not in rs['bones'] or a['bone'] in housings]
     module['armor']=[{**a,'positions':[v for p in zip(*[iter(a['positions'])]*3) for v in point(frame,p)]}
                      for a in module.get('armor',[]) if a['bone'] in set(ds['bones'])]
+    receiver_joint=next((j for j in hull['joints'] if j['bone']==rs['pivot']),None)
     hull['joints']=[j for j in hull['joints'] if j['bone'] not in rs['bones']]
     # The compiled elevation joint keeps the receiver's axis; a gun turned
     # upright about it reads its own limits the other way round.
@@ -254,8 +280,9 @@ def preview_parts(resources, recipient, donor, spec, *, recipient_frame=None):
     joints=[]
     for joint in module['joints']:
         if joint['bone'] not in ds['bones']:continue
-        if joint['bone']==ds['pivot'] and flip!=identity():
-            low,high=joint['limits'];joints.append({**joint,'matrix':multiply(bare,joint['matrix']),'limits':[-high,-low]})
+        if joint['bone']==ds['pivot'] and receiver_joint:
+            joints.append({**joint,**{k:v for k,v in receiver_joint.items() if k not in ('bone','matrix')},
+                           'matrix':multiply(bare,joint['matrix'])})
         else:joints.append({**joint,'matrix':multiply(frame,joint['matrix'])})
     module['joints']=joints
     for data,part,pivot in ((hull,'hull',rs['pivot']),(module,'turret',ds['pivot'])):
@@ -266,8 +293,12 @@ def preview_parts(resources, recipient, donor, spec, *, recipient_frame=None):
 
 
 def _ammo_key(name):
+    # "family type" -> family ("bulletger_75 he"); the "ammo " container prefix
+    # is not part of it: "ammo flame_thrower" is a whole family with no type.
     tokens=name.split()
-    return ' '.join(tokens[:-1]) if len(tokens)>1 else name
+    prefix=tokens[:1] if tokens[:1]==['ammo'] else []
+    rest=tokens[len(prefix):]
+    return ' '.join(prefix+(rest[:-1] if len(rest)>1 else rest))
 
 
 def _same_ammo(first,second):
@@ -353,9 +384,26 @@ def merge_animations(recipient, donor):
     return result
 
 
+def _stuff_presets(resources, path):
+    """Macros a weapon file sees: the .presets of its folder and of every folder
+    above it under set/stuff (the Crocodile's flamer fills its tank with
+    ("filling_tank" fuel(20)) from set/stuff/flame/.presets)."""
+    defines={};folder=posixpath.dirname(path)
+    chain=[]
+    while folder and folder.casefold().startswith('set/stuff'):
+        chain.append(folder);folder=posixpath.dirname(folder)
+    for folder in reversed(chain):  # nearer folders override
+        preset=folder+'/.presets'
+        try:document=parse(resources.read(preset))
+        except (KeyError,OSError,ValueError):continue
+        defines.update({k.casefold():v for k,v in _include_defines(resources,document,preset).items()})
+        defines.update({n.args[0].casefold():n for n in document.find_all('define') if n.args})
+    return defines
+
+
 def _fillings(resources, weapon, references=None):
     """Effective stuff inheritance, used only to resolve the actual ammo family."""
-    from .registration import _stuff_definition
+    from .registration import _stuff_definition, _expand_macros
     hashes={};seen=set()
     def visit(path):
         if path in seen:raise GunError('GunAssembly: La herencia del arma contiene un ciclo.')
@@ -366,6 +414,7 @@ def _fillings(resources, weapon, references=None):
             parent=node.args[0];pattern=parent.startswith('pattern ')
             result=visit(_stuff_definition(resources,parent.removeprefix('pattern '),path,pattern))
         else:node=next((n for n in doc.children if n.opener=='{'),None)
+        if node is not None:node=_expand_macros(node,_stuff_presets(resources,path))
         filling=node.find('filling') if node else None
         if references is not None and node:
             for head in ('foresight','shooter'):
@@ -478,10 +527,15 @@ def compile_gun(resources, recipient, donor, transform, output, identifier, *, r
     for head,name in effective_refs.items():
         explicit=dp.find(head)
         if explicit and explicit.args:name=explicit.args[0]
-        name=_bone(dm,name)
-        if name not in dnames:
+        targets=reference_bones(dp,dm,head,name)
+        if not targets or not set(targets)<=dnames:
             raise GunError('GunAssembly: Una referencia requerida queda fuera del conjunto desmontable.\n'+head+': '+str(name))
-        effective_refs[head]=name
+        family=barrel_bones(dp,dm,prefix=name) if head=='shooter' else []
+        name=family[0][:-2] if family else targets[0]
+        # Materialize inherited stuff references before reserving names. The
+        # family allocator then owns the final prefix just like an explicit one.
+        for old in list(dp.find_all(head)):dp.remove(old)
+        dp.append(block('{'+head+' '+quote(name)+'}'))
     rshared,dshared=set(rs['shared']),set(ds['shared'])
     # Keep housings preserved by an earlier replacement through later edits,
     # unless the player leaves the original mantlet out ("drop_mantlet").
@@ -529,7 +583,12 @@ def compile_gun(resources, recipient, donor, transform, output, identifier, *, r
     # source bone. Imported geometry must not create a new implicit host for
     # a retained receiver weapon (e.g. BT-2 mgun2 on a T-35).
     kept_slots={p.args[0] for p in _places(rr) if p is not rp and p.args}
-    mapping=_volume_mapping(dnames,(set(rm['bones'])-rnames)|kept_slots)
+    from .compiler import _ground_points, _drop_wheel_radius
+    contacts=_ground_points(dnames,dm)
+    mapping=_volume_mapping(dnames,(set(rm['bones'])-rnames)|kept_slots|contacts)
+    from .weapon_binding import bind_barrels
+    # Work on the private source place; the resource itself is never changed.
+    bind_barrels([dp], dm, mapping, (set(rm['bones'])-rnames)|kept_slots)
     split=bool(any(pivot_of(offset)) and rs['shared'])
     emitted_pivot=rs['pivot']
     if split:
@@ -547,20 +606,21 @@ def compile_gun(resources, recipient, donor, transform, output, identifier, *, r
     if len({mapping.get(n,n) for n in dnames})!=len(dnames):
         raise GunError('GunAssembly: El remapeo de huesos es ambiguo.')
     _rename_bone_refs(mounted,mapping)
+    _drop_wheel_radius(mounted,{mapping.get(n,n) for n in contacts})
     housing=None
-    if mantlet and rs['shared'] and rm['bones'][rs['pivot']]['assets']:
-        # Preserve the native housing without leaving its mesh on the old
-        # independent coax joint. A rigid child follows the selected gun's
-        # elevation, even when its rotation centre was edited separately.
+    housings=[]
+    for source_name in sorted(_receiver_housings(rm,rs) if mantlet else []):
         serial=0
-        used=set(rm['bones'])|set(dnames)|set(mapping.values())
+        used=set(rm['bones'])|set(dnames)|set(mapping.values())|{bone_name(n) for _,n in housings}
         while 'cw_mantlet_'+str(serial) in used:serial+=1
         housing_name='cw_mantlet_'+str(serial)
-        housing=block('{bone '+quote(housing_name)+'}')
-        for child in rm['bones'][rs['pivot']]['node'].children:
-            if child.head.casefold() in ('volumeview','lodview','visibility'):
-                housing.append(child.clone())
-        _set_matrix(housing,multiply(inverse(world),rm['bones'][rs['pivot']]['world']))
+        node=block('{bone '+quote(housing_name)+'}')
+        for child in rm['bones'][source_name]['node'].children:
+            if child.head.casefold() in ('volumeview','lodview','visibility','parameters'):
+                node.append(child.clone())
+        _set_matrix(node,multiply(inverse(world),rm['bones'][source_name]['world']))
+        housings.append((source_name,node))
+        if source_name==rs['pivot']:housing=node
     _remove_bone(rm,rs['pivot'])
     if split:
         # Other weapons retain the native receiver joint. The selected weapon
@@ -577,14 +637,14 @@ def compile_gun(resources, recipient, donor, transform, output, identifier, *, r
     for name,node in retained:
         _set_matrix(node,multiply(inverse(world),rm['bones'][name]['world']))
         mounted.append(node)
-    if housing is not None:
-        mounted.append(housing)
-        retained.append((rs['pivot'],housing))
+    for source_name,node in housings:
+        mounted.append(node)
+        retained.append((source_name,node))
         for value in rm['volumes'].values():
-            if value['bone']==rs['pivot']:
-                _rename_bone_refs(value['node'],{rs['pivot']:housing_name})
-    rv={n for n,v in rm['volumes'].items() if v['bone'] in rnames
-        and not (housing is not None and v['bone']==rs['pivot'])}
+            if value['bone']==source_name:
+                _rename_bone_refs(value['node'],{source_name:bone_name(node)})
+    protected={name for name,_ in housings}
+    rv={n for n,v in rm['volumes'].items() if v['bone'] in rnames and v['bone'] not in protected}
     dv={n for n,v in dm['volumes'].items() if v['bone'] in dnames}
     kept_ids=_module_ids(rm,set(rm['bones'])-rnames)
     donor_ids={v for name in dnames for k,v in _parameters(dm['bones'][name]['node']).items() if k=='id'}
@@ -611,13 +671,22 @@ def compile_gun(resources, recipient, donor, transform, output, identifier, *, r
         elif node.head.casefold()=='bone' and _bone(dm,bone_name(node) or '') in dnames:
             clone=node.clone();clone.atoms[-1].set(_bone(dm,bone_name(node)));_rename_bone_refs(clone,mapping);donor_nodes.append(clone)
     donor_joint=[n for n in donor_nodes if n.head.casefold()=='bone' and bone_name(n)==emitted_pivot]
-    # Keep native receiver elevation limits/speed where donor only inherits them.
-    if not donor_joint:
-        # Effective explicit overrides come from the original definition.
-        _,_,original_root=_load_entity(resources,recipient)
-        for n in original_root.find_all('bone'):
-            if bone_name(n)==rs['pivot']:
-                clone=n.clone();_rename_bone_refs(clone,{rs['pivot']:emitted_pivot});donor_nodes.append(clone)
+    # The socket owns its mechanical travel and speed, independently of the inserted weapon.
+    joint_fields=('limits','speed','speed2')
+    for field in joint_fields:
+        for old in list(mounted.find_all(field)):mounted.remove(old)
+        for native in roriginal['bones'][rs['pivot']]['node'].find_all(field):
+            mounted.append(native.clone())
+    _,_,original_root=_load_entity(resources,recipient)
+    for node in donor_joint:
+        for field in joint_fields:
+            for old in list(node.find_all(field)):node.remove(old)
+    for native in original_root.find_all('bone'):
+        if bone_name(native)!=rs['pivot']:continue
+        clone=block('{bone '+quote(emitted_pivot)+'}')
+        for field in joint_fields:
+            for value in native.find_all(field):clone.append(value.clone())
+        if clone.children:donor_nodes.append(clone)
     from .registration import _expand_macros
     new_place=_expand_macros(dp,{k.casefold():v for k,v in _include_defines(resources,dr).items()})
     new_place.atoms[1].set(rp.args[0])
@@ -638,10 +707,13 @@ def compile_gun(resources, recipient, donor, transform, output, identifier, *, r
             at=worker.args.index('minWorkers')+1
             if int(worker.args[at])>len(names):worker.atoms[at+1].set(str(len(names)))
         new_place.append(worker)
-    for head,name in effective_refs.items():
-        for old in list(new_place.find_all(head)):new_place.remove(old)
-        new_place.append(block('{'+head+' '+quote(name)+'}'))
-    if new_place.find('LinkBone') is None:new_place.append(block('{LinkBone '+quote(ds['link'])+'}'))
+    # A sight can locate a detachable assembly without being an attachment
+    # socket. Materializing it as LinkBone also attaches the stuff's weapon
+    # entity at the muzzle, ahead of the model already present in the vehicle.
+    # Only preserve a native implicit same-named socket when renaming the slot.
+    implicit_host=_bone(dm,dp.args[0]) if dp.args else None
+    if new_place.find('LinkBone') is None and implicit_host is not None:
+        new_place.append(block('{LinkBone '+quote(implicit_host)+'}'))
     for head in ('LinkBone','foresight','shooter','bone'):
         for ref in new_place.find_all(head):
             if ref.args and _bone(dm,ref.args[0]):ref.atoms[1].set(_bone(dm,ref.args[0]))
@@ -650,7 +722,10 @@ def compile_gun(resources, recipient, donor, transform, output, identifier, *, r
     weaponry_owner.items=[new_place if n is rp else n for n in weaponry_owner.items]
     old_muzzle={p for p in rs['properties'] if p.startswith('muzzle_')}
     new_muzzle={p for p in ds['properties'] if p.startswith('muzzle_')}
-    if new_muzzle and old_muzzle!=new_muzzle:
+    # Muzzle props are the vehicle's main gun effects ({on fire "gun"} at
+    # foresight1): only a new weapon in the "gun" place changes them. A 2 cm
+    # in the hull MG slot (Kenway) gave the kept 75 mm its flash and sound.
+    if new_muzzle and old_muzzle!=new_muzzle and rp.args[0].casefold()=='gun':
         rr.append(block('{props '+' '.join(quote(p) for p in sorted({'-'+p for p in old_muzzle}|new_muzzle))+'}'))
     # Only selected ammo, never donor fuel, tools, towing gear or other weapons.
     kept_ammo=_mounted_ammo(resources,rr)
@@ -688,8 +763,7 @@ def compile_gun(resources, recipient, donor, transform, output, identifier, *, r
     # joint turns about the opposite axis (the gun hangs on its back, or the
     # receiver's axis points the other way), up became down and every limit
     # the player set looked reversed.
-    if sum(world[r][2]*level[r][2] for r in range(3))<0:
-        for node in donor_joint:_flip_limits(node)
+
     level_joint(rm['document'],emitted_pivot,multiply(inverse(level),world))
     world=level
     if any(pivot):
@@ -699,6 +773,14 @@ def compile_gun(resources, recipient, donor, transform, output, identifier, *, r
         resources, donor, dm, rm['document'], ds['pivot'], emitted_pivot,
         {n: mapping.get(n, n) for n in dnames}, diagnostics, external_parent=rs.get('yaw'))
     sources.update(camera_sources)
+    # Vision is chassis-owned even when its optical locator was inside the
+    # old gun. Retain the actual source frame, just like an aiming camera.
+    native_names={name.casefold():name for name in roriginal['bones']}
+    vision_refs={bone.args[0] for sensor in rr.find_all('sensor') for visor in sensor.find_all('visor')
+                 for bone in visor.find_all('bone') if bone.args and native_names.get(bone.args[0].casefold()) in rnames}
+    vision_mapping=_optical_sockets(roriginal,rm['document'],rs['pivot'],emitted_pivot,{},vision_refs,diagnostics)
+    for sensor in rr.find_all('sensor'):
+        _rename_bone_refs(sensor,vision_mapping)
     assets=_Assets(resources,output/'resource/entity/-vehicle/workshop'/identifier,sources,diagnostics)
     if transform.get('_design_crew'):
         _edit_complete_crew(resources,rr,rm,transform)
@@ -797,6 +879,9 @@ def compile_gun(resources, recipient, donor, transform, output, identifier, *, r
         skipped=apply_limits(rm,rr,transform['joint_limits'],
                              {'hull':{n:n for n in set(rm['bones'])-rnames},'turret':{n:mapping.get(n,n) for n in dnames}})
         if skipped:diagnostics.append(skipped_limits_diagnostic(skipped))
+    if transform.get('mobility') is not None:
+        from .mobility import apply as apply_mobility
+        apply_mobility(rr,transform['mobility'],diagnostics)
     assets.prune(rm['document'])
     if any(d.get('code')=='animation_tracks_dropped' for d in diagnostics):
         raise GunError('GunAssembly: No se pueden adaptar todas las pistas de animación necesarias.')
@@ -809,7 +894,8 @@ def compile_gun(resources, recipient, donor, transform, output, identifier, *, r
     for place in _places(rr):
         for head in ('LinkBone','foresight','shooter'):
             for node in place.find_all(head):
-                if node.args and not _bone(final,node.args[0]):raise GunError('GunAssembly: Una referencia de arma no existe en el modelo final.\n'+head+': '+node.args[0])
+                if node.args and not reference_bones(place,final,head,node.args[0]):
+                    raise GunError('GunAssembly: Una referencia de arma no existe en el modelo final.\n'+head+': '+node.args[0])
     for placer in rr.find_all('placer'):
         for seat in placer.find_all('place'):
             link=seat.find('LinkBone')
@@ -835,10 +921,17 @@ def compile_gun(resources, recipient, donor, transform, output, identifier, *, r
               'donor_mount_frame':dm['bones'][ds['pivot']]['world'],'emitted_mount_frame':world}
     metadata={'schema_version':1,'compiler':'independent-gem-assembly','id':identifier,'recipient':recipient,'donor':donor,
               'operation':'gun_swap','transform':transform,'gun_assembly':contract,'recipient_mount':rs['pivot'],
-              'camera_bone_mapping':camera_mapping,
-              'donor_mount':ds['pivot'],'bone_mapping':{n:mapping.get(n,n) for n in dnames},'crew_roles':sorted(roles),'crew_slots':len(roles),
+              'gun_camera_donor':donor if rs['place']==_primary_place(original_root) else recipient,
+              'camera_bone_mapping':camera_mapping if rs['place']==_primary_place(original_root) else {},
+              'donor_mount':ds['pivot'],'bone_mapping':({n:mapping.get(n,n) for n in dnames}
+                  if rs['place']==_primary_place(original_root) else {}),'crew_roles':sorted(roles),'crew_slots':len(roles),
               'source_hashes':sources,'state_profile':profile,'wrecks':wrecks,'crew_visibility':crew_visibility,'crew_attachment':crew_attachment,
               'validation':{'structural':'passed','dependencies':validation,'game_runtime':'pending','campaign_acceptance':'pending'}}
+    from .weapon_effects import capture, transplant, interaction_source
+    metadata['interaction_donor'] = interaction_source(resources, recipient)
+    metadata['weapon_effects'] = [
+        *transplant(capture(resources, recipient), {p.args[0]:p.args[0] for p in _places(rr) if p is not new_place}),
+        *transplant(capture(resources, donor), {ds['place']:rp.args[0]}, mapping, renamed_sequences, identifier, owned=dnames)]
     if commander:metadata['commander_mg']=commander
     if smoke_launchers:
         metadata['smoke_launchers']=smoke_launchers
@@ -855,7 +948,7 @@ def compile_gun(resources, recipient, donor, transform, output, identifier, *, r
         if n.endswith(('.def','.mdl','.ext','.mtl')):files[n]=raw.replace(b'\r\n',b'\n').replace(b'\n',b'\r\n')
     metadata['file_hashes']={n:hashlib.sha256(raw).hexdigest() for n,raw in files.items()}
     assets.target.mkdir(parents=True)
-    for n,raw in files.items():(assets.target/n).write_bytes(raw)
+    for n,raw in files.items():_write_generated(resources,assets.target/n,raw)
     result={'id':identifier,'output_dir':str(output),'entity_path':'-vehicle/workshop/'+identifier,
             'definition_path':'entity/-vehicle/workshop/'+identifier+'/'+identifier+'.def',
             'model_path':'entity/-vehicle/workshop/'+identifier+'/'+identifier+'.mdl',
@@ -935,7 +1028,7 @@ def compile_guns(resources,recipient,donor,transform,output,identifier,*,stage_p
                             for box in inv.find_all('box'):
                                 for item in list(box.find_all('item')):
                                     if not removed and item.render()==text:box.remove(item);removed=True
-                    raw=document.render().replace('\r\n','\n').replace('\n','\r\n').encode('utf8');path.write_bytes(raw)
+                    raw=document.render().replace('\r\n','\n').replace('\n','\r\n').encode('utf8');_write_generated(resources,path,raw)
                     metadata['file_hashes'][path.name]=hashlib.sha256(raw).hexdigest()
                     metadata['state_profile']['gun_swap']['ammo_items']=unique
                 profiles.append(copy.deepcopy(metadata['state_profile']))
@@ -950,11 +1043,13 @@ def compile_guns(resources,recipient,donor,transform,output,identifier,*,stage_p
             metadata=result['metadata'];metadata.update(recipient=recipient,donor=donor,transform=copy.deepcopy(transform),
                 gun_assemblies=contracts,source_hashes=sources,
                 gun_profiles=[{'donor_template':r.get('donor_template') or donor,'donor_eid':r.get('donor_eid'),'profile':p} for r,p in zip(rows,profiles)])
-            from .registration import _stuff_definition
-            primary=next((c for c in contracts if '/gun/' in _stuff_definition(resources,c['donor']['weapon'])),contracts[0])
-            metadata['gun_assembly']=primary;metadata['gun_camera_donor']=primary['donor']['template']
-            metadata['camera_bone_mapping']=primary.get('camera_bone_mapping',{})
-            metadata['bone_mapping']={n:primary['bone_mapping'].get(n,n) for n in primary['donor']['bones']}
+            _,_,original_root=_load_entity(resources,recipient)
+            primary=next((c for c in contracts if c['recipient']['place']==_primary_place(original_root)),None)
+            metadata['gun_assembly']=primary or contracts[0]
+            metadata['gun_camera_donor']=primary['donor']['template'] if primary else recipient
+            metadata['camera_bone_mapping']=primary.get('camera_bone_mapping',{}) if primary else {}
+            metadata['bone_mapping']=({n:primary['bone_mapping'].get(n,n) for n in primary['donor']['bones']}
+                                      if primary else {})
             profile=metadata['state_profile'];profile['hull_authority']=recipient
             profile['recipient_module_names']=sorted({n for p in profiles for n in p['recipient_module_names']})
             mapping={};ambiguous=set()

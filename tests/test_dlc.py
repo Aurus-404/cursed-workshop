@@ -90,7 +90,7 @@ class DlcWeaponTests(unittest.TestCase):
         self.log.unlink()
         self.assertEqual([w['id'] for w in rider_weapons(self.index)], ['base_gun'])
 
-    def test_owned_dlc_overlay_models_and_ammo_are_read_but_mod_overrides_stay_excluded(self):
+    def test_owned_dlc_and_mod_weapons_are_offered_but_a_mod_never_unlocks_a_dlc(self):
         archive(self.game, 'dlc1.pak', {
             'set/stuff/paid': '{from "pattern gun" {entity "dlc_gun"}}',
             'entity/inventory/dlc_gun/dlc_gun.def': '{actor {extension "dlc_gun.mdl"}}',
@@ -103,6 +103,11 @@ class DlcWeaponTests(unittest.TestCase):
         self.assertTrue(build_preview(self.index.mountable_game(), 'dlc_gun', 'full')['meshes'])
         mod = self.root / 'mod'
         archive(mod, 'mod.pak', {'set/stuff/paid': '{from "pattern gun" {entity "dlc_gun"} {range 999}}'})
+        self.index.close(); self.index = ResourceIndex(self.game, [mod]).build(); self.addCleanup(self.index.close)
+        # An active mod's version is the one the game uses, so it is offered (MACE weapons: AGrievousGuy)...
+        self.assertEqual(weapon_catalog(self.index, item='paid')[0]['entity'], 'dlc_gun')
+        # ...but a mod never makes a DLC weapon available without the DLC.
+        self.log.write_text(scan(self.game, rows=(), missing=('123',)), encoding='utf-8')
         self.index.close(); self.index = ResourceIndex(self.game, [mod]).build(); self.addCleanup(self.index.close)
         self.assertEqual(weapon_catalog(self.index, item='paid'), [])
 

@@ -11,6 +11,49 @@ from workshop.syntax import parse
 
 
 class RegistrationTests(unittest.TestCase):
+    def test_player_shop_ignores_part_research_and_does_not_register_ai_purchases(self):
+        self.write('script/multiplayer/units/ger/conquest.ger.lua','Purchases["conquest.ger"] = {{Units = {{unit="base"}}}}')
+        self.write('set/multiplayer/units/conquest/mace.set',
+            '{"base" ("vehicle2" side(ger) period(mid) min_stage(8) max_stage(9) cp(16) crew1(tankman:3)) {cost 900}{not_for_player_sale 1}{conditions {locked 1}}}'
+            '{"base" ("vehicle2" side(eng) period(early) min_stage(9) max_stage(9) cp(16) crew1(tankman:3)) {cost 900}}',mod=True)
+        self.index.build()
+        register_variant(self.index,self.result,self.output,'mw_player','Player shop',shop={'parts':['base'],'cost':79})
+        entries=parse((self.output/'resource/set/multiplayer/units/modular_workshop/mw_player.set').read_bytes()).find_all('mw_player')
+        self.assertEqual(len(entries),1,'one purchase entry, without duplicate offers for different armies')
+        entry=entries[0]
+        self.assertTrue({'ger','eng','early','mid'}<=set(entry.find('tags').args[0].split()))
+        self.assertEqual([entry.find(h).args for h in ('cost','research_stage','round_multiple','not_for_player_sale')],[['79'],['1'],['1'],['0']])
+        self.assertIsNone(entry.find('conditions'))
+        self.assertFalse((self.output/'resource/script').exists())
+        self.assertFalse((self.output/'resource/set/dynamic_campaign').exists())
+        self.assertNotIn('mw_player',self.index.read_text('script/multiplayer/units/ger/conquest.ger.lua'))
+
+    def test_explicit_shop_price_including_zero_survives_reregistration(self):
+        register_variant(self.index,self.result,self.output,'mw_price','Custom price',shop={'parts':['base'],'cost':0})
+        (self.output/'assembly_mw_price.json').write_text(json.dumps({'id':'mw_price','metadata':self.result['metadata']}))
+        for cost in (0,79):
+            manifest=json.loads((self.output/'workshop_manifest_mw_price.json').read_text());manifest['shop']['cost']=cost
+            (self.output/'workshop_manifest_mw_price.json').write_text(json.dumps(manifest))
+            rebuild_registrations(self.index,self.output)
+            manifest=json.loads((self.output/'workshop_manifest_mw_price.json').read_text())
+            self.assertEqual(manifest['shop']['cost'],cost)
+            self.assertEqual(manifest['shop']['offer']['cost'],cost)
+            entry=parse((self.output/'resource/set/multiplayer/units/modular_workshop/mw_price.set').read_bytes()).find('mw_price')
+            self.assertEqual(entry.find('cost').args,[str(cost)])
+        manifest.pop('shop');(self.output/'workshop_manifest_mw_price.json').write_text(json.dumps(manifest))
+        rebuild_registrations(self.index,self.output)
+        entry=parse((self.output/'resource/set/multiplayer/units/modular_workshop/mw_price.set').read_bytes()).find('mw_price')
+        self.assertNotIn('ger',entry.find('tags').args[0].split())
+        self.assertIsNotNone(entry.find('content'),'owned units remain registered when removed from sale')
+
+    def test_shop_without_priced_parts_is_still_available_with_an_editable_price(self):
+        from workshop.registration import shop_offer,shop_cost
+        self.assertEqual(shop_offer(self.index,['unpriced'])['suggested_cost'],0)
+        self.assertEqual(shop_offer(self.index,['unpriced'],cost=0)['cost'],0)
+        self.assertEqual(shop_offer(self.index,['unpriced'],cost=123)['cost'],123)
+        for invalid in (-1,1.5,True,float('nan'),2147483648):
+            with self.assertRaises(RegistrationError):shop_cost(invalid)
+
     def test_scoped_registration_preserves_other_vehicles_and_their_global_links(self):
         register_variant(self.index,json.loads(json.dumps(self.result)),self.output,'mw_a','A')
         register_variant(self.index,json.loads(json.dumps(self.result)),self.output,'mw_b','B')
@@ -427,6 +470,38 @@ class RegistrationTests(unittest.TestCase):
         self.assertIn("on add_weapon_sound overload", metadata["sound_authority"]["chassis_events"])
         self.assertEqual(metadata["sound_authority"]["weapon_playback"], "engine_default")
 
+    def test_default_sound_diagnostics_follow_the_actual_authority_in_composite_designs(self):
+        # A saved roof turret and later gun replacements need not use the
+        # design's first donor as their interaction authority. Human warning
+        # text must not be searched for that unrelated identifier.
+        import copy
+        self.write('set/stuff/gun/test_cannon', '{weapon_bullet {fireSound "cannon/Shared/NewGun/"}}')
+        self.write('set/interaction_entity/tank/mace.inc',
+                   '{"base tank" ("base_sound") {on "engine_failure" {effect "base_smoke"}}}', mod=True)
+        self.index.build()
+        contract = {'donor': {'template': 'donor', 'place': 'gun', 'weapon': 'test_cannon', 'properties': []},
+                    'recipient': {'place': 'main'}, 'sequences': []}
+        cases = [
+            ('roof', {'interaction_donor': 'roof_authority'}, 'roof_authority'),
+            ('gun', {'operation': 'gun_swap', 'gun_assembly': contract}, 'base'),
+            ('composite', {'operation': 'gun_swap', 'interaction_donor': 'roof_authority',
+                           'gun_assemblies': [contract, {**contract, 'recipient': {'place': 'secondary'}}]}, 'roof_authority')]
+        for label, extra, authority in cases:
+            with self.subTest(label=label):
+                result = copy.deepcopy(self.result); result['metadata'].update(extra)
+                output = self.root / label
+                metadata = register_variant(self.index, result, output, 'mw_' + label, label)
+                diagnostics = [d for d in result['diagnostics'] if d['code'] == 'donor_interaction_defaults']
+                self.assertEqual(len(diagnostics), 1)
+                self.assertEqual(diagnostics[0]['donor'], authority)
+                self.assertIn('Donor ' + authority + ' has no ', diagnostics[0]['message'])
+                self.assertIn(diagnostics[0]['message'], metadata['warnings'])
+                sound = (output / ('resource/set/interaction_entity/modular_workshop/mw_' + label + '.inc')).read_text()
+                self.assertIn('base_engine', sound)
+                self.assertIn('base_smoke', sound)
+                manifest = json.loads((output / ('workshop_manifest_mw_' + label + '.json')).read_text())
+                self.assertEqual(manifest['sound_authority'], metadata['sound_authority'])
+
     def test_repeated_donor_records_merge_like_the_game(self):
         # MACE re-declares vanilla records to extend them (cannon_mace.inc); the
         # game merges them in include order instead of rejecting the unit.
@@ -485,7 +560,7 @@ class RegistrationTests(unittest.TestCase):
         self.assertIn("{cost 250}", text)
         self.assertNotIn("{cost 200}", text)
 
-    def test_a_vehicle_put_up_for_sale_costs_three_quarters_of_its_parts_and_unlocks_with_the_last(self):
+    def test_shop_suggests_three_quarters_of_parts_but_is_available_from_the_start(self):
         # James Rommel: Pz.III (40) + Pz.IV (40) -> 60. Here base 330 (stage 3) + donor 200 (stage 5).
         self.write("set/multiplayer/units/conquest/donor.set",
                    '{"donor" ("vehicle2" side(ger) period(mid) min_stage(5) max_stage(8) cp(16) cw(4) crew1(tankman:3) crew2(commander:1)) {cost 200}}', mod=True)
@@ -495,7 +570,7 @@ class RegistrationTests(unittest.TestCase):
         try:
             from workshop.registration import shop_offer
             offer = shop_offer(index, ["base", "donor", "kettenkrad"])
-            self.assertEqual((offer["cost"], offer["stage"], offer["unpriced"]), (400, 5, ["kettenkrad"]))
+            self.assertEqual((offer["cost"], offer["stage"], offer["unpriced"]), (400, 1, ["kettenkrad"]))
             provenance = register_variant(index, self.result, self.output, "mw_sale", "For sale",
                                           shop={"parts": ["base", "donor"]})
         finally:
@@ -503,7 +578,7 @@ class RegistrationTests(unittest.TestCase):
         roster = parse((self.output / "resource/set/multiplayer/units/modular_workshop/mw_sale.set").read_text())
         entry = roster.find("mw_sale")
         self.assertIn("ger", entry.find("tags").args[0].split(), "the army tag lists it in that army's shop")
-        self.assertEqual([entry.find(h).args[0] for h in ("cost", "research_stage", "research_stage_max")], ["400", "5", "99"])
+        self.assertEqual([entry.find(h).args[0] for h in ("cost", "research_stage", "research_stage_max")], ["400", "1", "99"])
         self.assertEqual(provenance["shop"]["parts"], ["base", "donor"])
         reserves = (self.output / "resource/set/multiplayer/units/modular_workshop/_reserves.set").read_text()
         self.assertNotIn("ger", parse(reserves).walk("tags").__next__().args[0].split(), "reserve crews stay out of the shop")

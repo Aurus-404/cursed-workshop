@@ -19,6 +19,34 @@ except ImportError:
 
 
 class TransactionTests(unittest.TestCase):
+    def test_parallel_tree_copy_keeps_empty_directories_metadata_and_ignore_rules(self):
+        from workshop.transactions import copy_tree
+        source=self.root/'copy_source';source.mkdir();(source/'empty').mkdir()
+        for n in range(70):(source/f'file{n}').write_bytes(str(n).encode())
+        (source/'ignored').write_text('skip');os.utime(source/'file0',(1000000000,1000000000))
+        destination=self.root/'copy_destination'
+        copy_tree(source,destination,ignore=lambda directory,names:['ignored'] if 'ignored' in names else [])
+        self.assertTrue((destination/'empty').is_dir());self.assertFalse((destination/'ignored').exists())
+        self.assertEqual((destination/'file0').stat().st_mtime,1000000000)
+        for n in range(70):self.assertEqual((destination/f'file{n}').read_bytes(),str(n).encode())
+
+    def test_parallel_tree_copy_joins_all_writers_before_returning_failure(self):
+        from workshop.transactions import copy_tree
+        source=self.root/'copy_source';source.mkdir()
+        for n in range(70):(source/f'file{n}').write_bytes(b'data')
+        active=set();lock=threading.Lock();original=__import__('shutil').copy2
+        def copy(src,dst):
+            with lock:active.add(str(src))
+            try:
+                if Path(src).name=='file0':raise OSError('Disk full')
+                time.sleep(.005);return original(src,dst)
+            finally:
+                with lock:active.remove(str(src))
+        with patch('workshop.transactions.shutil.copy2',side_effect=copy),self.assertRaises(OSError) as failed:
+            copy_tree(source,self.root/'partial_copy')
+        self.assertFalse(active)
+        self.assertIn('file0',str(failed.exception))
+
     def updated_destination(self):
         first=self.prepare();published=commit_transaction(first['journal_path'])
         destination=Path(published['addon_destination'])
@@ -72,7 +100,7 @@ class TransactionTests(unittest.TestCase):
         def replace(source,target):
             if Path(target).name=='previous_addon':raise OSError(errno.EXDEV,'Different volume')
             return original(source,target)
-        def partial(source,target):
+        def partial(source,target,**kwargs):
             Path(target).mkdir();(Path(target)/'partial').write_bytes(b'incomplete')
             raise OSError('Archive disk full')
         with patch('workshop.transactions.os.replace',side_effect=replace),patch('workshop.transactions.shutil.copytree',side_effect=partial):

@@ -15,7 +15,7 @@ export function smokeEditor({state,$,groups,scene,job,loading,remember,selectEdi
   function dispose(node){node.traverse(n=>{n.geometry?.dispose();for(const m of new Set([...([n.material].flat()),n.userData?.flat,n.userData?.untextured]))if(m&&!m.userData?.shared){m.map?.dispose();m.dispose();}});node.removeFromParent();}
   function clear(){for(const n of [...group.children])dispose(n);candidate=null;}
   function sync(){for(const host of group.children){const row=host.userData.candidate?candidate:rows()[host.userData.smokeIndex];
-    if(!row)continue;const parent=hosts.find(p=>p.name===parentName(row));host.visible=!!parent;
+    if(!row)continue;const parent=hosts.find(p=>p.name===parentName(row));host.visible=!!parent;host.userData.hostBone=parent?.name;
     if(parent)host.matrix.copy(matrix(parent.matrix));
     applyPose(host.children[0],row);
     host.traverse(node=>{if(node.userData.placementGuide)node.visible=active();});

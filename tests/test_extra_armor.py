@@ -28,6 +28,57 @@ def row(parent='azimuth'):
 
 
 class ExtraArmorTests(unittest.TestCase):
+    def test_a_mantlet_fitting_is_its_elevation_shell_fixed_without_the_barrel(self):
+        r=resources();folder='entity/armor/'
+        r.files[folder+'armor.mdl']=(b'{skeleton {bone "base" {bone revolute "gun_rot" {parameters "id=gun;"}{VolumeView "plate.ply"}'
+                                     b'{bone "gun" {VolumeView "plate.ply"}}}}}{volume "body" {bone "gun_rot"}{box 2 3 1}}')
+        r._armor_catalog[0].update(id='native_mantlet',kind='mantlet',single=True,bone='gun_rot')
+        with tempfile.TemporaryDirectory() as tmp:
+            compile_assembly(r,'receiver','receiver',{'commander_only':True,'extra_armor':[{**row('body'),'asset':'native_mantlet'}]},tmp,'mw_mantlet')
+            model=parse_model((Path(tmp)/'resource/entity/-vehicle/workshop/mw_mantlet/mw_mantlet.mdl').read_bytes())
+        pieces=[n for n in model['bones'] if n.startswith('mw_armor_0_b')]
+        self.assertEqual(len(pieces),1,'only the elevation shell, never the barrel below it')
+        self.assertNotEqual(model['bones'][pieces[0]]['node'].args[:1],['revolute'],'a fitting is fixed armor')
+        self.assertTrue(model['bones'][pieces[0]]['assets'])
+        self.assertEqual(len(preview(r,'native_mantlet')['meshes']),1)
+
+    def test_a_mantlet_sharing_its_mesh_with_the_breech_keeps_only_whole_shell_pieces(self):
+        # IS-4: one gun_rot.ply holds mantlet and breech; the game's volumes tell them apart.
+        import struct
+        from workshop.extra_armor import fitting
+        def mesh(*triangles):
+            vertices=[(*p,0,0,1,0,0) for t in triangles for p in t]
+            indices=list(range(len(vertices)))
+            return (b'EPLYBNDS'+struct.pack('<6f',-1,-1,-1,1,1,1)+b'VERT'+struct.pack('<IHH',len(vertices),32,3)
+                    +b''.join(struct.pack('<8f',*v) for v in vertices)+b'INDX'+struct.pack('<I%dH'%len(indices),len(indices),*indices))
+        r=resources();folder='entity/armor/'
+        shell=((0,-2,-2),(0,2,-2),(0,0,2));breech=((-10,-1,-1),(-10,1,-1),(-10,0,1))
+        r.files[folder+'shared.ply']=mesh(shell,breech)
+        r.files[folder+'armor.mdl']=(b'{skeleton {bone "base" {bone revolute "gun_rot" {VolumeView "shared.ply"}}}}'
+                                     b'{volume "body" {bone "gun_rot"}{box 1 4 4}}{volume "breech" {bone "gun_rot"}{Position -10 0 0}{box 4 4 4}}')
+        r._armor_catalog[0].update(id='native_mantlet',kind='mantlet',single=True,bone='gun_rot')
+        _,_,_,meshes=fitting(r,r._armor_catalog[0])
+        drawn=[t for t in range(len(meshes[0]['indices'])//3) if len(set(meshes[0]['indices'][3*t:3*t+3]))==3]
+        self.assertEqual(drawn,[0],'the shell stays whole; the breech piece is hidden')
+
+    def test_catalog_groups_identical_pieces_and_ranks_by_protection(self):
+        from workshop.extra_armor import _annotate, _category
+        r=resources();base=dict(r._armor_catalog[0],kind='plates')
+        rows=[dict(base,id='a',label='Pz IV G · shieldl',bone='panel',definition_path='entity/-vehicle/germany/tank_medium/pz4g/pz4g.def'),
+              dict(base,id='b',label='Pz IV H · shieldl',bone='panel',definition_path='entity/-vehicle/+germany/tank_medium/pz4h/pz4h.def'),
+              dict(base,id='c',label='Test · plate',bone='panel',definition_path='entity/-vehicle/test/t_14/t_14.def'),
+              dict(base,id='d',label='Destroyer · funnel',bone='panel',definition_path='entity/-vehicle/eng/marine/ship/ship.def')]
+        _annotate(r,rows)
+        self.assertEqual([x['nation'] for x in rows],['germany','germany','other','eng'])
+        self.assertEqual([x['listed'] for x in rows],[True,True,False,False])
+        self.assertEqual(len({x['group'] for x in rows}),1,'same mesh and armor: one group')
+        self.assertEqual([x['primary'] for x in rows],[True,False,False,False])
+        self.assertEqual(rows[0]['variants'],2)
+        self.assertEqual(rows[0]['category'],'plates')
+        self.assertGreater(rows[0]['score'],0)
+        for part,expected in (('shieldr3','skirts'),('turret_shield','shields'),('lifering','other'),('armor_plate','plates')):
+            self.assertEqual(_category({'kind':'plates','bone':part}),expected,part)
+
     def test_full_and_selected_fittings_preserve_source_faces_on_reflected_hosts(self):
         from workshop.geometry import read_mesh
         reflect=b'{orientation 1 0 0 0 -1 0 0 0 1}'
@@ -170,7 +221,9 @@ class ExtraArmorTests(unittest.TestCase):
                     self.assertEqual(configuration(r,[dict(row(),asset=identifier)])[0][1],direct)
                 items=catalog(r)
                 self.assertEqual(len(items),1)
-                self.assertEqual(direct,items[0],'Targeted and complete extraction have identical protection contracts')
+                listing=('nation','listed','category','score','group','primary','variants')  # list-only annotations
+                self.assertEqual(direct,{k:v for k,v in items[0].items() if k not in listing},
+                                 'Targeted and complete extraction have identical protection contracts')
                 self.assertEqual(items[0]['kind'],'tracks')
                 self.assertEqual(items[0]['thickness'],[18.0])
                 self.assertEqual(preview(r,items[0]['id'])['preview_valid'],True)

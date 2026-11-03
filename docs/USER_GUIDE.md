@@ -45,6 +45,12 @@ the original DLC/mod dependencies available. Do not remove a donor mod while bui
 - Use Update vehicles to rebuild vehicles already present in the open campaign with current fixes.
 - Use the armour view to inspect native protection geometry and effective thickness.
 
+Shop selections apply to player purchases in every campaign using the shared built-vehicles mod,
+without researching the source parts. The editor does not add these vehicles to the AI recruitment lists.
+Enter a price in each enabled row (zero is allowed), or choose **Use suggested** to restore the automatic
+estimate of 75% of the source vehicles' prices. Uncheck a vehicle to remove it from sale; owned vehicles
+remain registered. Open **Shop** and press **Apply** once to upgrade offers saved under the old research rules.
+
 Compatibility checks can reject combinations that cannot preserve the game's structural contracts.
 A successful preview or export does not guarantee battle behavior for every possible combination.
 

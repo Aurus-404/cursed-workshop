@@ -61,6 +61,144 @@ class Resources:
 
 
 class GunAssemblyTests(unittest.TestCase):
+    def test_primary_place_is_the_directly_commanded_one_not_an_mg_typed_main(self):
+        from workshop.gun_assembly import _primary_place
+        sexton=parse('{game_entity {Weaponry {place "gun" {weapon "qf25"}}'
+                     '{place "mgun2" {type main}{weapon "bren"}{basic}{ai_in_manual}}}}').find('game_entity')
+        self.assertEqual(_primary_place(sexton),'gun')
+        half_track=parse('{game_entity {Weaponry {place "mgun" {type main}{weapon "m2"}{basic}}'
+                         '{place "mgun2" {type left}{basic}}}}').find('game_entity')
+        self.assertEqual(_primary_place(half_track),'mgun')
+        b2=parse('{game_entity {Weaponry {place "gun1" {weapon "75mm"}}{place "gun" {weapon "47mm"}}}}').find('game_entity')
+        self.assertEqual(_primary_place(b2),'gun1')
+        self.assertIsNone(_primary_place(parse('{game_entity}').find('game_entity')))
+
+    def test_secondary_gun_replacement_keeps_the_chassis_camera_authority(self):
+        r=Resources()
+        with tempfile.TemporaryDirectory() as folder:
+            result=compile_assembly(r,'receiver','donor',{'gun_swap':
+                {'schema':1,'recipient_place':'coax_slot','donor_place':'main_slot',
+                 'donor_template':'donor'}},folder,'mw_camera_test')
+            self.assertEqual(result['metadata']['gun_camera_donor'],'receiver')
+            self.assertEqual(result['metadata']['camera_bone_mapping'],{})
+            self.assertEqual(result['metadata']['bone_mapping'],{})
+
+    def test_sight_is_not_promoted_to_a_runtime_weapon_attachment(self):
+        r=Resources()
+        path='entity/donor/donor.def'
+        r.files[path]=r.files[path].replace(b'{LinkBone "breech"}',b'{foresight "sight"}')
+        _,root,model=self.compile(r)
+        place=root.find('Weaponry').find_all('place')[0]
+        self.assertIsNone(place.find('LinkBone'))
+        self.assertIn(place.find('foresight').args[0],model['bones'])
+
+    def test_socket_housing_children_and_armor_survive_a_barrel_replacement(self):
+        r=Resources()
+        path='entity/receiver/receiver.mdl'
+        r.files[path]=r.files[path].replace(b'{bone "breech"',
+            b'{bone "shield" {VolumeView "mantlet.ply"}}{bone "breech"')
+        r.files[path]+=b'{volume "shield_volume" {bone "shield"}{box 2 2 2}}'
+        before=parse_model(r.files[path])
+        result,root,model=self.compile(r)
+        housing=next(v['bone'] for v in model['volumes'].values() if v['node'].args[0]=='shield_volume')
+        self.assertTrue(model['bones'][housing]['assets'])
+        self.assertEqual(model['bones'][housing]['world'],before['bones']['shield']['world'])
+        self.assertNotIn('shield',model['bones'])
+
+    def test_donor_elevation_does_not_replace_receiver_mount_travel(self):
+        r=Resources()
+        path='entity/donor/donor.mdl'
+        r.files[path]=r.files[path].replace(b'{limits -10 20}',b'{limits -15 70}{speed2 70}')
+        path='entity/receiver/receiver.def'
+        r.files[path]=r.files[path].replace(b'{mass 19000}',b'{mass 19000}{bone "elevation" {limits -8 15}{speed2 4}}')
+        _,root,model=self.compile(r)
+        self.assertEqual(model['bones']['elevation']['node'].find('limits').args,['-10','20'])
+        overrides=[n for n in root.find_all('bone') if n.args==['elevation']]
+        self.assertEqual(overrides[-1].find('limits').args,['-8','15'])
+        self.assertEqual(overrides[-1].find('speed2').args,['4'])
+        preview=preview_parts(r,'receiver','donor',{'recipient_place':'main_slot','donor_place':'main_slot'})
+        pitch=next(j for j in preview['turret']['joints'] if j['bone']=='elevation')
+        self.assertEqual(pitch['limits'],[-8,15])
+
+    def test_gun_faces_keep_the_native_visible_side_through_reflected_frames(self):
+        from workshop.geometry import read_mesh
+        reflection = b'{orientation 1 0 0 0 -1 0 0 0 1}'
+        for receiver_reflected, donor_reflected in ((False, True), (True, False), (False, False), (True, True)):
+            for pivot in (False, True):
+                with self.subTest(receiver=receiver_reflected, donor=donor_reflected, pivot=pivot):
+                    resources = Resources()
+                    for name, reflected in [('receiver', receiver_reflected), ('donor', donor_reflected)]:
+                        path = 'entity/' + name + '/' + name + '.mdl'
+                        if reflected: resources.files[path] = resources.files[path].replace(b'{bone "frame"', b'{bone "frame" ' + reflection)
+                    spec = {'schema': 1, 'recipient_place': 'main_slot', 'donor_place': 'main_slot', 'upright': True}
+                    result, _, model = self.compile(resources, transform={'gun_swap': spec,
+                        **({'turret': {'pivot': [2, 0, 0], 'rotation': [35, 15, 20]}} if pivot else {})})
+                    folder = Path(result['output_dir']) / 'resource/entity/-vehicle/workshop/mw_gun_test'
+                    emitted = read_mesh((folder / model['bones']['breech']['assets'][0]).read_bytes())
+                    source = read_mesh(resources.files['entity/donor/barrel.ply'])
+                    indices = [0, 2, 1] if receiver_reflected != donor_reflected else source['indices']
+                    self.assertEqual(emitted['indices'], indices)
+                    for field in ('positions', 'normals', 'uv'): self.assertEqual(emitted[field], source[field])
+                    preview = preview_parts(resources, 'receiver', 'donor', spec)
+                    barrel = next(m for m in preview['turret']['meshes'] if m['bone'] == 'breech')
+                    self.assertEqual(barrel['indices'], indices)
+
+    def test_native_vision_socket_removed_with_the_gun_keeps_its_frame_and_settings(self):
+        r=Resources()
+        path='entity/receiver/receiver.def'
+        r.files[path]=r.files[path].replace(b'{game_entity',b'{game_entity {sensor {visor "aim" {bone "eye"}{vision "native_range"}} {visor "around" {bone "coax"}} {visor "disabled" {bone "none"}}}')
+        path='entity/receiver/receiver.mdl'
+        r.files[path]=r.files[path].replace(b'{bone "sight"',b'{bone "eye" {Position 4 -2 3}}{bone "sight"')
+        source=parse_model(r.files[path])
+        _,root,model=self.compile(r,donor='towed')
+        visors={n.args[0]:n for sensor in root.find_all('sensor') for n in sensor.find_all('visor')}
+        name=visors['aim'].find('bone').args[0]
+        self.assertIn(name,list(model['bones']))
+        self.assertEqual(model['bones'][name]['assets'],[])
+        self.assertEqual(visors['aim'].find('vision').args,['native_range'])
+        self.assertEqual(visors['around'].find('bone').args,['coax'])
+        self.assertEqual(visors['disabled'].find('bone').args,['none'])
+        self.assertEqual(model['bones'][name]['parent'],'elevation')
+        for actual,expected in zip(sum(model['bones'][name]['world'],[]),sum(source['bones']['eye']['world'],[])):
+            self.assertAlmostEqual(actual,expected,places=7)
+
+    def test_retained_multibarrel_prefix_and_muzzle_frames_survive_an_unrelated_gun_swap(self):
+        from workshop.weapon_binding import barrel_bones
+        r=Resources()
+        path='entity/receiver/receiver.def'
+        r.files[path]=r.files[path].replace(b'{place "coax_slot"',b'{place "coax_slot" {Barrels 2}{shooter "emit"}')
+        path='entity/receiver/receiver.mdl'
+        r.files[path]=r.files[path].replace(b'{bone "coax"',b'{bone "coax" {bone "emit00" {Position 12 -2 0}}{bone "emit01" {Position 12 2 0}}')
+        original=parse_model(r.files[path])
+        result,root,model=self.compile(r,donor='towed')
+        retained=next(p for p in root.find('Weaponry').find_all('place') if p.args==['coax_slot'])
+        self.assertEqual(barrel_bones(retained,model),['emit00','emit01'])
+        for name in ('emit00','emit01'):
+            self.assertEqual(model['bones'][name]['world'],original['bones'][name]['world'])
+        # A valid retained family does not make a second, incomplete family valid.
+        r.files[path]=r.files[path].replace(b'{bone "emit01" {Position 12 2 0}}',b'')
+        with self.assertRaises(GunError):self.compile(r,donor='towed')
+
+    def test_inherited_multibarrel_prefix_is_transplanted_and_renamed_as_a_family(self):
+        from workshop.weapon_binding import barrel_bones
+        r=Resources()
+        r.files['set/stuff/gun/towed_weapon']=b'{from "pattern gun" {filling "long_round"}{shooter "jet"}}'
+        path='entity/towed/towed.def'
+        r.files[path]=r.files[path].replace(b'{place "main_slot"',b'{place "main_slot" {Barrels 2}')
+        path='entity/towed/towed.mdl'
+        r.files[path]=r.files[path].replace(b'{bone "sight"',b'{bone "jet00" {Position 14 -2 0}}{bone "jet01" {Position 14 2 0}}{bone "sight"')
+        # Only one locator collides, which must still rename the whole family.
+        path='entity/receiver/receiver.mdl'
+        r.files[path]=r.files[path].replace(b'{bone "coax"',b'{bone "coax" {bone "jet00" {Position 1 2 3}}')
+        _,root,model=self.compile(r,donor='towed')
+        main=next(p for p in root.find('Weaponry').find_all('place') if p.args==['main_slot'])
+        names=barrel_bones(main,model)
+        self.assertEqual(len(names),2)
+        self.assertNotIn('jet00',names)
+        self.assertEqual(names[0][:-2],names[1][:-2])
+        self.assertEqual(model['bones']['jet00']['parent'],'coax')
+        self.assertNotEqual(model['bones'][names[0]]['world'],model['bones'][names[1]]['world'])
+
     def test_shared_housing_follows_replacement_without_moving_coax_joint(self):
         for pivot in ([0,0,0],[3,0,1]):
             with self.subTest(pivot=pivot):
@@ -86,6 +224,13 @@ class GunAssemblyTests(unittest.TestCase):
                 self.assertTrue(model['bones'][housing]['assets'][0].startswith('h_'))
                 preview=preview_parts(resources,'receiver','donor',{'recipient_place':'main_slot','donor_place':'main_slot'})
                 self.assertTrue(any(mesh['bone']=='elevation' for mesh in preview['hull']['meshes']))
+
+    def test_ammo_family_ignores_the_container_prefix(self):
+        # toxicman400: the Crocodile's "ammo flame_thrower" fuel is a whole family.
+        from workshop.gun_assembly import _ammo_key
+        self.assertEqual(_ammo_key('ammo flame_thrower'),'ammo flame_thrower')
+        self.assertEqual(_ammo_key('ammo mgun_ger belt mk2'),'ammo mgun_ger belt')
+        self.assertEqual(_ammo_key('bulletger_75_l43 he'),'bulletger_75_l43')
 
     def test_original_mantlet_can_be_left_out(self):
         resources=Resources()

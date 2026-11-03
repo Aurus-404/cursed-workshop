@@ -105,6 +105,17 @@ class GeometryTests(unittest.TestCase):
         self.assertEqual(reverse_mesh_winding(changed),raw)
         with self.assertRaises(GeometryError):reverse_mesh_winding(eply()[:-2])
 
+    def test_hidden_faces_keep_every_chunk_size_and_vertex(self):
+        # IS-4: the mantlet shares gun_rot.ply with the breech; only the breech is hidden.
+        from workshop.geometry import hide_mesh_faces
+        raw=eply()+eply()[4:]+b'UNCHANGED_TRAILER'
+        changed=hide_mesh_faces(raw,lambda triangle:triangle==1)
+        self.assertEqual(len(changed),len(raw))
+        self.assertEqual(read_mesh(changed)['indices'],[0,0,0,3,4,5],'the first triangle has zero area, the second is untouched')
+        first=raw.find(b'INDX')
+        self.assertTrue(all(first+8<=k<first+14 for k in range(len(raw)) if raw[k]!=changed[k]),'only that triangle\'s indices change')
+        self.assertEqual(hide_mesh_faces(raw,lambda triangle:True),raw)
+
     def test_vertices_no_triangle_draws_do_not_count_for_bounds(self):
         # MACE nbfz/pz2j body.ply ship a few unused vertices at 1e22: the game never
         # draws them, and the 3D view framed the vehicle out of sight.

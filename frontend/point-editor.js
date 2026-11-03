@@ -21,7 +21,7 @@ export function pointEditor({key,field,prefix,front,color,state,$,groups,scene,r
     return host;}
   function clear(){for(const node of [...group.children]){node.traverse(n=>{n.geometry?.dispose();n.material?.dispose?.();});node.removeFromParent();}}
   function sync(){const value=row(),host=group.children[0];if(!host)return;const parent=value&&hosts.find(p=>p.name===value.parent);
-    host.visible=!!parent;if(parent){host.matrix.copy(matrix(parent.matrix));applyPose(host.children[0],value);}group.updateMatrixWorld(true);}
+    host.visible=!!parent;host.userData.hostBone=parent?.name;if(parent){host.matrix.copy(matrix(parent.matrix));applyPose(host.children[0],value);}group.updateMatrixWorld(true);}
   function controls(){const ready=!!(state.hull&&state.turret),busy=state.busy;
     for(const id of ['option','parent'])$(prefix+'-'+id).disabled=busy||!ready;
     for(const id of ['remove','edit'])$(prefix+'-'+id).disabled=busy||!row();}

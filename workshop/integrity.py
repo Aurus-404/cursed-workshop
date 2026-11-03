@@ -34,7 +34,18 @@ def bone_references(root) -> set[tuple[str, str]]:
 def dangling(root, model) -> set[tuple[str, str]]:
     """References to bones the model does not have (case-insensitive, as the engine)."""
     bones = {name.casefold() for name in model["bones"]}
-    return {(kind, name) for kind, name in bone_references(root) if name.casefold() not in bones}
+    from .weapon_binding import reference_bones
+    prefixes = {}
+    for weaponry in root.find_all('Weaponry'):
+        for place in weaponry.find_all('place'):
+            for reference in place.find_all('shooter'):
+                if not reference.args:continue
+                name=reference.args[0].casefold()
+                # Each weapon declares its own barrel count. A valid family
+                # for one place must not hide missing locators for another.
+                prefixes[name]=prefixes.get(name,True) and bool(reference_bones(place,model,'shooter',reference.args[0]))
+    return {(kind, name) for kind, name in bone_references(root) if name.casefold() not in bones
+            and not (kind == 'shooter' and prefixes.get(name.casefold(),False))}
 
 
 def introduced_dangling(output, sources, mapping=None) -> set[tuple[str, str]]:

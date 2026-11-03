@@ -11,15 +11,38 @@ from workshop.diagnostics import Diagnostics, clean_text
 
 
 class DiagnosticTests(unittest.TestCase):
+    def test_full_timing_history_survives_restart_and_recent_window(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/'load-timings.log'
+            history=Diagnostics(path)
+            for i in range(40):
+                history.record_operation(f'Load {i}', 'done', 50, 1100)
+            report=Diagnostics(path).timing_report()
+            self.assertEqual(report.count('operation SLOW'),40)
+            self.assertIn('Load 0 | done | elapsed_ms=50 | queued_ms=1100',report)
+
+    def test_timing_history_is_bounded_to_two_files(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/'load-timings.log'
+            history=Diagnostics(path);history.TIMING_LIMIT=2000
+            for i in range(200):
+                history.record_phase(f'Phase {i}','done',5)
+            self.assertLessEqual(path.stat().st_size,2200)
+            self.assertLessEqual(path.with_name(path.name+'.1').stat().st_size,2200)
+            report=history.timing_report()
+            self.assertIn('Phase 199 |',report);self.assertNotIn('Phase 0 |',report)
+            self.assertLess(report.index('Phase 150 |') if 'Phase 150 |' in report else 0,report.index('Phase 199 |'))
+
     def test_packaged_build_metadata_is_fixed_bounded_and_whitelisted(self):
         from workshop import build_info
         with tempfile.TemporaryDirectory() as folder:
             path=Path(folder)/'build_info.json'
             with patch.object(build_info,'__file__',str(Path(folder)/'build_info.py')):
-                path.write_text(json.dumps({'source_sha256':'a'*64,'revision':'b'*40,'dirty_source':False,
+                path.write_text(json.dumps({'source_sha256':'a'*64,'catalog_code_sha256':'c'*64,'revision':'b'*40,'dirty_source':False,
                     'built_utc':'2026-10-18T00:00:00+00:00','private_path':'C:/private'}))
                 result=build_info.read_build_info()
                 self.assertEqual(result['revision'],'b'*40)
+                self.assertEqual(result['catalog_code_sha256'],'c'*64)
                 self.assertNotIn('private_path',result)
                 path.write_text('{"source_sha256":"'+('a'*5000)+'"}')
                 self.assertNotIn('source_sha256',build_info.read_build_info())
@@ -81,10 +104,14 @@ class DiagnosticTests(unittest.TestCase):
                 state.last_result = {'source_path': 'private save', 'transaction': 'private journal'}
                 state.index = SimpleNamespace(sources=[{'id': '123', 'version': '2', 'root': 'private root', 'name': 'private name'}] * 70)
                 state.record_error(ValueError('session ' + state.token), 'Open campaign')
-                with patch.object(Path, 'read_text', side_effect=AssertionError('No file reads')), \
+                def read_timing_history(path, **kwargs):
+                    self.assertIn(path, (Path(folder)/'load-timings.log', Path(folder)/'load-timings.log.1'))
+                    return 'historical timing'
+                with patch.object(Path, 'read_text', read_timing_history), \
                      patch('workshop.app.game_state', side_effect=AssertionError('No process reads')):
                     result = state.diagnostic()
                 serialized = json.dumps(result)
+                self.assertIn('historical timing', result['load_timings'])
                 for secret in ('private', state.token, 'source_path', 'settings', 'transaction'):
                     self.assertNotIn(secret, serialized)
                 self.assertTrue(result['campaign_loaded'])

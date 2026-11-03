@@ -3,12 +3,47 @@ import * as THREE from 'three';
 import {t} from './i18n.js';
 import {previewMesh} from './model-geometry.js';
 
+const CATEGORY={mantlet:'Manteletes',skirts:'Faldones laterales',shields:'Escudos y chapas',plates:'Placas',
+  tracks:'Orugas de repuesto',sandbags:'Sacos de arena',wood:'Madera',other:'Accesorios'};
+const category=item=>item.category||(item.kind==='plates'?'plates':item.kind);
+const thickest=item=>Math.max(0,...(item.thickness||[]));
+// One entry per group of identical pieces (a part repeated on every variant of
+// a vehicle), test vehicles and ships left out, the most useful first. Every
+// piece stays in the catalog: placed armor from older recipes keeps its name.
+export function armorListing(items,{kind='',kinds=null,nation='',order='useful'}={},translate=t){
+  // kinds: the checked protection types (a checklist); kind: a single one.
+  const wanted=kinds?new Set(kinds):kind?new Set([kind]):null;
+  const shown=items.filter(item=>item.listed!==false&&item.primary!==false&&(!wanted||wanted.has(category(item)))&&(!nation||item.nation===nation));
+  kind=wanted?.size===1?[...wanted][0]:'';
+  const name=item=>item.label.toLocaleLowerCase();
+  const sorts={useful:(a,b)=>(b.score??0)-(a.score??0)||name(a).localeCompare(name(b)),
+    thick:(a,b)=>thickest(b)-thickest(a)||name(a).localeCompare(name(b)),az:(a,b)=>name(a).localeCompare(name(b))};
+  return shown.sort(sorts[order]||sorts.useful).map(item=>({id:item.id,
+    label:(kind?'':translate(CATEGORY[category(item)]||'')+' · ')+item.label+' · '+thickest(item)+' mm'
+      +((item.variants||1)>1?' · ×'+item.variants+' '+translate('variantes iguales'):'')}));
+}
+
+// Degrees (ZYX, as captured poses) that undo the host bone's turn and restore
+// the piece's native one; null when either frame reflects or is unknown.
+export function naturalRotation(host,native){
+  if(!host?.matrix||!native)return null;
+  // Linear parts only. Native skeletons often reflect an axis (basis): both
+  // frames may, and their relative turn is then a plain rotation.
+  const linear=m=>{const r=new THREE.Matrix4().set(...m.flat());r.setPosition(0,0,0);return r;};
+  const local=linear(host.matrix).invert().multiply(linear(native));
+  if(!(local.determinant()>0.99&&local.determinant()<1.01))return null;
+  const e=new THREE.Euler().setFromRotationMatrix(local,'ZYX');
+  return [e.x,e.y,e.z].map(v=>Number(THREE.MathUtils.radToDeg(v).toFixed(3)));
+}
+
 // Poses are local to actual compiled bones, exactly like commander mounts.
 export function armorEditor({state,$,groups,scene,job,loading,remember,selectEdit,refreshCheck,reportError,applyShow}){
   const group=groups.extra_armor=new THREE.Group();scene.add(group);
   let catalog=null,signature='',hosts=[],selected=-1,revision=0,candidate=null,candidateRevision=0;
   const meshes=new Map();
   const rows=()=>state.transform.extra_armor||[];
+  const kindBoxes=()=>[...($('armor-kinds')?.querySelectorAll?.('input[type="checkbox"]')||[])];
+  const checkedKinds=()=>kindBoxes().length?kindBoxes().filter(box=>box.checked).map(box=>box.value):null;
   // The fitting being chosen is moved before it is added; added fittings stay
   // put (no handles) until their name is picked again in the placed list.
   const pose=()=>candidate||rows()[selected]||{position:[0,0,0],rotation:[0,0,0]};
@@ -18,14 +53,15 @@ export function armorEditor({state,$,groups,scene,job,loading,remember,selectEdi
   function dispose(node){node.traverse(n=>{n.geometry?.dispose();for(const m of new Set([n.userData?.flat,...[n.material].flat()]))if(m&&!m.userData?.shared)m.dispose();});node.removeFromParent();}
   function clear(){for(const n of [...group.children])dispose(n);candidate=null;}
   function sync(){for(const host of group.children){const item=host.userData.candidate?candidate:rows()[host.userData.armorIndex];
-    if(!item)continue;const native=hosts.find(h=>h.name===parentName(item));host.visible=!!native;
+    if(!item)continue;const native=hosts.find(h=>h.name===parentName(item));host.visible=!!native;host.userData.hostBone=native?.name;
     if(native)host.matrix.copy(matrix(native.matrix));
     const fitting=host.children[0];applyPose(fitting,item);
   }group.updateMatrixWorld(true);}
   function controls(){
     const ready=!!(state.hull&&state.turret),busy=state.busy;
     $('armor-load').disabled=busy||!ready;$('armor-fields').classList.toggle('hidden',!catalog||!ready);
-    for(const id of ['armor-kind','armor-asset','armor-parent','armor-list'])$(id).disabled=busy||!ready;
+    for(const id of ['armor-nation','armor-order','armor-asset','armor-parent','armor-list'])$(id).disabled=busy||!ready;
+    for(const box of kindBoxes())box.disabled=busy||!ready;
     $('armor-add').disabled=busy||!ready||!candidate||candidate.asset!==$('armor-asset').value;
     $('armor-duplicate').disabled=busy||!rows()[selected];
     $('armor-remove').disabled=busy||!rows()[selected];
@@ -34,10 +70,8 @@ export function armorEditor({state,$,groups,scene,job,loading,remember,selectEdi
   function render(){
     selected=Math.min(selected,rows().length-1);
     const old=$('armor-asset').value;$('armor-asset').replaceChildren();
-    const kind=$('armor-kind').value;
-    for(const item of catalog?.items||[]){if(kind&&item.kind!==kind)continue;
-      const label=t(({tracks:'Orugas de repuesto',sandbags:'Sacos de arena',plates:'Placas y faldones',wood:'Madera'})[item.kind])+' · '+item.label;
-      $('armor-asset').add(new Option(label,item.id));}
+    for(const row of armorListing(catalog?.items||[],{kinds:checkedKinds(),nation:$('armor-nation').value,order:$('armor-order').value}))
+      $('armor-asset').add(new Option(row.label,row.id));
     if((catalog?.items||[]).some(p=>p.id===old)&&$('armor-asset').options&&[...$('armor-asset').options].some(o=>o.value===old))$('armor-asset').value=old;
     $('armor-list').replaceChildren();rows().forEach((r,i)=>$('armor-list').add(new Option((i+1)+'. '+(catalog?.items.find(p=>p.id===r.asset)?.label||r.asset),String(i))));
     $('armor-list').value=String(selected);if(selected<0)$('armor-list').selectedIndex=-1;
@@ -45,7 +79,8 @@ export function armorEditor({state,$,groups,scene,job,loading,remember,selectEdi
     $('armor-parent').replaceChildren();for(const h of hosts)$('armor-parent').add(new Option(h.name,h.name));
     if(hosts.some(h=>h.name===parent))$('armor-parent').value=parent;
     const item=catalog?.items.find(p=>p.id===$('armor-asset').value);
-    $('armor-info').textContent=item?[t('Material nativo')+': '+item.materials.join(', '),t('Espesor nativo')+': '+item.thickness.join(' / '),item.cast_steel?t('Conserva el factor nativo de resistencia de la oruga.'):''].filter(Boolean).join(' · '):'';
+    $('armor-info').textContent=item?[t('Material nativo')+': '+item.materials.join(', '),t('Espesor nativo')+': '+item.thickness.join(' / '),item.cast_steel?t('Conserva el factor nativo de resistencia de la oruga.'):'',
+      category(item)==='mantlet'?t('Se fija a la elevación del cañón y sube y baja con él. Para cambiar el mantelete, quitá el original en Cambiar cañón.'):''].filter(Boolean).join(' · '):'';
     controls();
   }
   async function ensureCatalog(){const key=JSON.stringify(state.config?.settings||{});
@@ -65,7 +100,11 @@ export function armorEditor({state,$,groups,scene,job,loading,remember,selectEdi
     }catch(error){if(version===revision)reportError(error);}
   }
   function receiveCheck(check){hosts=check.armor_hosts||check.hosts||[];render();sync();}
-  async function choose(){const session=candidateRevision;const asset=$('armor-asset').value,parent=$('armor-parent').value;
+  async function choose(){const session=candidateRevision;const asset=$('armor-asset').value;
+    // A mantlet goes on the vehicle's own gun elevation, so it rises with the gun.
+    const elevation=state.check?.gun_elevation,picked=catalog?.items.find(p=>p.id===asset);
+    if(picked&&category(picked)==='mantlet'&&hosts.some(h=>h.name===elevation))$('armor-parent').value=elevation;
+    const parent=$('armor-parent').value;
     const version=++revision;for(const n of [...group.children])if(n.userData.candidate)dispose(n);candidate=null;
     controls();
     if(!asset||!parent)return;
@@ -75,7 +114,10 @@ export function armorEditor({state,$,groups,scene,job,loading,remember,selectEdi
     {const box=new THREE.Box3();for(const name of ['hull','turret','extra_armor']){groups[name].updateWorldMatrix(true,true);box.union(new THREE.Box3().setFromObject(groups[name]));}
       const host=hosts.find(h=>h.name===parent);
       if(!box.isEmpty()&&host){const p=box.getCenter(new THREE.Vector3());p.z=box.max.z+3;scene.updateWorldMatrix(true,false);position=scene.worldToLocal(p).applyMatrix4(matrix(host.matrix).invert()).toArray();}}
-    const value={asset,parent,position,rotation:[...near.rotation]};
+    // A new piece starts upright, turned as it sat on its own vehicle: the
+    // attachment bone's turn and the piece bone's own axes cancel out.
+    const data=await geometry(asset);if(version!==revision||session!==candidateRevision)return;
+    const value={asset,parent,position,rotation:naturalRotation(hosts.find(h=>h.name===parent),data.native_frame)??[...near.rotation]};
     const object=await show(value,0,true);if(version!==revision||session!==candidateRevision){dispose(object);return;}
     candidate=value;selected=-1;group.add(object);sync();render();applyShow();selectEdit('extra_armor');
   }
@@ -86,7 +128,8 @@ export function armorEditor({state,$,groups,scene,job,loading,remember,selectEdi
   }
   const run=fn=>async()=>{if(state.busy)return;try{await fn();}catch(error){reportError(error);}};
   $('armor-load').onclick=run(async()=>{await loading('Leer blindajes disponibles',ensureCatalog);await refreshCheck();render();await choose();});
-  $('armor-kind').oninput=run(async()=>{render();await choose();});
+  const filtered=run(async()=>{render();await choose();});
+  $('armor-kinds').onchange=$('armor-nation').oninput=$('armor-order').oninput=filtered;
   $('armor-asset').onchange=run(choose);
   // A click also picks: the list keeps no visible selection while nothing is
   // being moved, so the same name may be clicked again to move it.
