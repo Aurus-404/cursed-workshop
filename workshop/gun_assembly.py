@@ -133,8 +133,10 @@ def _contract(root, model, place, resources=None):
             raise GunError('GunAssembly: El arma comparte su enganche de tiro o elevación con otra arma.')
         if other_link in names:
             # Keep the entire secondary branch, including its own recoil mesh.
+            # cw_pivot_/cw_fit_ hold everything a moved joint carries: not a branch.
             branch=other_link
-            while model['bones'][branch]['parent'] in names and model['bones'][branch]['parent']!=pivot:
+            while (model['bones'][branch]['parent'] in names and model['bones'][branch]['parent']!=pivot
+                   and not model['bones'][branch]['parent'].startswith(('cw_pivot_','cw_fit_'))):
                 branch=model['bones'][branch]['parent']
             if link in descendants(model['bones'],branch):
                 raise GunError('GunAssembly: Una rama compartida no se puede separar del cañón elegido.')
@@ -159,14 +161,22 @@ def _contract(root, model, place, resources=None):
     return spec
 
 
-def discover(resources, template):
+def discover(resources, template, module=None):
+    """The weapons of a vehicle or, for a stored turret, only of that module:
+    what hangs elsewhere stayed with the chassis. `module` names its mount; True
+    is the main one."""
     info,_,root=_load_entity(resources,template)
     props=_explicit_weapon_operators(resources,root)
     _crew_expansion(resources,root)
     model=parse_model(resources.read(info['model_path']))
+    within=None
+    if module is not None:
+        top=model['anchor_name'] if module is True else _bone(model,module)
+        within=descendants(model['bones'],top) if top else set()
     rows=[]
     for place in _places(root):
         if not place.find('weapon'):continue
+        if within is not None and weapon_link(place,model) not in within:continue
         try:
             spec=_contract(root,model,place,resources)
             rows.append({**spec,'available':True,'reason':''})
@@ -589,12 +599,9 @@ def compile_gun(resources, recipient, donor, transform, output, identifier, *, r
     from .weapon_binding import bind_barrels
     # Work on the private source place; the resource itself is never changed.
     bind_barrels([dp], dm, mapping, (set(rm['bones'])-rnames)|kept_slots)
-    split=bool(any(pivot_of(offset)) and rs['shared'])
+    # A coaxial branch stays on this joint whatever its centre is. A joint of its
+    # own let gun and coax turn apart (TheOppsAreOntoMe: 37 mm on a T-40).
     emitted_pivot=rs['pivot']
-    if split:
-        serial=0
-        while 'cw_joint_'+str(serial) in rm['bones'] or 'cw_joint_'+str(serial) in dnames:serial+=1
-        emitted_pivot='cw_joint_'+str(serial)
     # The donor may carry its own bone named like the receiver's pivot (leIG 18
     # "gun_rot1" under its "gun_rot", taking the Nb.Fz auxiliary MG's gun_rot1).
     clash=next((n for n in dnames if n!=ds['pivot'] and mapping.get(n,n)==emitted_pivot),None)
@@ -607,7 +614,6 @@ def compile_gun(resources, recipient, donor, transform, output, identifier, *, r
         raise GunError('GunAssembly: El remapeo de huesos es ambiguo.')
     _rename_bone_refs(mounted,mapping)
     _drop_wheel_radius(mounted,{mapping.get(n,n) for n in contacts})
-    housing=None
     housings=[]
     for source_name in sorted(_receiver_housings(rm,rs) if mantlet else []):
         serial=0
@@ -620,18 +626,7 @@ def compile_gun(resources, recipient, donor, transform, output, identifier, *, r
                 node.append(child.clone())
         _set_matrix(node,multiply(inverse(world),rm['bones'][source_name]['world']))
         housings.append((source_name,node))
-        if source_name==rs['pivot']:housing=node
     _remove_bone(rm,rs['pivot'])
-    if split:
-        # Other weapons retain the native receiver joint. The selected weapon
-        # receives its own copied native donor joint, with a separate centre.
-        kept=rm['bones'][rs['pivot']]['node'].clone()
-        for child in list(kept.children):
-            if child.head.casefold()=='bone' or (housing is not None and child.head.casefold() in ('volumeview','lodview')):kept.remove(child)
-        for name,node in retained:
-            _set_matrix(node,multiply(inverse(rm['bones'][rs['pivot']]['world']),rm['bones'][name]['world']))
-            kept.append(node)
-        rm['bones'][parent]['node'].append(kept);retained=[];rnames.discard(rs['pivot'])
     rm['bones'][parent]['node'].append(mounted)
     _recruit_crew(resources,rr,rm,roriginal,dr,dm,recruits,parent,multiply(world,inverse(dm['bones'][ds['pivot']]['world'])),operators['gunner'])
     for name,node in retained:
@@ -688,6 +683,8 @@ def compile_gun(resources, recipient, donor, transform, output, identifier, *, r
             for value in native.find_all(field):clone.append(value.clone())
         if clone.children:donor_nodes.append(clone)
     from .registration import _expand_macros
+    # Read first: the place's copy shares this name, so renaming it renames dp too.
+    donor_slot=dp.args[0]
     new_place=_expand_macros(dp,{k.casefold():v for k,v in _include_defines(resources,dr).items()})
     new_place.atoms[1].set(rp.args[0])
     # Selection belongs to the recipient slot, not the donor's old role. A
@@ -710,9 +707,13 @@ def compile_gun(resources, recipient, donor, transform, output, identifier, *, r
     # A sight can locate a detachable assembly without being an attachment
     # socket. Materializing it as LinkBone also attaches the stuff's weapon
     # entity at the muzzle, ahead of the model already present in the vehicle.
-    # Only preserve a native implicit same-named socket when renaming the slot.
-    implicit_host=_bone(dm,dp.args[0]) if dp.args else None
-    if new_place.find('LinkBone') is None and implicit_host is not None:
+    # Only a slot that keeps its name keeps its implicit same-named socket: a donor
+    # bone that merely shares the new slot's name is another weapon's (an LVT(A)-1
+    # coax "mgun1", which stays behind, as host of a 37 mm in a Cruiser's mgun1).
+    from .compiler import _weapon_model
+    implicit_host=_bone(dm,donor_slot) if donor_slot.casefold()==rp.args[0].casefold() else None
+    if (new_place.find('LinkBone') is None and implicit_host is not None
+            and not (new_place.find('foresight') is not None and _weapon_model(resources,new_place))):
         new_place.append(block('{LinkBone '+quote(implicit_host)+'}'))
     for head in ('LinkBone','foresight','shooter','bone'):
         for ref in new_place.find_all(head):
@@ -882,8 +883,9 @@ def compile_gun(resources, recipient, donor, transform, output, identifier, *, r
     if transform.get('mobility') is not None:
         from .mobility import apply as apply_mobility
         apply_mobility(rr,transform['mobility'],diagnostics)
-    from .compiler import _apply_traverse_class
+    from .compiler import _apply_traverse_class, _guns_first
     rm = parse_model(rm['document'].render())
+    _guns_first(resources, rr)
     _apply_traverse_class(resources, rr, rm)
     assets.prune(rm['document'])
     if any(d.get('code')=='animation_tracks_dropped' for d in diagnostics):

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
+import {gameCamera} from '../frontend/game-view.js';
 import {previewMesh,applyModelTextures,seatFrame,setSeatPoseOrigin,updateSeatFrames,configureModelTexture} from '../frontend/model-geometry.js';
 import {drawJointArc,previewJointFrame} from '../frontend/joint-arcs.js';
 import {weaponJointEditor} from '../frontend/weapon-joints.js';
@@ -107,3 +108,28 @@ for(const parentSign of [1,-1]){
     assert.ok(actor.matrixWorld.determinant()>0,'anatomy stays unreflected');
   }
 }
+
+// The game view reflects the projection, not the scene graph. Account for
+// that reflection too: a positive actor world frame alone mirrors the body
+// on screen. Keep the authored body anchor, forward and up in either view.
+for(const parentSign of [1,-1])for(const seatSign of [1,-1]){
+  const parent=new THREE.Group();parent.scale.y=parentSign;parent.rotation.z=.4;
+  const native=new THREE.Matrix4().makeRotationZ(.7).scale(new THREE.Vector3(1,seatSign,1));
+  const rotation=[0,1,2].map(r=>[0,1,2].map(c=>native.elements[c*4+r]));
+  const actor=seatFrame(rotation);parent.add(actor);const origin=[2,7,13];setSeatPoseOrigin(actor,origin);
+  const camera=gameCamera(new THREE.PerspectiveCamera());
+  for(let repeat=0;repeat<3;repeat++){
+    updateSeatFrames({turret:parent},camera);parent.updateWorldMatrix(true,true);
+    assert.ok(actor.matrixWorld.determinant()<0,'game camera reflection must participate in anatomical handedness');
+    const anchor=new THREE.Vector3(...origin).applyMatrix4(native).applyMatrix4(parent.matrixWorld);
+    assert.ok(new THREE.Vector3(...origin).applyMatrix4(actor.matrixWorld).distanceTo(anchor)<1e-10,'camera correction keeps the authored body anchor');
+    for(const axis of [[1,0,0],[0,0,1]]){
+      const actual=new THREE.Vector3(...axis).transformDirection(actor.matrixWorld);
+      const expected=new THREE.Vector3(...axis).transformDirection(parent.matrixWorld.clone().multiply(native));
+      assert.ok(actual.distanceTo(expected)<1e-10,'forward and up stay native');
+    }
+    updateSeatFrames({turret:parent},new THREE.PerspectiveCamera());parent.updateWorldMatrix(true,true);
+    assert.ok(actor.matrixWorld.determinant()>0,'ordinary previews still use their original handedness');
+  }
+}
+console.log('Crew frames: native game projection and ordinary cameras preserve anatomy, anchors and facing.');

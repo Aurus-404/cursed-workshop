@@ -11,6 +11,11 @@ from tests.test_gun_assembly import Resources
 
 
 def boarding(resources, path, roles):
+    model_path=path.removesuffix('.def')+'.mdl'
+    model=parse(resources.files[model_path]);skeleton=model.find('skeleton')
+    if not any(n.args[-1:] == ['emit1'] for n in skeleton.walk('bone')):
+        skeleton.find('bone').append(block('{bone "emit1"}'))
+    resources.files[model_path]=model.render().encode()
     doc = parse(resources.files[path]); root = doc.find('game_entity')
     for role in roles:
         root.append(block('{boarder {door "emit1"}{link "emit1" "' + role +
@@ -115,6 +120,7 @@ class CrewVisibilityTests(unittest.TestCase):
 
     def test_defaults_and_recipe_restore_do_not_change_files_or_soldier_count(self):
         resources = resources_with_crew()
+        boarding(resources, 'entity/hull/hull.def', ['driver'])
         boarding(resources, 'entity/donor/donor.def', ['gunner', 'charger', 'commander'])
         with tempfile.TemporaryDirectory() as tmp:
             results = []

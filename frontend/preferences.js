@@ -1,7 +1,8 @@
 import {t} from './i18n.js';
 
 export const THEMES={
-  graphite:{name:'Grafito',bg:'#151512',panel:'#1e1e1a',input:'#151512',control:'#2b2a23',hover:'#39352a',line:'#776747',text:'#e8e3d8',muted:'#b9ad97',accent:'#d1ad68',selected:'#443a27',viewport:'#20211e',dark:true},
+  // The default: neutral grays, one warm accent.
+  graphite:{name:'Grafito',bg:'#1e1e1e',panel:'#2c2c2c',input:'#1f1f1f',control:'#3f3f3f',hover:'#505050',line:'#6a6a6a',text:'#ececec',muted:'#bababa',accent:'#e2a63d',selected:'#43330f',viewport:'#262626',dark:true},
   paper:{name:'Papel',bg:'#ece9e1',panel:'#faf8f2',input:'#ffffff',control:'#e5e0d5',hover:'#d5cebf',line:'#81796b',text:'#292720',muted:'#555044',accent:'#6b4613',selected:'#e8d8b8',viewport:'#d8d4c9',dark:false},
   olive:{name:'Oliva',bg:'#25281f',panel:'#303528',input:'#20241b',control:'#3d4432',hover:'#4b533f',line:'#929c81',text:'#f0f0df',muted:'#c4c8b4',accent:'#d6c378',selected:'#505039',viewport:'#2b3025',dark:true},
   earth:{name:'Tierra',bg:'#2d2521',panel:'#392f29',input:'#241e1b',control:'#493c32',hover:'#594a3d',line:'#a18a78',text:'#f4eade',muted:'#d1bdab',accent:'#edbe8b',selected:'#584232',viewport:'#322a25',dark:true},

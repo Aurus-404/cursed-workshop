@@ -69,6 +69,15 @@ class VehicleDesignTests(unittest.TestCase):
         scene=scene.replace('{item "old_ammo" "ammo" 3 {cell 0 0}}','{item "short_round ap" 3}{item "mg_round belt" 23}{item "toolkit" 1}')
         source=make_save(self.root/'source.sav',scene);return load_campaign(source),source
 
+    def test_a_gun_from_a_stored_turret_spends_no_second_unit(self):
+        row={**self.rows()[0],'donor_depot':'stored'};del row['donor_eid']
+        r=compile_assembly(self.index,'receiver','donor',{'assembly_draft':{'schema':1,'guns':[row]}},self.root/'stored','mw_stored')
+        step=r['metadata']['draft_steps'][-1]
+        self.assertEqual((step['kind'],step['donor_depot'],step['donor_eid']),('gun','stored',None))
+        snapshot,_=self.snapshot();meta=r['metadata']
+        plan=plan_draft(snapshot,'0x9000','mw_stored',meta['crew_slots'],meta['draft_steps'],state_profile=meta['state_profile'])
+        self.assertEqual(plan['consumed_eids'],['0x9000'])
+
     def test_distinct_donors_compile_roundtrip_and_single_atomic_plan_preserves_people(self):
         tr={'assembly_draft':{'schema':1,'guns':self.rows()}}
         original=copy.deepcopy(tr);r=compile_assembly(self.index,'receiver','donor',tr,self.root/'compiled','mw_design')
@@ -181,9 +190,11 @@ class VehicleDesignTests(unittest.TestCase):
         r=compile_assembly(self.index,'receiver','donor',tr,self.root/'compiled','mw_design')
         snapshot,_=self.snapshot();plan=plan_draft(snapshot,'0x9000','mw_design',3,r['metadata']['draft_steps'],state_profile=r['metadata']['state_profile'])
         self.assertEqual(plan['consumed_eids'],['0x9000','0x9010']);apply_plan(snapshot,plan)
-        from workshop.gun_assembly import GunError
-        with self.assertRaisesRegex(GunError,'componente de daño'):
-            compile_assembly(self.index,'receiver','donor',{'gun_swaps':rows},self.root/'legacy_ambiguous','mw_legacy')
+        # Both weapons sit on the one joint they share, so their names are not ambiguous.
+        from workshop.geometry import parse_model
+        legacy=compile_assembly(self.index,'receiver','donor',{'gun_swaps':rows},self.root/'legacy_shared','mw_legacy')
+        model=parse_model((Path(legacy['output_dir'])/'resource'/legacy['model_path']).read_bytes())
+        self.assertFalse(any(name.startswith('cw_joint_') for name in model['bones']))
 
     def test_preview_and_check_share_compilation_and_pending_turret_tokens_survive(self):
         from workshop.app import AppState

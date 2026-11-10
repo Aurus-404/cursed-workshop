@@ -75,6 +75,8 @@ def specification(transform):
         if row in turrets and isinstance(row,dict) and row.get('native') is True:
             if row.get('donor_eid') or row.get('donor_depot') or row.get('donor_catalog') or row.get('assembly_scope'):
                 raise GunError('Editar un módulo instalado no consume un donante.')
+            if row.get('mount_parent') is not None and (not isinstance(row['mount_parent'],str) or not row['mount_parent'] or len(row['mount_parent'])>160):
+                raise GunError('El diseño del vehículo no es válido.')
             continue
         if not isinstance(row,dict) or not isinstance(row.get('donor_template'),str) or not row['donor_template']:
             raise GunError('Elegí un donante para cada cambio guardado.')
@@ -107,6 +109,11 @@ def specification(transform):
 def compile_draft(resources,recipient,donor,transform,output,identifier):
     from .compiler import compile_assembly
     from .gun_assembly import compile_guns
+    # A reopened vehicle moved its inherited fittings to this design: without its
+    # stripped source they were drawn twice, once baked in and once editable.
+    if transform.get('source_recipe'):
+        from .editable_recipe import compile_reopened
+        return compile_reopened(resources,recipient,donor,transform,output,identifier)
     draft=specification(transform);output=Path(output);steps=[];hashes={};views=[];view=resources;current=recipient;seed_camera={};seed_interaction=None;removals=[];assemblies=[]
     if draft.get('removals'):
         return _compile_removed_design(resources,recipient,donor,transform,output,identifier,draft)
@@ -163,6 +170,7 @@ def compile_draft(resources,recipient,donor,transform,output,identifier):
                 if own:tr['joint_limits']={'turret':own}
                 if native:
                     tr={'commander_only':True,'module_poses':{turret['recipient_mount']:turret.get('pose') or {}}}
+                    if turret.get('mount_parent'):tr['module_parents']={turret['recipient_mount']:turret['mount_parent']}
                     if own:tr['joint_limits']={'hull':own}
                 initial=compile_assembly(view,current,current if native else turret['donor_template'],tr,temp/f'turret{number}',f'mw_draft_turret{number}')
                 if native:
@@ -187,7 +195,7 @@ def compile_draft(resources,recipient,donor,transform,output,identifier):
             if guns:
                 result=compile_guns(view,current,guns[0]['donor_template'],{**extras,'_design_crew':True,'gun_swaps':guns},assembled,identifier,stage_profiles=True)
                 for row,entry in zip(guns,result['metadata']['gun_profiles']):
-                    steps.append({'kind':'gun','donor_template':entry['donor_template'],'donor_eid':row.get('donor_eid'),'donor_catalog':bool(row.get('donor_catalog')),
+                    steps.append({'kind':'gun','donor_template':entry['donor_template'],'donor_eid':row.get('donor_eid'),'donor_depot':row.get('donor_depot'),'donor_catalog':bool(row.get('donor_catalog')),
                         'profile':entry['profile'],'inventory_boxes':[]})
             else:
                 result=compile_assembly(view,current,current,{**extras,'commander_only':True},assembled,identifier)

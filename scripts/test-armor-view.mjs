@@ -39,7 +39,7 @@ for(const mesh of [meshes[0],meshes.at(-1)]){
   for(let i=0;i<vertices.length;i+=3)assert.ok(Math.hypot(...Array.from(vertices.slice(i,i+3),(v,k)=>v-original[i+k]))<=.0201,
     'visual lift is at most .02 native model units');
   assert.equal(mesh.userData.armor.thickness.default,50);
-  assert.equal(mesh.material.depthWrite,true);
+  assert.equal(mesh.getObjectByName('armor_depth').material.depthWrite,true,'the nearest plate wins: its own depth pass decides');
   assert.equal(mesh.material.polygonOffset,true);
 }
 state.previews.hull={armor:[volume]};layer.sync();
@@ -51,3 +51,17 @@ const tinyLift=armorPositions(tiny);
 assert.ok(Math.hypot(...Array.from(tinyLift.slice(0,3),(v,k)=>v-positions[k]))<.001,'small parts get a proportional lift');
 box.dispose();
 console.log('armor view: ok');
+
+// The colour covers model details that stick out of the armour: the model's depth is
+// cleared once per frame, before the first plate. Each plate writes its depth without
+// colour first, then paints only what is nearest.
+{const plates=Object.values(groups).flatMap(g=>g.children.filter(n=>n.name==='armor_layer').flatMap(l=>l.children));
+  assert.ok(plates.length>0&&plates.every(p=>p.userData.armor&&p.material.transparent&&p.material.opacity<1&&!p.material.depthWrite),'a tint: the vehicle shows through');
+  const passes=plates.map(p=>p.getObjectByName('armor_depth'));
+  assert.ok(passes.every(d=>d&&d.material.colorWrite===false&&d.renderOrder<d.parent.renderOrder&&d.geometry===d.parent.geometry));
+  assert.ok(plates.every(p=>!p.getObjectByName('armor_edges')),'no outlines');
+  let clears=0;const renderer={info:{render:{frame:7}},clearDepth(){clears++;}};
+  for(const pass of passes)pass.onBeforeRender(renderer);assert.equal(clears,1,'once per frame, whatever plate comes first');
+  renderer.info.render.frame=8;passes.at(-1).onBeforeRender(renderer);passes[0].onBeforeRender(renderer);assert.equal(clears,2);
+  const skin=new THREE.MeshBasicMaterial(),part=new THREE.Mesh(new THREE.BoxGeometry(1,1,1),skin);part.userData={mesh:{},flat:skin};groups.hull.add(part);
+  layer.sync();assert.equal(part.material,skin,'the vehicle keeps its own textures under the tint');}

@@ -61,6 +61,26 @@ class Resources:
 
 
 class GunAssemblyTests(unittest.TestCase):
+    def test_socket_locator_on_a_fixed_weapon_does_not_disable_other_gun_swaps(self):
+        r=Resources()
+        path='entity/receiver/receiver.def'
+        root=parse(r.files[path]).find('game_entity')
+        root.find('Weaponry').append(block('{place "fixed_slot" {weapon "mg"}{foresight "fixed_aim"}}'))
+        r.files[path]=root.render().encode()
+        path='entity/receiver/receiver.mdl'
+        root=parse(r.files[path]);body=root.find('skeleton').find('bone').find('bone')
+        body.append(block('{bone socket "fixed_aim" {Position 3 4 5}{limits 1}}'))
+        r.files[path]=root.render().encode()
+        rows={p['place']:p for p in discover(r,'receiver')['weapons']}
+        self.assertTrue(rows['main_slot']['available'],rows['main_slot']['reason'])
+        self.assertTrue(rows['coax_slot']['available'],rows['coax_slot']['reason'])
+        self.assertFalse(rows['fixed_slot']['available'],'a fixed socket is not a detachable elevation joint')
+        with tempfile.TemporaryDirectory() as out:
+            result=compile_assembly(r,'receiver','donor',{'gun_swap':{'schema':1,'recipient_place':'main_slot','donor_place':'main_slot'}},out,'mw_socket_test')
+            model=parse_model(Path(result['output_dir'],result['model_path']).read_bytes()) if Path(result['output_dir'],result['model_path']).exists() else parse_model(Path(result['output_dir'],'resource',result['model_path']).read_bytes())
+            self.assertIn('fixed_aim',model['bones'])
+            self.assertEqual(model['bones']['fixed_aim']['node'].args,['socket','fixed_aim'])
+
     def test_primary_place_is_the_directly_commanded_one_not_an_mg_typed_main(self):
         from workshop.gun_assembly import _primary_place
         sexton=parse('{game_entity {Weaponry {place "gun" {weapon "qf25"}}'
@@ -224,6 +244,37 @@ class GunAssemblyTests(unittest.TestCase):
                 self.assertTrue(model['bones'][housing]['assets'][0].startswith('h_'))
                 preview=preview_parts(resources,'receiver','donor',{'recipient_place':'main_slot','donor_place':'main_slot'})
                 self.assertTrue(any(mesh['bone']=='elevation' for mesh in preview['hull']['meshes']))
+
+    def test_a_moved_pivot_keeps_gun_and_coax_on_one_joint(self):
+        # TheOppsAreOntoMe: moving the 37 mm's pivot on a T-40 made gun and coax
+        # turn apart; each had a joint of its own with a different centre.
+        def first_joint(model,name):
+            while model['bones'][name]['node'].args[0].casefold()!='revolute':
+                name=model['bones'][name]['parent']
+            return name
+        resources=Resources()
+        before=parse_model(resources.files['entity/receiver/receiver.mdl'])
+        result,root,model=self.compile(resources,transform={'turret':{'pivot':[3,0,1]}})
+        place=root.find('Weaponry').find_all('place')[0]
+        gun=first_joint(model,place.find('LinkBone').args[0])
+        self.assertEqual(gun,first_joint(model,'coax'))
+        self.assertEqual(gun,'elevation')
+        self.assertFalse(any(name.startswith('cw_joint_') for name in model['bones']))
+        centre=point(model['bones'][gun]['world'],[0,0,0]);native=point(before['bones']['elevation']['world'],[0,0,0])
+        for actual,expected,moved in zip(centre,native,[3,0,1]):
+            self.assertAlmostEqual(actual,expected+moved,places=6)
+        for actual,expected in zip(sum(model['bones']['coax']['world'],[]),sum(before['bones']['coax']['world'],[])):
+            self.assertAlmostEqual(actual,expected,places=6)
+        # The built vehicle can have its gun replaced again.
+        folder=Path(result['output_dir'])/'resource/entity/-vehicle/workshop/mw_gun_test'
+        for path in folder.iterdir():
+            if path.is_file():resources.files['entity/receiver/'+path.name]=path.read_bytes()
+        resources.files['entity/receiver/receiver.def']=root.render().encode()
+        resources.files['entity/receiver/receiver.mdl']=model['document'].render().encode()
+        _,_,again=self.compile(resources,transform={'turret':{'pivot':[1,0,0]}})
+        self.assertEqual(first_joint(again,'coax'),'elevation')
+        for actual,expected in zip(sum(again['bones']['coax']['world'],[]),sum(before['bones']['coax']['world'],[])):
+            self.assertAlmostEqual(actual,expected,places=6)
 
     def test_ammo_family_ignores_the_container_prefix(self):
         # toxicman400: the Crocodile's "ammo flame_thrower" fuel is a whole family.
@@ -519,6 +570,29 @@ class GunAssemblyTests(unittest.TestCase):
         result=compile_assembly(resources,'receiver',donor,tr,temp.name,'mw_gun_test')
         folder=Path(temp.name)/'resource/entity/-vehicle/workshop/mw_gun_test'
         return result,parse((folder/'mw_gun_test.def').read_bytes()).find('game_entity'),parse_model((folder/'mw_gun_test.mdl').read_bytes())
+
+    def test_a_donor_bone_named_like_the_new_slot_does_not_host_the_gun(self):
+        # An LVT(A)-1's coax bone "mgun1" stays behind: it cannot bind a 37 mm in a Cruiser's mgun1.
+        r=Resources()
+        r.files['entity/donor/donor.mdl']=r.files['entity/donor/donor.mdl'].replace(b'"coax"',b'"coax_slot"')
+        r.files['entity/donor/donor.def']=(r.files['entity/donor/donor.def']
+            .replace(b'{LinkBone "breech"}',b'{foresight "sight"}').replace(b'{LinkBone "coax"}',b'{LinkBone "coax_slot"}'))
+        _,root,model=self.compile(r,transform={'gun_swap':{'schema':1,'recipient_place':'coax_slot','donor_place':'main_slot'}})
+        place=next(p for w in root.find_all('Weaponry') for p in w.find_all('place') if p.args[0]=='coax_slot')
+        self.assertEqual(place.find('weapon').args[0],'donor_weapon')
+        self.assertIsNone(place.find('LinkBone'))
+        self.assertIn(place.find('foresight').args[0],model['bones'])
+
+    def test_a_stored_turret_offers_only_the_weapons_on_it(self):
+        r=Resources();r.files['entity/donor/donor.def']=r.files['entity/donor/donor.def'].replace(
+            b'{Weaponry ',b'{Weaponry {place "hull_mg" {LinkBone "body"}{weapon "mg" filling "mg_round belt" 50}{gunner "gunner"}{charger "charger"}}',1)
+        places=lambda **options:[row['place'] for row in discover(r,'donor',**options)['weapons']]
+        self.assertEqual(places(),['hull_mg','main_slot','coax_slot'],'the whole vehicle')
+        self.assertEqual(places(module='AZIMUTH'),['main_slot','coax_slot'],'a module saved with its mount: the rest stays on the chassis')
+        self.assertEqual(places(module='gone'),[],'a mount it no longer has offers nothing')
+        self.assertEqual(places(module=True),[],'no main turret, nothing to offer')
+        r.files['entity/donor/donor.mdl']=r.files['entity/donor/donor.mdl'].replace(b'"azimuth"',b'"turret"')
+        self.assertEqual(places(module=True),['main_slot','coax_slot'],'the main turret')
 
     def test_vehicle_weapon_preserves_turret_secondary_operators_and_ammo(self):
         r=Resources();result,root,model=self.compile(r)

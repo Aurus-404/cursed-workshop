@@ -37,7 +37,7 @@ assert.equal(state.transform.gun_swaps.length,2);assert.deepEqual(state.transfor
 assert.equal(state.transform.gun_swaps[1].donor_place,'coax');
 await controller.restore();assert.ok(controller.active());assert.equal(state.gunPreviewKey,controller.key());
 await assert.rejects(controller.select({eid:'0x3',template:'other'},'turret'),/cambios guardados/);
-await assert.rejects(controller.select({depot:'x',template:'pak'},'turret'),/dos unidades/);
+await assert.rejects(controller.select({depot:'x',template:'pak'},'turret'),/torreta del depósito/);
 $('gun-saved').value='0';await $('gun-remove-change').onclick();
 assert.equal(state.transform.gun_swaps.length,1);
 assert.equal($('gun-recipient').options.find(o=>o.value==='main').disabled,false,'removed slots become selectable again');
@@ -48,4 +48,26 @@ delete state.transform.gun_swaps;delete state.transform.gun_swap;await controlle
 state.turret=null;controller.controls();assert.ok($('gun-donor').disabled);
 assert.equal($('gun-donor').options[0].value,'','a previous donor weapon cannot remain selected');
 assert.equal($('mount-select').disabled,false);
+// A turret kept in the depot gives its gun; the row says which part it uses up.
+{
+  const seen=[],guns=[];
+  const stored={tab:'depot',hull:{eid:'0x1',template:'tank'},turret:null,
+    campaign:{units:[],depot:[{id:'kept',part:'turret',template:'lvt',label:'Torreta de LVT'}]},
+    transform:{hull:{position:[0,0,0],rotation:[0,0,0]},turret:{position:[0,0,0],rotation:[0,0,0]}}};
+  const fields=new Map(),$$=id=>{if(!fields.has(id))fields.set(id,{value:'',checked:false,classList:{toggle(){}},add(o){(this.options??=[]).push(o);},replaceChildren(...o){this.options=o;},setAttribute(){}});return fields.get(id);};
+  $$('operation-select').value='gun';
+  const fake={active:()=>true,draft:()=>({guns}),ensure(){},body:()=>({}),refresh:async()=>{},placeholder(){stored.turret={designPlaceholder:true};}};
+  const ask=async(path,body)=>{seen.push([path,body]);return {kind:'vehicle',source:'x',weapons:[{place:'main',weapon:'cannon',available:true}]};};
+  const editor=gunEditor({state:stored,$:$$,job:ask,displayPart(){},updateSelection(){},selectEdit(){},remember(){},reportError(error){throw error;},design:fake});
+  await editor.select({depot:'kept',part:'turret',template:'lvt',label:'Torreta de LVT',kind:'part'},'turret');
+  assert.deepEqual(seen.find(([path])=>path==='/api/gun-catalog')[1],{template:'lvt',module:true},'only the weapons on that turret');
+  stored.transform.gun_swap.recipient_place='mg';stored.transform.gun_swap.donor_place='main';
+  await editor.save();
+  assert.equal(guns[0].donor_depot,'kept');assert.equal(guns[0].donor_template,'lvt');assert.equal(guns[0].donor_eid,undefined);
+  $$('gun-saved').value='0';await $$('gun-edit-change').onclick();
+  assert.equal(stored.turret.depot,'kept','reopening the change goes back to the same part');assert.equal(stored.turret.part,'turret');
+  await assert.rejects(editor.select({depot:'chassis',part:'hull',template:'lvt'},'turret'),/torreta del depósito/,'a chassis gives no gun');
+  stored.tab='catalog';
+  await assert.rejects(editor.select({depot:'kept',part:'turret',template:'lvt'},'turret'),/torreta del depósito/);
+}
 console.log('Gun editor: operation, owned-unit selection, blocked donors, preview, recipe restore and history passed.');

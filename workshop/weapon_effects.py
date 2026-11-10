@@ -82,23 +82,25 @@ def _expand(scope, defines, stack=()):
 
 def capture(resources, template):
     """Read generated contracts from their authoritative overlay, else native data."""
-    from .compiler import _load_entity, _explicit_weapon_operators, _include_defines
+    from .compiler import _load_entity, _explicit_weapon_operators, _include_defines, _implicit_foresight
     from .geometry import parse_model, editable_mounts, descendants
-    from .registration import _load_include_graph
+    from .registration import _load_include_graph, _interaction_defines
     info, _, root = _load_entity(resources, template)
     metadata = _recipe(resources, template, info['model_path'])
     if metadata is not None and 'weapon_effects' in metadata:
         return copy.deepcopy(metadata['weapon_effects'])
     model = parse_model(resources.read(info['model_path']))
     places = [p for w in root.find_all('Weaponry') for p in w.find_all('place')
-              if p.args and len(barrel_bones(p, model)) > 1]
+              if p.args and p.find('weapon') is not None]
     if not places:
         return []
+    if not hasattr(resources,'resolve') or not hasattr(resources,'read_text'):
+        return []  # Minimal compiler adapters do not expose the native include graph.
     try:
         records, _ = _load_include_graph(resources, 'set/interaction_entity/entity.set')
     except (KeyError, FileNotFoundError):
         return []  # Minimal resources can rely entirely on stuff/engine effects.
-    defines = {n.args[0].casefold(): n for _, n in records if n.head.casefold() == 'define' and n.args}
+    defines = _interaction_defines(records)
     props = {p.casefold() for p in _explicit_weapon_operators(resources, root)}
     tags = props | {template.casefold()}
     candidates = [n for _, n in records if n.head and n.head.casefold() != 'define'
@@ -163,6 +165,18 @@ def capture(resources, template):
                     # (shell ejection on Flak guns); keep every binding.
                     setup[tuple(view.args)] = view
         shooters = barrel_bones(place, model)
+        if not shooters:
+            # A single-barrel gun's native effect usually binds its foresight,
+            # not its recoil bone. Its slot can be renamed just like a battery's.
+            from .weapon_binding import reference_bones
+            for head in ('shooter','foresight'):
+                reference=place.find(head)
+                if reference and reference.args:
+                    shooters=reference_bones(place,model,head,reference.args[0])
+                    if shooters:break
+            if not shooters:
+                sight=_implicit_foresight(slot,place,model,set(model['bones']))
+                if sight:shooters=[sight]
         if not any(v.args[2] in shooters for v in setup.values()):
             continue  # Rockets/stuff without native per-barrel views keep their own dispatch.
         muzzle = [v for v in setup.values() if v.args[2] in shooters]
@@ -265,6 +279,8 @@ def transplant(contracts, places, mapping=None, sequences=None, namespace='', *,
                             change(i, rename)
                 elif head in ('bone','ik_enable'):
                     for i in range(len(args)): change(i, mapping)
+                elif head == 'spawn' and len(args)>1:
+                    change(1, mapping)
             if node.head.casefold() == 'on' and node.args[:1] == ['fire']:
                 node.atoms[2].set(row['place'])
                 if 'overload' not in [a.casefold() for a in node.args]:
@@ -283,9 +299,9 @@ def install(record, contracts, resources=None):
     if record is None:
         raise ValueError('Weapon effects require an entity interaction record')
     if resources is not None:
-        from .registration import _load_include_graph, _interaction_events
+        from .registration import _load_include_graph, _interaction_events, _interaction_defines
         records, _ = _load_include_graph(resources, 'set/interaction_entity/entity.set')
-        defines = {n.args[0].casefold():n for _,n in records if n.head.casefold() == 'define' and n.args}
+        defines = _interaction_defines(records)
         record = _interaction_events(record, defines)
     setup = []
     for row in contracts:

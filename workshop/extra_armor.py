@@ -7,6 +7,8 @@ import hashlib
 import json
 import math
 import re
+from array import array
+from collections import OrderedDict
 
 from .pivots import pose_matrix, pivot_of
 from .syntax import parse, block, quote, bone_name
@@ -254,26 +256,39 @@ def _annotate(resources, rows):
     Every piece stays resolvable (saved recipes keep their ids); the list shows
     one piece per group of identical geometry and armor, the most useful first.
     """
-    meshes, models = {}, {}
+    # Thousands of pieces: holding every model and mesh until the end took over
+    # a gigabyte. Pieces come sorted by vehicle, so the last few are the ones
+    # asked for again; positions are kept packed (8 bytes each, not a float object).
+    meshes, models = OrderedDict(), OrderedDict()
+    def kept(cache, key, limit, make):
+        if key in cache: cache.move_to_end(key)
+        else:
+            cache[key] = make()
+            while len(cache) > limit: cache.popitem(last=False)
+        return cache[key]
     def shape(item):
-        if item['model_path'] not in models:
-            models[item['model_path']] = parse_model(resources.read(item['model_path']))
-        model = models[item['model_path']]
+        model = kept(models, item['model_path'], 2, lambda: parse_model(resources.read(item['model_path'])))
         names = {item['bone']} if item.get('single') else (descendants(model['bones'], item['bone']) if item['bone'] else set(model['bones']))
         origin = inverse(model['bones'][item['bone']]['world']) if item['bone'] else identity()
-        points, parts = [], []
+        low, high, parts = None, None, []
         for name in sorted(names):
             bone = model['bones'][name]
             frame = multiply(origin, bone['world'])
             for ref in bone['assets']:
                 path = resolve_path(item['model_path'], ref)
-                if path not in meshes:
+                def load(path=path):
                     data = resources.read(path)
-                    meshes[path] = (hashlib.sha1(data).hexdigest(), read_mesh(data)['positions'])
-                digest, positions = meshes[path]
+                    return hashlib.sha1(data).hexdigest(), array('d', read_mesh(data)['positions'])
+                digest, positions = kept(meshes, path, 64, load)
                 parts.append(digest + ':' + ','.join('%.2f' % v for row in frame for v in row))
-                points += [point(frame, positions[i:i+3]) for i in range(0, len(positions), 3)]
-        return points, parts
+                for i in range(0, len(positions), 3):
+                    p = point(frame, positions[i:i+3])
+                    if low is None: low, high = list(p), list(p)
+                    else:
+                        for k in range(3):
+                            if p[k] < low[k]: low[k] = p[k]
+                            elif p[k] > high[k]: high[k] = p[k]
+        return (None if low is None else [high[k] - low[k] for k in range(3)]), parts
     for item in rows:
         segment = item['definition_path'].split('/')[2].lstrip('+') if item['definition_path'].count('/') > 2 else ''
         item['nation'] = segment if segment in _NATIONS else 'other'
@@ -284,11 +299,11 @@ def _annotate(resources, rows):
                           and item.get('clean', True))
         item['category'] = _category(item)
         try:
-            points, parts = shape(item)
+            extent, parts = shape(item)
         except (KeyError, OSError, ValueError):
-            points, parts = [], [item['id']]
-        if points:
-            size = sorted(max(p[k] for p in points) - min(p[k] for p in points) for k in range(3))
+            extent, parts = None, [item['id']]
+        if extent:
+            size = sorted(extent)
             area = size[1] * size[2]
         else:
             area = 0.0
@@ -346,9 +361,11 @@ def resolve_fitting(resources, identifier):
     cached=resources.__dict__.setdefault('_armor_items',{})
     if identifier in cached:return cached[identifier]
     if '#' not in identifier:return None
-    model, _=identifier.rsplit('#',1);folder=model.rsplit('/',1)[0]
-    paths=[p for p in resources.entries if p.startswith(folder+'/') and p.rsplit('/',1)[0]==folder]
-    extensions={folder:[p for p in paths if p.endswith('.ext')]}
+    model, _=identifier.rsplit('#',1);folder=model.rsplit('/',1)[0].casefold()
+    # Ids keep the model's own spelling and folders are not always spelled alike
+    # (US_M4A3E8_ThunderVII): a mismatch here read the whole game to open a vehicle.
+    paths=[p for p in resources.entries if p.rsplit('/',1)[0].casefold()==folder]
+    extensions={path.rsplit('/',1)[0]:[p for p in paths if p.endswith('.ext')] for path in paths}
     for path in sorted(p for p in paths if p.endswith('.def')):
         try:
             for item in _definition_items(resources,path,extensions):
@@ -367,14 +384,17 @@ def configuration(resources, value):
     if not isinstance(value, list):
         raise ArmorError('Elegí una pieza de blindaje nativa disponible.')
     rows = []
+    from . import custom_armor
     for row in value:
-        item=resolve_fitting(resources,row.get('asset')) if isinstance(row,dict) else None
+        made=isinstance(row,dict) and row.get('asset')==custom_armor.ASSET
+        item=custom_armor.item(custom_armor.plate(row,ArmorError)) if made else resolve_fitting(resources,row.get('asset')) if isinstance(row,dict) else None
         if item is None:
             raise ArmorError('Elegí una pieza de blindaje nativa disponible.')
         parent = row.get('parent')
         if not isinstance(parent, str) or not parent or len(parent) > 160:
             raise ArmorError('Elegí un punto de fijación válido para el blindaje.')
         normalized = {'asset': row['asset'], 'parent': parent}
+        if made:normalized['plate'] = item['plate']
         if 'serial' in row:
             if type(row['serial']) is not int or not 0 <= row['serial'] <= 100000:
                 raise ArmorError('Elegí una pieza de blindaje nativa disponible.')
@@ -424,6 +444,8 @@ def fitting(resources, item):
 
 
 def preview(resources, identifier):
+    from . import custom_armor
+    if identifier == custom_armor.ASSET:return custom_armor.preview()
     item = resolve_fitting(resources,identifier)
     if item is None: raise ArmorError('Elegí una pieza de blindaje nativa disponible.')
     model, _, _, meshes = fitting(resources, item)
@@ -567,6 +589,8 @@ def _static_piece(node, names):
 def apply(resources, root, model, value, assets, diagnostics):
     if value is None: return None
     from .compiler import _set_matrix, _rename_bone_refs
+    from . import custom_armor
+    from .geometry import linear_determinant
     rows = configuration(resources, value)
     final = parse_model(model['document'].render());model.update(final)
     hosts = {p['name'] for p in parents(final)}
@@ -578,16 +602,29 @@ def apply(resources, root, model, value, assets, diagnostics):
     for i, (row, item) in enumerate(rows):
         if row['parent'] not in hosts:
             raise ArmorError('El punto de fijación del blindaje ya no existe en este vehículo.')
-        key = (item['model_path'], item['bone'])
-        if key not in fittings:
-            fittings[key] = fitting(resources, item)[:3]
-        source, names, centered = fittings[key]
+        if not item.get('custom'):
+            key = (item['model_path'], item['bone'])
+            if key not in fittings:
+                fittings[key] = fitting(resources, item)[:3]
+            source, names, centered = fittings[key]
         serial = row.get('serial')
         if serial is None or serial in used or any(n.startswith('mw_armor_'+str(serial)+'_') for n in reserved):
             serial = 0
             while serial in claimed or serial in used or any(n.startswith('mw_armor_'+str(serial)+'_') for n in reserved):serial += 1
         used.add(serial)
         prefix = 'mw_armor_'+str(serial)+'_'
+        if item.get('custom'):
+            # Our own mesh: like the smoke tubes, its visible side follows the host's parity.
+            host = final['bones'][row['parent']]
+            try:
+                bones, made = custom_armor.attach(root, final, host['node'], prefix, pose_matrix(row), item['plate'], assets.files,
+                                                  linear_determinant(host['world']) > 0, _set_matrix)
+            except ValueError as error:
+                raise ArmorError(str(error)) from error
+            result.append({**row, 'bones': bones, 'volumes': made, 'materials': item['materials'], 'thickness': item['thickness'],
+                           'cast_steel': False, 'passive': True, 'custom': True,
+                           'contract_sha256': hashlib.sha256(custom_armor.contract(item['plate']).encode()).hexdigest()})
+            continue
         mapping = {n: prefix+'b'+str(j) for j, n in enumerate(sorted(names))}
         volumes = {n: prefix+'v'+str(j) for j, n in enumerate(item['volumes'])}
         wrapper = block('{bone '+quote(prefix+'root')+'}')

@@ -459,12 +459,33 @@ def _expand_sound(node, defines, stack=()):
     return output
 
 
+def _interaction_defines(records):
+    """Public interaction macros also live directly inside native class records.
+
+    Do not lift event-local helper definitions out of their lexical scope, or
+    guess between different class definitions with the same name. Top-level
+    definitions retain their effective include order; local ones are handled
+    by _interaction_events at the scope where they are declared.
+    """
+    definitions={};classes={}
+    for _,record in records:
+        if record.head.casefold()=='define' and record.args:
+            definitions[record.args[0].casefold()]=record
+        else:
+            for macro in record.find_all('define'):
+                if macro.args:classes.setdefault(macro.args[0].casefold(),[]).append(macro)
+    for name,macros in classes.items():
+        if len({m.render() for m in macros})==1:definitions.setdefault(name,macros[0])
+    return definitions
+
+
 def _interaction_events(node, defines, stack=()):
     """Expose top-level event macros without expanding their runtime bodies.
 
     Nested native defines keep their own positional parameters. Expanding the
     whole event recursively would erase those parameters or rewrite effects.
     """
+    defines={**defines,**{n.args[0].casefold():n for n in node.find_all('define') if n.args}}
     result=node.clone();result.items=[]
     for item in node.items:
         macro=defines.get(item.head.casefold()) if isinstance(item,Node) and item.opener=='(' else None
@@ -494,7 +515,7 @@ def _interaction_key(node):
 
 def _validate_interaction_events(index,record):
     records,_=_load_include_graph(index,'set/interaction_entity/entity.set')
-    defines={n.args[0].casefold():n for _,n in records if n.head.casefold()=='define' and n.args}
+    defines=_interaction_defines(records)
     seen=set()
     for event in _interaction_events(record,defines).find_all('on'):
         key=_interaction_key(event)
@@ -601,7 +622,7 @@ def _entity_sound_record(index, recipient, donor, new_id, metadata=None):
     if (metadata or {}).get('operation')=='gun_swap':
         return _gun_entity_sound_record(index,recipient,donor,new_id,metadata)
     records, provenance = _load_include_graph(index, "set/interaction_entity/entity.set")
-    defines = {node.args[0].casefold(): node for _, node in records if node.head.casefold() == "define" and node.args}
+    defines = _interaction_defines(records)
 
     def record(template, optional=False):
         found = [(path, node) for path, node in records if node.head.split(" ")[0].casefold() == template.casefold()]
@@ -744,7 +765,7 @@ def _one_gun_entity_sound_record(index,recipient,donor,new_id,metadata,seed=None
     if result is None:
         result=block('{'+quote(new_id)+'}')
     records,sources=_load_include_graph(index,'set/interaction_entity/entity.set')
-    defines={n.args[0].casefold():n for _,n in records if n.head.casefold()=='define' and n.args}
+    defines=_interaction_defines(records)
     contract=metadata['gun_assembly']
     props=set(contract['donor'].get('properties',[]))
     candidates=[n for _,n in records if n.head.casefold() in {p.casefold() for p in props}]
@@ -765,12 +786,16 @@ def _one_gun_entity_sound_record(index,recipient,donor,new_id,metadata,seed=None
                     play=play.clone()
                     if name!=play.args[0]:play.atoms[1].set(name)
                     clips.append(play)
-    if clips:
-        result=_interaction_events(result,defines)
-        slot=contract['recipient']['place']
-        handler=next((n for n in result.find_all('on') if n.args[:2]==['fire',slot]),None)
-        if handler is None:
-            handler=block('{on fire '+quote(slot)+' {inherited}}');result.append(handler)
+    result=_interaction_events(result,defines)
+    slot=contract['recipient']['place']
+    previous=[n for n in result.find_all('on') if n.args[:2]==['fire',slot]]
+    if clips or previous:
+        # The selected weapon has been replaced. Its entity-specific firing
+        # script (including scripted projectiles on flamethrowers) belongs to
+        # the old weapon, not to this slot. Keep inherited engine/class dispatch;
+        # donor-owned effects are installed separately from their contracts.
+        for event in previous:result.remove(event)
+        handler=block('{on fire '+quote(slot)+' overload {inherited}}');result.append(handler)
         for play in clips:
             if play.render() not in [n.render() for n in handler.find_all('ani_play')]:handler.append(play)
     # Sound-channel ownership comes from the actual stuff sound resource's
@@ -1589,9 +1614,12 @@ def register_variant(index: ResourceIndex, compilation_result: dict, output_dir:
     previous_manifest = output / ("workshop_manifest_" + new_id + ".json")
     if previous_manifest.is_file():
         # Re-registration (stack change, repair) keeps which campaign it belongs to.
-        campaign = json.loads(previous_manifest.read_text(encoding="utf-8")).get("campaign")
+        previous = json.loads(previous_manifest.read_text(encoding="utf-8"))
+        campaign = previous.get("campaign")
         if campaign:
             provenance["campaign"] = campaign
+        if previous.get('shop_archived') and not shop:
+            provenance['shop_archived'] = True
     provenance["portraits"] = _copy_portraits(index, output, [recipient, donor], new_id)
     provenance["portrait"] = portrait_state(output, new_id)
     if provenance["portrait"]["source"] != "rendered_model":

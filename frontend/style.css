@@ -74,7 +74,6 @@ html[data-text-size=large]{--text-scale:1.2}html[data-reduce-motion=true] *,html
 #inspector-transforms>button{width:100%;white-space:normal;overflow-wrap:anywhere;line-height:1.5}
 #inspector-transforms .inspector-actions{flex-wrap:wrap}
 #inspector-transforms .inspector-actions button{min-width:80px;white-space:normal;line-height:1.5}
-.pose-help{margin:0;font-size:calc(11px * var(--text-scale,1));line-height:1.6;color:var(--muted)}
 #pivot-fields{margin:0;border:1px solid var(--line);min-width:0;padding:10px;border-radius:4px}
 #pivot-fields legend{padding:0 4px;font-size:calc(12px * var(--text-scale,1))}
 #pivot-fields .axis-fields{display:flex;gap:6px}
@@ -282,36 +281,190 @@ button:not(.icon-button):not(.text-button):disabled{background:transparent;color
 /* Selected tab: unmistakable, not a faint glow. */
 .library-tabs button.active:not(.icon-button):not(.text-button),.inspector-tabs button.active:not(.icon-button):not(.text-button){color:var(--accent);background:color-mix(in srgb,var(--accent) 18%,transparent);box-shadow:inset 0 -2px 0 var(--accent);font-weight:650}
 .library-tabs button:not(.active):not(.icon-button):not(.text-button),.inspector-tabs button:not(.active):not(.icon-button):not(.text-button){color:var(--muted)}
-/* Tool panels: one left edge and one width for every selector and button. */
-.working-target-slot{padding-left:19px;padding-right:19px}
-#operation-controls .field{margin-left:0;margin-right:0}
-#operation-controls>button,#operation-controls>div>button,#gun-fields>button,#turret-removal-actions>button{display:block;width:100%;margin:6px 0;text-align:center}
-#turret-removal-actions{margin-top:16px;padding-top:12px;border-top:1px solid var(--line)}
-/* View > Armour: tooltip that follows the cursor over the 3D view. */
-.armor-tip{position:absolute;z-index:4;pointer-events:none;display:flex;flex-direction:column;gap:3px;max-width:250px;padding:8px 10px;background:var(--panel);border:1px solid var(--accent);box-shadow:0 6px 18px #0008;font-size:calc(11px * var(--text-scale,1));color:var(--text)}.armor-tip strong{color:var(--accent);font-weight:650}.armor-tip small{color:var(--muted);line-height:1.4}
-/* Simple buttons: flat, one thin frame, no gradients, edge lines or shadowed text. Tabs, header links, tool menu and Build keep their own look. */
-button:not(.icon-button):not(.text-button){background:color-mix(in srgb,var(--input) 70%,transparent);border:1px solid color-mix(in srgb,var(--line) 75%,transparent)!important;text-shadow:none}
-button:not(.icon-button):not(.text-button)::before{content:none}
-button:not(.icon-button):not(.text-button):not(:disabled):hover{background:color-mix(in srgb,var(--accent) 12%,var(--input));border-color:color-mix(in srgb,var(--accent) 60%,transparent)!important}
-button:not(.icon-button):not(.text-button).active{background:color-mix(in srgb,var(--accent) 16%,var(--input));border-color:var(--accent)!important;color:var(--accent)}
-button:not(.icon-button):not(.text-button):disabled{background:transparent;border-color:color-mix(in srgb,var(--line) 30%,transparent)!important}
-.library-tabs button:not(.icon-button):not(.text-button),.inspector-tabs button:not(.icon-button):not(.text-button),.top-actions button:not(.icon-button):not(.text-button),.inspector-scroll button.inspector-tool-button:not(.icon-button):not(.text-button),#build-button{border-color:transparent!important}
-.inspector-scroll button.inspector-tool-button:not(.icon-button):not(.text-button){border-bottom-color:color-mix(in srgb,var(--accent) 20%,transparent)!important}
-/* Compatibility is checked on its own after every change; the manual re-check button only added noise. */
-#operation-controls>#check-again{display:none}
-/* Shop dialog: one row per workshop vehicle, its price and research stage on the right. */
-.shop-list{display:flex;flex-direction:column;gap:4px;max-height:50vh;overflow-y:auto;margin:8px 0}.shop-row{display:grid;grid-template-columns:auto 64px minmax(0,1fr) auto;gap:10px;align-items:center;padding:6px 8px;border:1px solid var(--soft-edge)}.shop-row strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.shop-row small{color:var(--muted);text-align:right}
-.shop-icon{position:relative;display:grid;place-items:center;width:64px;height:48px;color:var(--muted)}
-.shop-icon img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain}
-.shop-icon svg{width:52px;height:32px;opacity:.6}
-.shop-icon.has-image svg{visibility:hidden}
-.shop-row{grid-template-columns:auto 64px minmax(0,1fr) minmax(110px,140px) auto}
-.shop-price{display:grid;gap:3px;font-size:12px}.shop-price input{min-width:0;width:100%;box-sizing:border-box}.shop-price small{text-align:left}
-@media(max-width:700px){.shop-row{grid-template-columns:auto 64px minmax(0,1fr)}.shop-price{grid-column:3}.shop-row>.text-button{grid-column:3}}
-@media(max-width:540px){.shop-row{grid-template-columns:auto 64px minmax(0,1fr)}.shop-row small{grid-column:3;text-align:left}}
-/* Creative mode bar of the catalog: switch, then nation and type filters side by side. */
-.creative-bar{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin:0 10px 8px}.creative-bar .toggle{grid-column:1/-1}.creative-bar select{min-width:0}
+/* Tool panels, after Blender's properties editor: collapsible panels with a header bar,
+   and inside each one rows of caption (left) and control (right). */
+.editor-bottom{display:none}
+.inspector .fixed-scroll-content{padding-right:0}
+.tool-group{min-width:0;margin:8px 0 0;border:1px solid var(--soft-edge);background:color-mix(in srgb,var(--input) 35%,transparent)}
+.tool-group>summary{list-style:none;display:flex;align-items:center;gap:7px;padding:6px 9px;cursor:pointer;user-select:none;background:color-mix(in srgb,var(--control) 80%,var(--panel));font-size:calc(12px * var(--text-scale,1));color:var(--text)}
+.tool-group>summary::-webkit-details-marker{display:none}
+.tool-group>summary::before{content:'›';display:inline-block;width:9px;color:var(--muted);transition:transform .12s}
+.tool-group[open]>summary::before{transform:rotate(90deg)}
+.tool-group[open]>summary{border-bottom:1px solid var(--soft-edge)}
+.tool-group>summary:hover{color:var(--accent)}
+.tool-group>.tool-grid{padding:8px 9px 10px}
+.tool-grid{display:grid;grid-template-columns:minmax(0,38%) minmax(0,1fr);gap:5px 8px;align-items:center;min-width:0}
+.tool-grid>*{grid-column:1/-1;min-width:0}
+.tool-grid>label[for]{grid-column:1;margin:0;text-align:right;font-size:calc(11px * var(--text-scale,1));line-height:1.3;color:var(--muted)}
+.tool-grid>label[for]+*{grid-column:2}
+.tool-grid>label:not([for]){margin:4px 0 0;font-size:calc(11px * var(--text-scale,1));color:var(--muted)}
+.tool-grid select,.tool-grid input[type=number]{width:100%;min-width:0}
+.tool-grid>button,.tool-grid>div>button{width:100%}
+.tool-grid>.tool-grid{margin:0}
+.tool-primary:not(:disabled){border-color:var(--accent)!important;color:var(--accent)}
+.tool-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px;margin-top:3px}
+.tool-actions>button{width:100%;min-width:0;white-space:normal;line-height:1.3}
+.tool-actions>.wide{grid-column:1/-1}
+.tool-row{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}
+#inspector-tool-content .tool-grid small{margin:0}
+#inspector-tool-content .tool-grid small:empty{display:none}
+#inspector-tool-content .tool-grid .inspector-actions{margin:0;flex-wrap:nowrap}
+#inspector-tool-content .tool-grid .number-fields{margin:3px 0 0}
+#inspector-tool-content .tool-grid .number-fields label{display:block;margin:8px 0 4px;font-size:calc(11px * var(--text-scale,1));color:var(--muted)}
+.tool-grid .check-menu{margin:0}
+#inspector-tool-content>.field>button:first-of-type{width:100%}
+/* Limit fields share one baseline however long their captions are. */
+.joint-limits{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;align-items:stretch}
+.joint-limits label{display:flex;flex-direction:column;justify-content:space-between}
 
-/* Background work: the same central bar as a strip under the model; the 3D view stays usable. */
-.busy-overlay.passive{top:auto;bottom:40px;left:50%;right:auto;transform:translateX(-50%);flex-direction:row;flex-wrap:wrap;gap:6px 12px;padding:8px 14px;width:max-content;max-width:92%;white-space:nowrap;background:var(--panel);border:1px solid var(--line);border-radius:6px;backdrop-filter:none;pointer-events:none}.busy-overlay.passive .spinner{height:14px;width:14px}.busy-overlay.passive progress{width:140px}.busy-overlay.passive #busy-detail{display:none}.busy-overlay.passive button{pointer-events:auto}
-.check-list{display:flex;flex-wrap:wrap;gap:4px 12px;margin:6px 0 10px}.check-list label{display:flex;align-items:center;gap:6px;font-size:.95em;cursor:pointer;white-space:nowrap}.check-list input{margin:0}
+/* ==== Plain workbench ====
+   The final look. Flat neutral surfaces, one accent used only for what is
+   selected or primary, sentence-case text in the system font, and the same
+   spacing everywhere. Earlier decorative layers (stripes, glows, gradient
+   rules on every button, condensed capitals) are switched off here. */
+:root{--bg:#1e1e1e;--panel:#2c2c2c;--input:#1f1f1f;--control:#3f3f3f;--hover:#505050;--line:#6a6a6a;--text:#ececec;--muted:#bababa;
+  --accent:#e2a63d;--selected:#43330f;--viewport:#262626;--on-accent:#1b1b1b;--radius:4px;--gap:12px;
+  /* Derived, so every colour theme keeps the same quiet edges and scrollbars. */
+  --soft-edge:color-mix(in srgb,var(--line) 40%,var(--panel));--thumb:color-mix(in srgb,var(--muted) 45%,var(--panel));
+  --command-font:Workshop,'Segoe UI','Microsoft YaHei UI',sans-serif}
+body{font-size:calc(13px * var(--text-scale,1));line-height:1.4;-webkit-font-smoothing:antialiased}
+.library,.inspector{background-image:none;background-color:var(--panel)}
+.eyebrow,.editor-top h1,#inspector-tool-title,.dialog-heading h2{font-family:inherit;letter-spacing:0;text-transform:none;color:var(--text)}
+
+/* Top bar: slim, quiet, the actions read as a menu. */
+.appbar{height:46px;padding:0 14px;gap:14px;background:var(--panel);box-shadow:none;border-bottom:1px solid var(--bg)}
+.brand{min-width:0;gap:9px}
+.brand-mark{width:26px;height:26px;border:0;border-radius:var(--radius);background:var(--accent);color:var(--on-accent);font-size:calc(11px * var(--text-scale,1));letter-spacing:0}
+.brand strong{font-size:calc(13px * var(--text-scale,1));font-weight:600;letter-spacing:.02em}
+.version{border:0;padding:2px 6px;border-radius:var(--radius);background:var(--bg);color:var(--muted)}
+.top-actions{gap:2px}
+.lang-select{background:var(--input);border-color:var(--soft-edge)}
+.statusbar{background:var(--panel);border-top:1px solid var(--bg);padding:0 14px;font-size:calc(12px * var(--text-scale,1))}
+
+/* Buttons: one flat gray family. */
+button:not(.icon-button):not(.text-button){font-family:inherit;font-stretch:normal;font-size:calc(12.5px * var(--text-scale,1));font-weight:400;letter-spacing:0;text-transform:none;text-shadow:none;line-height:1.3;
+  color:var(--text);background:var(--control);border-radius:var(--radius);padding:6px 10px;transition:background .1s}
+button:not(.icon-button):not(.text-button)::before{content:none}
+button:not(.icon-button):not(.text-button):not(:disabled):hover{color:var(--text);background:var(--hover)}
+button:not(.icon-button):not(.text-button).active{color:var(--on-accent);background:var(--accent);font-weight:600}
+button:not(.icon-button):not(.text-button).active:not(:disabled):hover{color:var(--on-accent);background:color-mix(in srgb,var(--accent) 88%,#fff)}
+button:not(.icon-button):not(.text-button):disabled,button:not(.icon-button):not(.text-button):disabled:hover{color:color-mix(in srgb,var(--muted) 55%,var(--panel));background:color-mix(in srgb,var(--control) 38%,var(--panel));text-shadow:none}
+button:focus-visible,.unit-card:focus-visible,summary:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+button.primary:not(.icon-button):not(.text-button),.dialog-footer button.primary{color:var(--on-accent);background:var(--accent);font-weight:600;text-shadow:none}
+button.primary:not(.icon-button):not(.text-button):not(:disabled):hover{color:var(--on-accent);background:color-mix(in srgb,var(--accent) 88%,#fff);box-shadow:none}
+button.subtle:not(.icon-button):not(.text-button),.top-actions button:not(.icon-button):not(.text-button){background:transparent;color:var(--text);padding:5px 9px;font-size:calc(12.5px * var(--text-scale,1))}
+.top-actions button:not(.icon-button):not(.text-button):not(:disabled):hover{background:var(--control)}
+.top-actions button:not(.icon-button):not(.text-button):disabled{background:transparent}
+
+/* Fields. */
+input,select,textarea,.ss-button{background:var(--input);color:var(--text);border:1px solid var(--soft-edge);border-radius:var(--radius);padding:6px 8px}
+.ss-button{padding:6px 8px}
+input:focus,select:focus,textarea:focus{border-color:var(--accent);box-shadow:none}
+label{font-size:calc(12px * var(--text-scale,1));color:var(--muted);margin-bottom:5px}
+.ss-pop{border-radius:var(--radius);border:1px solid var(--soft-edge);box-shadow:0 8px 24px #0008}
+.ss-list li.active{box-shadow:none;background:var(--selected)}
+
+/* Library. */
+.campaign-picker{padding:12px 12px 8px}
+.campaign-summary{margin:0 12px 10px;padding:9px 11px;border:0;border-radius:var(--radius);background:var(--input);box-shadow:none}
+.library-tabs{padding:0 12px;gap:2px;background:none;border-top:0;border-bottom:1px solid var(--soft-edge)}
+.library-tabs button:not(.icon-button):not(.text-button),.inspector-tabs button:not(.icon-button):not(.text-button){background:transparent;color:var(--muted);border-radius:var(--radius) var(--radius) 0 0;padding:7px 4px;font-size:calc(12.5px * var(--text-scale,1));font-weight:400}
+.library-tabs button:not(.active):not(.icon-button):not(.text-button):not(:disabled):hover,.inspector-tabs button:not(.active):not(.icon-button):not(.text-button):not(:disabled):hover{background:color-mix(in srgb,var(--control) 45%,transparent);color:var(--text)}
+.library-tabs button.active:not(.icon-button):not(.text-button),.inspector-tabs button.active:not(.icon-button):not(.text-button){color:var(--text);background:var(--control);font-weight:600;border-bottom-color:var(--accent)!important}
+.library-tabs button+button:not(.icon-button):not(.text-button)::before,.library-tabs button.active::after{content:none}
+.search-box{margin:10px 12px 6px;padding:0 8px;border:1px solid var(--soft-edge);border-radius:var(--radius);background:var(--input)}
+.search-box input{border:0;background:none;padding:6px 0;font-size:calc(12.5px * var(--text-scale,1))}
+.selection-mode{padding:8px 12px 10px;gap:5px;border-bottom:1px solid var(--soft-edge)}
+.selection-mode span{font-size:calc(12px * var(--text-scale,1))}
+.selection-mode button:not(.icon-button):not(.text-button){padding:5px 10px;font-size:calc(12.5px * var(--text-scale,1))}
+.unit-list{padding:10px 12px 12px;gap:8px}
+.unit-card{border:1px solid transparent;border-radius:var(--radius);background:var(--input);box-shadow:none}
+.unit-card:hover{border-color:var(--line);background:var(--input)}
+.unit-card.selected-hull,.unit-card.selected-turret{border-color:var(--accent);background:var(--input);box-shadow:0 0 0 1px var(--accent)}
+.unit-details strong{top:0;left:0;right:0;padding:6px 6px 5px;background:color-mix(in srgb,var(--bg) 72%,transparent);font-family:inherit;font-size:calc(12px * var(--text-scale,1));font-weight:600;line-height:1.2;text-shadow:none}
+.unit-details .unit-meta{bottom:5px;left:7px;right:7px;font-size:calc(11px * var(--text-scale,1));color:var(--muted);text-shadow:none}
+.unit-label{bottom:24px;left:50%;right:auto;transform:translateX(-50%);padding:2px 8px;border-radius:var(--radius);background:var(--accent);color:var(--on-accent);font-family:inherit;font-size:calc(11px * var(--text-scale,1));font-weight:600;letter-spacing:0}
+.unit-icon img{filter:none}
+
+/* Viewport. */
+.viewport-toolbar{top:10px;left:10px;gap:6px}
+.viewport-toolbar button:not(.icon-button):not(.text-button){padding:5px 10px;font-size:calc(12.5px * var(--text-scale,1));background:color-mix(in srgb,var(--control) 92%,transparent)}
+.viewport-toolbar button:not(.icon-button):not(.text-button).active{background:var(--accent)}
+.segmented button:not(.icon-button):not(.text-button){border-radius:0}
+.segmented button:not(.icon-button):not(.text-button):first-child{border-radius:var(--radius) 0 0 var(--radius)}
+.segmented button:not(.icon-button):not(.text-button):last-child{border-radius:0 var(--radius) var(--radius) 0}
+.segmented{gap:1px}
+.view-panel{border-radius:var(--radius);border:1px solid var(--soft-edge);background:var(--panel);box-shadow:0 8px 24px #0008}
+
+/* Inspector: one inset, one rhythm. */
+.inspector-tabs{margin:12px 12px 10px;gap:2px;border-bottom:1px solid var(--soft-edge)}
+.inspector-tabs button:not(.icon-button):not(.text-button){flex:1}
+.inspector-home{margin:0 12px 12px;gap:3px}
+.inspector-scroll .inspector-tool-button:not(.icon-button):not(.text-button){min-height:0;padding:8px 10px;text-align:left;font-family:inherit;font-size:calc(13px * var(--text-scale,1));line-height:1.3;background:transparent;border-radius:var(--radius)}
+.inspector-scroll .inspector-tool-button:not(:disabled){color:var(--text);background:transparent}
+.inspector-scroll .inspector-tool-button:not(.icon-button):not(.text-button):not(:disabled):hover{background:var(--control)}
+.inspector-scroll .inspector-tool-button::before{content:none}
+.inspector-scroll .inspector-tool-button::after{color:var(--muted)}
+.inspector-tool-heading{padding:10px 12px;margin-bottom:10px;background:var(--panel);border-top:0;border-bottom:1px solid var(--soft-edge);align-items:center}
+.inspector-tool-heading small{font-size:calc(11.5px * var(--text-scale,1))}
+.inspector-tool-heading h2,#inspector-tool-title{margin:2px 0 0;font-size:calc(15px * var(--text-scale,1));font-weight:600}
+.inspector-tool-heading button:not(.icon-button):not(.text-button){font-size:calc(12px * var(--text-scale,1));padding:5px 10px}
+.tool-hint{margin:0 12px 12px;font-size:calc(12.5px * var(--text-scale,1));line-height:1.45;color:var(--muted)}
+.tool-hint:empty{display:none}
+.field{margin:0 12px var(--gap)}
+.working-target-slot{padding:0 0 var(--gap);margin:0 0 var(--gap);border-bottom:1px solid var(--soft-edge)}
+.working-target-slot .field{margin:0 12px}
+#inspector-transforms{margin:0 12px var(--gap);gap:8px}
+#inspector-history,.inspector-actions{margin:0 12px var(--gap);gap:6px}
+#inspector-history button{flex:1}
+#inspector-tool-content .inspector-actions{margin:8px 0}
+#inspector-tool-content small,.field small{font-size:calc(12px * var(--text-scale,1));line-height:1.45;margin-top:6px;color:var(--muted)}
+.inspector-note,.inspector-details{margin:0 12px var(--gap);font-size:calc(12px * var(--text-scale,1));line-height:1.45}
+.row-builder{margin:0;gap:6px}
+.number-fields{margin:6px 0;border:0;border-radius:var(--radius);background:color-mix(in srgb,var(--control) 22%,transparent)}
+.number-fields>summary{padding:6px 9px;font-size:calc(12px * var(--text-scale,1));text-transform:none;letter-spacing:0;color:var(--text);list-style:none}
+.number-fields>summary::-webkit-details-marker{display:none}
+.number-fields>summary::before{content:'›';display:inline-block;width:12px;color:var(--muted);transition:transform .12s}
+.number-fields[open]>summary::before{transform:rotate(90deg)}
+.number-fields>summary:hover,.number-fields[open]>summary{color:var(--text)}
+.number-fields[open]{padding:0 9px 9px}.number-fields[open]>summary{margin:0 -9px 4px}
+.tool-group{margin:6px 0 0;border:0;border-radius:var(--radius);background:color-mix(in srgb,var(--control) 22%,transparent)}
+.tool-group>summary{padding:6px 9px;background:color-mix(in srgb,var(--control) 55%,var(--panel));border-radius:var(--radius);font-size:calc(12.5px * var(--text-scale,1));font-weight:600}
+.tool-group[open]>summary{border-bottom:0}
+.tool-group>summary:hover{color:var(--text);background:var(--control)}
+.tool-group>.tool-grid{padding:9px}
+.tool-grid>label[for],.tool-grid>label:not([for]){font-size:calc(12px * var(--text-scale,1))}
+.tool-primary:not(:disabled){border-color:transparent!important}
+button.tool-primary:not(.icon-button):not(.text-button):not(:disabled){color:var(--on-accent);background:var(--accent);font-weight:600}
+button.tool-primary:not(.icon-button):not(.text-button):not(:disabled):hover{color:var(--on-accent);background:color-mix(in srgb,var(--accent) 88%,#fff)}
+.crew-row{border:0;border-radius:var(--radius);background:var(--input)}
+
+/* Build area: the one primary action. */
+.build-panel{padding:10px 12px 12px;background:var(--panel);box-shadow:none;border-top:1px solid var(--soft-edge)}
+#build-button:not(.icon-button):not(.text-button){min-height:36px;font-family:inherit;font-size:calc(14px * var(--text-scale,1));font-weight:600;letter-spacing:0;text-shadow:none;color:var(--on-accent);background:var(--accent);border-radius:var(--radius)}
+#build-button:not(.icon-button):not(.text-button):not(:disabled):hover{color:var(--on-accent);background:color-mix(in srgb,var(--accent) 88%,#fff)}
+#build-button:not(.icon-button):not(.text-button):disabled{color:color-mix(in srgb,var(--muted) 55%,var(--panel));background:color-mix(in srgb,var(--control) 38%,var(--panel))}
+#build-hint{font-size:calc(12px * var(--text-scale,1));color:var(--muted)}
+
+/* Dialogs and floating help. */
+dialog{border:1px solid var(--soft-edge);border-radius:6px;padding:20px;box-shadow:0 16px 48px #000a;background:var(--panel)}
+.part-card{border-radius:var(--radius);box-shadow:none}
+.control-help,.completion-notice{border-radius:var(--radius);border-color:var(--soft-edge);background:var(--panel)}
+
+/* Scrollbars: thin and flat. */
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-track{background:transparent;border:0}
+::-webkit-scrollbar-thumb{background-color:var(--thumb);background-image:none;border:2px solid var(--panel);border-radius:6px;box-shadow:none;min-height:30px}
+::-webkit-scrollbar-thumb:hover{background-color:var(--muted)}
+.fixed-scrollbar{width:8px;right:2px}
+.fixed-scrollbar::before{content:none}
+.fixed-scroll-thumb{width:8px;border:0;border-radius:4px;background-color:var(--thumb);background-image:none;box-shadow:none}
+.fixed-scrollbar:hover .fixed-scroll-thumb,.fixed-scrollbar:focus-visible .fixed-scroll-thumb{background-color:var(--muted)}
+.panel-resizer::before{background:var(--bg)}
+.panel-resizer:hover::before,.panel-resizer:focus-visible::before{background:var(--accent)}
+/* Armour readout: follows the pointer over the 3D view. */
+.armor-tip{position:absolute;z-index:6;max-width:280px;padding:9px 11px;pointer-events:none;border:1px solid var(--soft-edge);border-radius:var(--radius);background:color-mix(in srgb,var(--panel) 94%,transparent);box-shadow:0 6px 18px #0008;color:var(--text);font-size:calc(12.5px * var(--text-scale,1));line-height:1.5}
+.armor-tip strong{display:block;margin-bottom:3px;font-size:calc(13px * var(--text-scale,1));font-weight:600}
+.armor-tip span{display:block;color:var(--muted)}
+.armor-tip span:first-of-type{color:var(--text)}
+.armor-tip small{display:block;margin-top:5px;color:var(--muted);font-size:calc(11.5px * var(--text-scale,1))}

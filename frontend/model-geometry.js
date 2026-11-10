@@ -36,7 +36,7 @@ function reverseLateral(matrix){for(const index of [4,5,6])matrix.elements[index
 
 function applySeatFrame(frame,saved){
   frame.matrix.copy(saved.proper);
-  if(saved.parentSign<0)reverseLateral(frame.matrix);
+  if(saved.parentSign*saved.viewSign<0)reverseLateral(frame.matrix);
   // Correct anatomy around the animated body anchor, not the socket's origin.
   // Otherwise a pose's lateral offset is reflected to the other side as well.
   for(let r=0;r<3;r++)frame.matrix.elements[12+r]=saved.origin.reduce(
@@ -62,11 +62,14 @@ export function seatFrame(rotation) {
   const native=frame.matrix.clone();
   if(frame.matrix.determinant()<0)reverseLateral(frame.matrix);
   frame.matrixAutoUpdate=false;
-  seatFrames.set(frame,{native,proper:frame.matrix.clone(),parentSign:1,origin:[0,0,0]});
+  seatFrames.set(frame,{native,proper:frame.matrix.clone(),parentSign:1,viewSign:1,origin:[0,0,0]});
   return frame;
 }
 
-export function updateSeatFrames(groups){
+export function updateSeatFrames(groups,camera=null){
+  // gameCamera mirrors projection instead of scene coordinates. Human anatomy
+  // needs one correction for the complete view, including that last reflection.
+  const viewSign=camera?.userData?.gameView?-1:1;
   for(const group of Object.values(groups)){
     group.updateWorldMatrix(true,true);
     group.traverse(frame=>{
@@ -74,8 +77,8 @@ export function updateSeatFrames(groups){
       // Fittings can inherit a reflected host too. Preserve the full world
       // forward/up, with one lateral correction for the complete actor frame.
       const sign=frame.parent?.matrixWorld.determinant()<0?-1:1;
-      if(sign===saved.parentSign)return;
-      saved.parentSign=sign;applySeatFrame(frame,saved);frame.updateWorldMatrix(false,true);
+      if(sign===saved.parentSign&&viewSign===saved.viewSign)return;
+      saved.parentSign=sign;saved.viewSign=viewSign;applySeatFrame(frame,saved);frame.updateWorldMatrix(false,true);
     });
   }
 }

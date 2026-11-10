@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {latestTask} from '../frontend/latest-task.js';
-import {localRequest} from '../frontend/local-request.js';
+import {localRequest,pageId} from '../frontend/local-request.js';
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 let calls=[];
 const latest=latestTask(async(signal,value)=>{calls.push(value);return value;},20);
@@ -16,6 +16,9 @@ assert.deepEqual(await localRequest('/api/job?id=private',undefined,'private-tok
 globalThis.fetch=async()=>{fetches++;throw new TypeError('Failed to fetch');};fetches=0;
 await assert.rejects(()=>localRequest('/api/generate',{name:'private'},'private-token'),/POST \/api\/generate/);
 assert.equal(fetches,1,'save/build POST must never be retried automatically');
+await assert.rejects(()=>localRequest('/api/check',{},'token'),error=>error.unreachable===true);
+{const previous=globalThis.fetch;let sent;globalThis.fetch=async(_,options)=>{sent=options.headers;return {ok:true,json:async()=>({})};};
+  await localRequest('/api/status',undefined,'token');assert.equal(sent['X-Workshop-Page'],pageId);globalThis.fetch=previous;}
 fetches=0;await assert.rejects(()=>localRequest('/api/job?id=private',undefined,'private-token'),error=>error.message.includes('GET /api/job')&&!error.message.includes('private'));
 assert.equal(fetches,2);
 globalThis.fetch=async()=>{throw new DOMException('Stopped','AbortError');};

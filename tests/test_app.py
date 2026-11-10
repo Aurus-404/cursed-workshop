@@ -242,6 +242,18 @@ class ApplicationTests(unittest.TestCase):
         self.assertEqual(compiler.call_args.args[3]['gun_swap']['recipient_place'],'gun')
         self.assertTrue(transaction.called)
 
+    def test_a_vehicle_built_for_the_shop_takes_the_price_the_player_typed(self):
+        profile,compiler,registrar,planner,transaction=self._generate_with_fixture_compiler()
+        body={'recipient_eid':'0x100','donor_eid':'0x200','transform':{'gun_swap':{'schema':1,'recipient_place':'gun','donor_place':'gun'}}}
+        self.state.generate({**body,'shop':True,'shop_cost':1234})
+        self.assertEqual(registrar.call_args.kwargs['shop']['cost'],1234)
+        self.state.generate({**body,'shop':True,'shop_cost':None})
+        self.assertNotIn('cost',registrar.call_args.kwargs['shop'],'no price of its own: the suggested one')
+        self.state.generate({**body,'shop':False,'shop_cost':1234})
+        self.assertNotIn('shop',registrar.call_args.kwargs,'not for sale')
+        from workshop.registration import RegistrationError
+        with self.assertRaises(RegistrationError):self.state.generate({**body,'shop':True,'shop_cost':-5})
+
     def test_interface_preferences_survive_restart_without_changing_game_configuration(self):
         original=copy.deepcopy(self.state.settings)
         with patch.object(self.state,'closed',side_effect=AssertionError('No game action')):
@@ -411,7 +423,7 @@ class ApplicationTests(unittest.TestCase):
                     "definition_path": target.relative_to(Path(staging)/'resource').as_posix(),
                     "ready_for_campaign": True, "files": []}
 
-        def register_fixture(index, result, staging, new_id, display):
+        def register_fixture(index, result, staging, new_id, display, **options):
             (Path(staging) / "mod.info").write_bytes(b'{mod {name "fixture generated mod"}}')
             return {"id": new_id, "mod_id": Path(staging).name, "active_sources": copy.deepcopy(index.sources)}
 
@@ -689,6 +701,29 @@ class ApplicationTests(unittest.TestCase):
         with self.assertRaises(ValueError):self.state.set_shop({'changes':{'mw_a':{'on':True,'cost':-1}}})
         rows = [json.loads(line) for line in (self.state.workspace / "history" / "builds.jsonl").read_text(encoding="utf-8").splitlines()]
         self.assertEqual([r["event"] for r in rows if r["event"] == "shop"], ["shop"]*5)
+
+        # Removing a test variant from the list must keep every resource that
+        # another campaign or a later build might still need.
+        payload=addon/'resource/entity/-vehicle/workshop/mw_a/model.ply'
+        payload.parent.mkdir(parents=True);payload.write_bytes(b'original geometry')
+        chained=addon/'assembly_mw_chained.json'
+        chained.write_text(json.dumps({'id':'mw_chained','metadata':{'recipient':'mw_a','donor':'donor'}}))
+        (addon/OWNERSHIP_FILE).write_text(json.dumps({'addon_mod':'modular_workshop:0','files':_tree_hashes(addon)}))
+        with patch('workshop.registration.rebuild_registrations',side_effect=register),patch('workshop.resources.ResourceIndex'):
+            removed=self.state.set_shop({'changes':{'mw_a':{'on':False,'archived':True}}})
+            stored=json.loads((addon/'workshop_manifest_mw_a.json').read_text())
+            self.assertTrue(stored['shop_archived']);self.assertNotIn('shop',stored)
+            self.assertTrue(self.state.shop_listing()['vehicles'][0]['archived'])
+            self.assertEqual(payload.read_bytes(),b'original geometry')
+            self.assertEqual(json.loads(chained.read_text())['metadata']['recipient'],'mw_a')
+            self.assertTrue((Path(removed['backup'])/'resource/entity/-vehicle/workshop/mw_a/model.ply').is_file())
+            with self.assertRaises(ValueError):self.state.set_shop({'changes':{'mw_a':{'on':True}}})
+            with self.assertRaises(ValueError):self.state.set_shop({'changes':{'mw_a':True}})
+            with self.assertRaises(ValueError):self.state.set_shop({'changes':{'mw_a':{'on':False,'archived':'yes'}}})
+            self.state.set_shop({'changes':{'mw_a':{'on':False,'archived':False}}})
+            self.assertFalse(self.state.shop_listing()['vehicles'][0]['archived'])
+            self.assertNotIn('shop',json.loads((addon/'workshop_manifest_mw_a.json').read_text()))
+            _owned_addon(addon,'modular_workshop:0')
 
     def test_creative_build_goes_to_the_shop_without_any_campaign(self):
         # Geofisika: any parts from the catalog, no unit spent, sold in the shop.
@@ -972,6 +1007,19 @@ class LocalHTTPTests(unittest.TestCase):
         self.assertEqual(self.request("POST", "/api/bye", {}, json.dumps({"token": self.state.token}).encode())[0], 204)
         self.assertGreaterEqual(self.server.bye, self.server.last_seen)
 
+    def test_only_the_page_that_closes_stops_counting(self):
+        self.server.pages = {}
+        headers = {"X-Workshop-Token": self.state.token}
+        self.assertEqual(self.request("GET", "/api/status", {**headers, "X-Workshop-Page": "first"})[0], 200)
+        self.assertEqual(self.request("GET", "/api/status", {**headers, "X-Workshop-Page": "second"})[0], 200)
+        self.assertEqual(sorted(self.server.pages), ["first", "second"])
+        body = json.dumps({"token": "wrong", "page": "first"}).encode()
+        self.assertEqual(self.request("POST", "/api/bye", {}, body)[0], 204)
+        self.assertEqual(sorted(self.server.pages), ["first", "second"])
+        body = json.dumps({"token": self.state.token, "page": "first"}).encode()
+        self.assertEqual(self.request("POST", "/api/bye", {}, body)[0], 204)
+        self.assertEqual(sorted(self.server.pages), ["second"])
+
     def test_browser_mode_ends_after_the_page_closes_but_not_on_reload_or_while_busy(self):
         from workshop.app import page_gone
         self.assertFalse(page_gone(None, None, False, 10_000))       # no page yet
@@ -981,6 +1029,9 @@ class LocalHTTPTests(unittest.TestCase):
         self.assertFalse(page_gone(100, 100, True, 500))             # an operation is running
         self.assertFalse(page_gone(100, None, False, 350))           # a background tab polls slowly
         self.assertTrue(page_gone(100, None, False, 450))
+        # Another tab is open and quiet: closing this one does not end the tool.
+        self.assertFalse(page_gone(100, 100, False, 150, open_pages=1))
+        self.assertTrue(page_gone(100, 100, False, 450, open_pages=1))
 
     def test_api_requires_token_and_foreign_host_or_origin_cannot_obtain_session(self):
         status, data, headers = self.request("GET", "/api/config")

@@ -102,7 +102,7 @@ def prepare():
         staging = Path(folder)
         audit.collect_notices(staging)
         instructions = (
-            f'CURSED WORKSHOP {value} - Windows x64 (WIP)\n\n'
+            f'CURSED WORKSHOP {value} - Windows x64\n\n'
             'Extract the entire ZIP. Run CursedWorkshop\\CursedWorkshop.exe.\n'
             'Keep _internal beside the executable. Python/Node.js are not required.\n'
             'If the desktop window does not open, install Microsoft Edge WebView2 Runtime\n'

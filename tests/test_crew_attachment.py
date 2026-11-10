@@ -25,6 +25,27 @@ class CrewAttachmentTests(unittest.TestCase):
   self.assertEqual(root.find('Weaponry').find('place').find('LinkBone').args,['gun'])
   self.assertEqual(root.find('Weaponry').find('place').find('gunner').args,['gunner'])
   self.assertEqual([r['fixed'] for r in report],[True,False])
+ def test_a_seat_fixed_in_a_turret_on_a_turret_goes_around_with_the_big_one(self):
+  root=parse('{game_entity {placer {place "gunner" {group "crew"}{LinkBone "gun"}}}{Weaponry {place "gun" {LinkBone "gun"}{gunner "gunner"}}}}').find('game_entity')
+  model=parse_model('{skeleton {bone basis {bone body {bone revolute turret {bone revolute small {terminator}{Position 2 0 3}{bone gun {Position 1 0 0}{VolumeView "gun.ply"}}}}}}}')
+  apply_crew_fixed(FakeResources(),root,model,{'gunner':True})
+  self.assertEqual(model['bones']['cw_crew_fixed_gunner']['parent'],'turret','fixed against its own gun, not against what carries it')
+ def test_a_module_made_to_turn_with_a_turret_takes_its_fixed_seats_along(self):
+  from workshop.modular_assembly import rehang_native_modules
+  root,model=self.setup_model();model['bones']['turret']['node'].append(block('{bone revolute "side" {Position 0 5 1}{bone "seat" {Position 1 0 0}{bone "cw_crew_follow_x"}}}'))
+  model['bones']['body']['node'].append(block('{bone "cw_crew_fixed_x" {Position 2 8 5}}'))
+  model=parse_model(model['document'].render())
+  worlds={n:model['bones'][n]['world'] for n in ('side','seat','cw_crew_fixed_x')}
+  rehang_native_modules(model,{'side':'body'},wreck='x')
+  model=parse_model(model['document'].render())
+  self.assertEqual(model['bones']['side']['parent'],'body')
+  rehang_native_modules(model,{'side':'turret'},wreck='x')
+  model=parse_model(model['document'].render())
+  self.assertEqual(model['bones']['side']['parent'],'turret')
+  self.assertEqual(model['bones']['cw_crew_fixed_x']['parent'],'turret')
+  for name,world in worlds.items():self.assertEqual(model['bones'][name]['world'],world,name)
+  before=model['document'].render();rehang_native_modules(model,{'lost':'turret','side':'gone'},wreck='x')
+  self.assertEqual(model['document'].render(),before,'a wreck can have lost either end')
  def test_switching_back_to_following_keeps_world_pose_and_does_not_duplicate_anchors(self):
   root,model=self.setup_model();apply_crew_fixed(FakeResources(),root,model,{'gunner':True})
   world=model['bones']['cw_crew_fixed_gunner']['world']

@@ -527,6 +527,19 @@ class FastVerificationTests(unittest.TestCase):
 
 
 class PruneOperationsTests(unittest.TestCase):
+    def test_latest_operation_is_kept_when_random_suffix_sorts_before_older_ones(self):
+        from workshop.transactions import prune_operations
+        import os
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp)
+            older,old_tx=self._operation(root,'20261109_120000_shop_z')
+            latest,new_tx=self._operation(root,'20261109_120000_shop_a')
+            os.utime(older,ns=(1_000_000_000,1_000_000_000))
+            os.utime(latest,ns=(2_000_000_000,2_000_000_000))
+            result=prune_operations(root,keep=1)
+            self.assertEqual(result['pruned'],[older.name])
+            self.assertTrue((new_tx/'previous_addon/resource/a.def').is_file())
+
     def _operation(self, root, name, state="committed"):
         op = root / "operations" / name
         tx = op / "operations" / "tx"

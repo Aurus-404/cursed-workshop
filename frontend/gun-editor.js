@@ -3,6 +3,8 @@ import {t} from './i18n.js';
 export function gunEditor({state,$,job,displayPart,updateSelection,selectEdit,remember,reportError,design}){
   let revision=0;const catalogs={};
   const active=()=>$('operation-select').value==='gun';
+  // A turret kept in the depot gives its guns; a chassis, or a catalog part, is not one.
+  const storedTurret=u=>!!u?.depot&&!u.creative&&u.part==='turret';
   const saved=()=>design?.active()?design.draft().guns:state.transform.gun_swaps||[];
   const key=()=>JSON.stringify([state.hull?.template,state.turret?.template,state.transform.gun_swap||null,saved()]);
   function controls(){
@@ -23,7 +25,7 @@ export function gunEditor({state,$,job,displayPart,updateSelection,selectEdit,re
     const selectedChange=$('gun-saved').value;
     $('gun-saved').replaceChildren(...saved().map((row,i)=>{
       const verified=state.designWeapons?.find(w=>w.recipient_place===row.recipient_place&&w.donor_template===row.donor_template&&w.donor_place===row.donor_place);
-      const weapon=verified?.label||label('turret',row.donor_place),source=(state.campaign?.units||[]).find(u=>u.eid===row.donor_eid)?.label||row.donor_template||'';
+      const weapon=verified?.label||label('turret',row.donor_place),source=(state.campaign?.units||[]).find(u=>u.eid===row.donor_eid)?.label||(state.campaign?.depot||[]).find(d=>d.id===row.donor_depot)?.label||row.donor_template||'';
       return new Option(`${i+1}. ${row.recipient_place} ← ${weapon}${source?' · '+source:''}`,String(i));}));
     $('gun-saved').value=selectedChange!==''&&saved()[Number(selectedChange)]?selectedChange:saved().length?'0':'';
     if(active())$('operation-count').textContent=t('2 vehículos → 1 vehículo');
@@ -34,7 +36,7 @@ export function gunEditor({state,$,job,displayPart,updateSelection,selectEdit,re
     const unit=state[part];if(!unit)return;
     if(unit.designPlaceholder&&part==='turret'){selectEmpty();return;}
     function selectEmpty(){const select=$('gun-donor');select.replaceChildren(new Option(t('Elegí primero el donante'),''));select.disabled=true;}
-    const operation=$('operation-select').value;const data=await job(design?.active()&&part==='hull'?'/api/design-catalog':'/api/gun-catalog',design?.active()&&part==='hull'?design.body():{template:unit.template});
+    const operation=$('operation-select').value;const data=await job(design?.active()&&part==='hull'?'/api/design-catalog':'/api/gun-catalog',design?.active()&&part==='hull'?design.body():{template:unit.template,...(part==='turret'&&storedTurret(unit)?{module:unit.mount||true}:{})});
     if(state[part]!==unit||$('operation-select').value!==operation)return;
     catalogs[part]=data;const select=$(part==='hull'?'gun-recipient':'gun-donor');select.replaceChildren();
     // Same-named weapons (three "MG 34" on a Nb.Fz) say where they are.
@@ -80,8 +82,9 @@ export function gunEditor({state,$,job,displayPart,updateSelection,selectEdit,re
     // for the shop, where every part only names its model.
     const owned=u=>!!u?.eid&&!u.depot&&!u.designPlaceholder;
     const designed=!!design&&(part==='hull'?owned(unit):owned(state.hull));
-    if(designed&&!(unit.creative&&part!=='hull')&&(!owned(unit)||state.tab!=='campaign'))throw Error(t('Cambiar cañón requiere dos unidades de tu campaña.'));
-    if(!designed&&!(unit.creative||state.hull?.creative)&&(design||!owned(unit)||state.tab!=='campaign'))throw Error(t('Cambiar cañón requiere dos unidades de tu campaña.'));
+    const fromDepot=part==='turret'&&storedTurret(unit)&&state.tab==='depot';
+    if(designed&&!(unit.creative&&part!=='hull')&&!fromDepot&&(!owned(unit)||state.tab!=='campaign'))throw Error(t('Cambiar cañón requiere un receptor de tu campaña y un donante: otra unidad o una torreta del depósito.'));
+    if(!designed&&!(unit.creative||state.hull?.creative)&&(design||!owned(unit)||state.tab!=='campaign'))throw Error(t('Cambiar cañón requiere un receptor de tu campaña y un donante: otra unidad o una torreta del depósito.'));
     if(!designed&&design?.active()){delete state.transform.assembly_draft;delete state.pendingTurret;if(state.turret?.designPlaceholder)state.turret=null;}
     if(designed){
       if(part==='hull'){await design.select(unit,part);await catalog('hull');controls();return;}
@@ -129,14 +132,16 @@ export function gunEditor({state,$,job,displayPart,updateSelection,selectEdit,re
     const row=saved()[index];if(!row)return;
     if(design?.active())state.transform.gun_edit={index,row:structuredClone(row)};
     saved().splice(index,1);
-    if(design?.active())state.turret=(state.campaign?.units||[]).find(u=>u.eid===row.donor_eid)||{eid:row.donor_eid,template:row.donor_template,...(row.donor_catalog?{creative:true,depot:'creative'}:{})};
+    if(design?.active())state.turret=(state.campaign?.units||[]).find(u=>u.eid===row.donor_eid)||(row.donor_depot
+      ?{depot:row.donor_depot,part:'turret',kind:'part',template:row.donor_template,label:(state.campaign?.depot||[]).find(d=>d.id===row.donor_depot)?.label||row.donor_template,...(row.donor_mount?{mount:row.donor_mount}:{})}
+      :{eid:row.donor_eid,template:row.donor_template,...(row.donor_catalog?{creative:true,depot:'creative'}:{})});
     state.transform.gun_swap={schema:1,recipient_place:row.recipient_place,donor_place:row.donor_place,...(row.upright?{upright:true}:{}),...(row.barrel_only?{barrel_only:true}:{}),...(row.drop_mantlet?{drop_mantlet:true}:{})};
     state.transform.turret=structuredClone(row.pose);await catalog('hull');await catalog('turret');await refresh();controls();
   }
   async function save(){
     const spec=state.transform.gun_swap;if(!spec?.recipient_place||!spec?.donor_place)return;
     remember();if(!design?.active())state.transform.gun_swaps??=[];
-    const row={...structuredClone(spec),pose:structuredClone(state.transform.turret),...(design?.active()?{donor_template:state.turret.template,donor_eid:state.turret.eid,...(state.turret.creative?{donor_catalog:true}:{})}:{})};
+    const row={...structuredClone(spec),pose:structuredClone(state.transform.turret),...(design?.active()?{donor_template:state.turret.template,donor_eid:state.turret.eid,...(state.turret.creative?{donor_catalog:true}:{}),...(storedTurret(state.turret)?{donor_depot:state.turret.depot,...(state.turret.mount?{donor_mount:state.turret.mount}:{})}:{})}:{})};
     const existing=saved().findIndex(r=>r.recipient_place===row.recipient_place);
     if(existing>=0)saved().splice(existing,1,row);
     else if(design?.active()&&state.transform.gun_edit)saved().splice(state.transform.gun_edit.index,0,row);else saved().push(row);

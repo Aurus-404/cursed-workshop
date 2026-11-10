@@ -31,10 +31,13 @@ game.log        the game's whole log of its last run (the crash is usually at th
 crashes/        the game's latest crash logs, if any
 mods.txt        the mods each game profile has active, in load order
 workshop.log    the tool's own log (workshop.log.1: the part before it)
+crash.log       what the tool was doing if it ever crashed outright, when there is one
 settings.json   the tool's settings (game folder and mods it reads)
 history/        every vehicle built, installed or updated with the tool
 builds/         the latest builds in full (recipe, compilation and campaign plan)
 vehicles/       how each Cursed Workshop vehicle is made now: recipe, definition, model
+resources/      effective text catalogs, macros/includes, interactions, cameras and selected entities
+                manifest.json records sources, hashes, missing files and collection limits
 save/           the campaign save currently open in the tool
 
 Your Windows user folder is shown as %USERPROFILE% and your Steam id and name are
@@ -105,7 +108,7 @@ def _light_save(save: Path) -> bytes:
 
 def build_report(destination: Path, game: Path, workspace: Path, diagnostic: str,
                  home: Path | None = None, now: datetime | None = None, addon: Path | None = None,
-                 save: Path | None = None) -> dict:
+                 save: Path | None = None, resources=None) -> dict:
     """Write the zip into destination and say what went into it. game is the
     game's data folder (profiles and log, "CONFIG:" in game.log); addon the
     installed workshop mod, whose recipes, definitions and models show how
@@ -144,7 +147,7 @@ def build_report(destination: Path, game: Path, workspace: Path, diagnostic: str
             except OSError:
                 continue
         add("mods.txt", _profile_mods(game / "profiles"))
-        for name in ("workshop.log", "workshop.log.1"):
+        for name in ("workshop.log", "workshop.log.1", "crash.log", "load-timings.log", "load-timings.log.1"):
             try:
                 add(name, _read(workspace / name, 8 * 1024 * 1024))
             except OSError:
@@ -195,4 +198,8 @@ def build_report(destination: Path, game: Path, workspace: Path, diagnostic: str
                 missing.append("save")
         else:
             missing.append("save (no campaign opened yet)")
+        from .report_resources import add_resource_snapshot, selection_from_diagnostic
+        add_resource_snapshot(resources,selection_from_diagnostic(diagnostic),add,
+                              lambda text:redact(text,home,names),
+                              SIZE_LIMIT-archive.fp.tell()-256*1024)
     return {"path": str(target), "size": target.stat().st_size, "included": included, "missing": missing}

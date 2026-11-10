@@ -1,6 +1,8 @@
 import tempfile
 import struct
+import re
 import unittest
+from types import SimpleNamespace
 from workshop.syntax import parse
 from pathlib import Path
 from workshop.compiler import (compile_assembly, CompileError, _animation_layout,
@@ -34,6 +36,82 @@ class FakeResources:
 
 
 class CompilerTests(unittest.TestCase):
+    def test_main_module_keeps_unreferenced_native_crew_but_not_other_station_operators(self):
+        for mount in ('turret','auxgun'):
+            with self.subTest(mount=mount),tempfile.TemporaryDirectory() as out:
+                r=FakeResources()
+                r.files['entity/donor/donor.def']=r.files['entity/donor/donor.def'].replace(b'{mass 9000}',b'''
+                    {placer
+                      {place "gunner" {group "crew"}{LinkBone "gunner"}}
+                      {place "charger" {group "crew"}{LinkBone "loader_point"}}
+                      {place "commander" {group "crew"}{LinkBone "observer_point"}}
+                      {place "gunner2" {group "crew"}{LinkBone "aux_seat"}}
+                    }
+                    {mass 9000}''').replace(b'{Weaponry',b'{Weaponry {place "mgun" {type "hull"}{weapon "mg"}{LinkBone "auxgun"}{gunner "gunner2"}{charger "gunner2"}}')
+                r.files['entity/donor/donor.mdl']=r.files['entity/donor/donor.mdl'].replace(b'{bone "driver"}',b'{bone "driver"}{bone "loader_point"}{bone "observer_point"}{bone "aux_seat"}{bone "auxgun"}')
+                result=compile_assembly(r,'hull','donor',{'donor_mount':mount},out,'mw_crew_native')
+                roles=set(result['metadata']['crew_roles'])
+                model=parse_model((Path(out)/'resource'/result['model_path']).read_bytes())
+                if mount=='turret':
+                    self.assertTrue({'gunner','charger','commander'}<=roles,roles)
+                    self.assertNotIn('gunner2',roles,'the hull MG operator stays with its own weapon')
+                    self.assertTrue({'loader_point','observer_point'}<=set(model['bones']))
+                else:
+                    self.assertIn('gunner2',roles)
+                    self.assertFalse({'charger','commander'}&roles,'an auxiliary module must not import the main station crew')
+
+    def test_weapon_slot_collisions_are_independent_of_crew_role_collisions(self):
+        r=FakeResources()
+        path='entity/hull/hull.def'
+        r.files[path]=r.files[path].replace(b'{Weaponry',b'{Weaponry {place "mgun2" {weapon "kept_mg"}{foresight "kept_socket"}{gunner "driver"}{basic}}')
+        path='entity/hull/hull.mdl'
+        r.files[path]=r.files[path].replace(b'{bone "driver"}',b'{bone "driver"}{bone "kept_socket"}')
+        path='entity/donor/donor.def'
+        r.files[path]=r.files[path].replace(b'{Weaponry',b'{Weaponry {place "mgun2" {weapon "donor_mg"}{foresight "gun"}{gunner "gunner"}{basic}}')
+        with tempfile.TemporaryDirectory() as out:
+            result=compile_assembly(r,'hull','donor',{},out,'mw_slots')
+            root=parse((Path(out)/'resource'/result['definition_path']).read_bytes()).find('game_entity')
+            places=root.find('Weaponry').find_all('place')
+            self.assertEqual(len(places),3,'kept and donor MGs must not collapse when their operators have distinct roles')
+            self.assertEqual(len({p.args[0] for p in places}),3)
+            self.assertEqual({p.find('weapon').args[0] for p in places},{'kept_mg','donor_mg','20mm'})
+
+    def test_auxiliary_component_volumes_reserve_names_from_previous_modules(self):
+        from workshop.compiler import _own_turret_components
+        r=FakeResources()
+        r.files['properties/vehicle.ext']=b'(define "turret" ("make_component" args turret turret)) (define "turret3" ("make_component" args turret3 turret))'
+        mapping={'turret':'module_turret'}
+        kept={'turret','module_turret3'}
+        own=_own_turret_components(r,{'turret3'},{'turret'},mapping,kept,set())
+        self.assertTrue(own)
+        self.assertNotIn(mapping['turret3'],kept,'the second module cannot reuse the first module volume identity')
+        self.assertNotEqual(mapping['turret3'],mapping['turret'])
+
+    def test_module_crew_doors_left_on_the_donor_use_real_chassis_exits(self):
+        r=FakeResources()
+        hull='entity/hull/hull.mdl'
+        r.files[hull]=r.files[hull].replace(b'{bone "driver"}',b'{bone "driver"}{bone "hull_exit" {Position 0 10 0}}')
+        r.files['entity/hull/hull.def']=r.files['entity/hull/hull.def'].replace(b'{mass 9000}',
+            b'{boarder {door "hull_exit"}}{mass 9000}')
+        donor='entity/donor/donor.def'
+        r.files[donor]=r.files[donor].replace(b'{mass 9000}',
+            b'{placer {place "gunner" {group "crew"}{LinkBone "gunner"}}}'
+            b'{boarder {door "donor_exit"}{anm "entry" {forward {end "seat"}}{reverse {end "exit"}}}'
+            b'{link "donor_exit" "gunner" {anm "entry"}{forward putoff}{reverse puton}}}'
+            b'{mass 9000}')
+        path='entity/donor/donor.mdl'
+        r.files[path]=r.files[path].replace(b'{bone "driver"}',b'{bone "driver"}{bone "donor_exit"}')
+        with tempfile.TemporaryDirectory() as out:
+            result=compile_assembly(r,'hull','donor',{},out,'mw_exit_test')
+            root=parse((Path(out)/'resource'/result['definition_path']).read_bytes()).find('game_entity')
+            model=parse_model((Path(out)/'resource'/result['model_path']).read_bytes())
+            links=[n for b in root.find_all('boarder') for n in b.find_all('link') if n.args[1:] == ['gunner']]
+            self.assertEqual(len(links),1)
+            self.assertEqual(links[0].args[0],'hull_exit')
+            self.assertIn(links[0].args[0],model['bones'])
+            self.assertEqual(links[0].find('reverse').args,['puton'])
+            self.assertNotIn('donor_exit',[n.args[0] for b in root.find_all('boarder') for n in b.find_all('door')])
+
     def test_a_donor_never_brings_ground_contacts_to_the_vehicle(self):
         # Sd.Kfz. 250, Bren, M3 and Opel + 8 cm mortar sank to the module: the
         # engine stood them on the mortar's feet (support1..3). A towed gun's
@@ -75,6 +153,18 @@ class CompilerTests(unittest.TestCase):
         chassis = parse_model(model['document'].render())['bones']['basis']['node']
         self.assertEqual(chassis.args, ['revolute', 'basis'])
         self.assertEqual(chassis.find('limits').args, ['0', '0'])
+        # The aimer's require_rotate needs {rotate} on the weapon place as well
+        # as that root: with the root alone the LVT and the 38(t) never turned.
+        place = next(p for w in root.find_all('Weaponry') for p in w.find_all('place'))
+        self.assertEqual(len(place.find_all('rotate')), 1)
+        self.assertEqual(_apply_traverse_class(resources, root, model), 'casemate', 'compiling twice')
+        self.assertEqual(len(place.find_all('rotate')), 1)
+        # Edited to a free arc, the design stops asking the driver to turn.
+        for definition in root.find_all('bone'):
+            if definition.args == ['turret']:
+                definition.find('limits').items[1:] = block('{limits -180 180}').items[1:]
+        self.assertEqual(_apply_traverse_class(resources, root, model), 'turret')
+        self.assertEqual(place.find_all('rotate'), [])
         root = built('qf25', [('gun_rot', '-5 15')])
         self.assertEqual(_apply_traverse_class(resources, root, model), 'turret')
         self.assertEqual(last(root), 'turret')
@@ -870,13 +960,118 @@ class CompilerTests(unittest.TestCase):
                               euler_matrix(),((-50,-15),(50,15)))
         self.assertEqual(report[0]['to'][1],9.0)
 
+    def test_a_seat_kept_in_the_donor_hull_stays_in_a_hull(self):
+        # The LVT(A)-4's bow loader was hung from the turret at its native
+        # distance: on a Chi-Nu that is on the ground, orbiting with the turret.
+        from workshop.compiler import _free_traverse, _static_crew
+        model=parse_model(b'{skeleton {bone "basis" {bone "body" {bone revolute "turret"} {bone revolute "arc" {limits -10 10}}}}}')
+        root=parse('{game_entity {bone "body"}}').find('game_entity')
+        self.assertTrue(_free_traverse(root,model,'turret'))
+        self.assertFalse(_free_traverse(root,model,'arc'),'a limited mount keeps its crew beside the gun')
+        self.assertFalse(_free_traverse(root,model,'body'),'a fixed bone does not turn')
+        narrowed=parse('{game_entity {bone "turret" {limits -20 20}}}').find('game_entity')
+        self.assertFalse(_free_traverse(narrowed,model,'turret'),'the definition overrides the model')
+        mounted=parse('{bone "turret" {bone "charger2"}}').children[0]
+        detached,report=_static_crew(mounted,{'charger2'},{'turret'},lambda name: translation([39,8,1]),
+                                     euler_matrix(),((-50,-20),(50,20)),floor=8.0)
+        self.assertEqual(mounted.find_all('bone'),[],'it no longer turns with the mount')
+        self.assertEqual([node.args[0] for node in detached],['charger2'])
+        self.assertEqual(report[0]['to'],[39,8,8.0],'never under the floor of the hull')
+        mounted=parse('{bone "turret" {bone "charger2"}}').children[0]
+        _,report=_static_crew(mounted,{'charger2'},{'turret'},lambda name: translation([39,8,1]),euler_matrix(),
+                              ((-50,-20),(50,20)),floor=8.0,overrides={'charger2':{'position':[5,-3,2],'yaw':None}})
+        self.assertEqual(report[0]['to'],[5,-3,2],'a hand-placed seat is used as given')
+
+    def test_the_preview_says_which_bone_the_module_will_hang_from(self):
+        # Weapon angles turns a turret placed on the turret with it, as the game does.
+        from workshop.geometry import build_preview
+        resources=FakeResources()
+        with tempfile.TemporaryDirectory() as temp:
+            result=compile_assembly(resources,'hull','donor',{'recipient_mount':'@free:turret'},temp,'vww_stack')
+            built=parse_model((Path(temp)/'resource'/result['model_path']).read_bytes())
+        self.assertEqual(build_preview(resources,'hull','hull','@free:turret')['mount_parent'],'turret')
+        self.assertEqual(built['bones']['module_turret']['parent'],'turret','the compiler agrees')
+        self.assertEqual(build_preview(resources,'hull','hull','@free')['mount_parent'],'body')
+        self.assertEqual(build_preview(resources,'hull','hull','turret')['mount_parent'],'body','replacing it: nothing above')
+        self.assertIsNone(build_preview(resources,'donor','turret')['mount_parent'])
+
+    def test_a_turret_added_to_a_turret_has_its_own_damage(self):
+        # TheOppsAreOntoMe: a hit on the small turret disabled the main one, both
+        # were component "turret". Natively each has its own (T-28: aux_turret1).
+        resources=FakeResources()
+        resources.files['properties/vehicle.ext']+=(b'(define "turret" ("make_component" args "turret" "turret")'
+                                                    b'("make_component" args "turret1" "turret")("make_component" args "turret7" "turret"))'
+                                                    b'(define "aux_turret" ("make_component" args "aux_turret1" "aux_turret1"))')
+        for name in ('hull','donor'):
+            key='entity/%s/%s.mdl'%(name,name)
+            resources.files[key]=(resources.files[key].replace(b'{bone revolute "turret" ',b'{bone revolute "turret" {Parameters "id=turret;"} ')
+                                  +b'{volume "turret1" {bone "turret"}{box 1 1 1}}')
+        resources.files['entity/donor/donor.mdl']+=b'{volume "turret7" {bone "turret"}{box 1 1 1}}'
+        with tempfile.TemporaryDirectory() as temp:
+            compile_assembly(resources,'hull','donor',{'recipient_mount':'@free'},temp,'vww_aux')
+            folder=Path(temp)/'resource/entity/-vehicle/workshop/vww_aux'
+            root=parse((folder/'vww_aux.def').read_bytes()).find('game_entity')
+            text=(folder/'vww_aux.def').read_text()+''.join(p.read_text() for p in folder.glob('*.ext'))
+            model=parse_model((folder/'vww_aux.mdl').read_bytes())
+            volumes={}
+            for document in [root,*(parse(p.read_bytes()) for p in folder.glob('*.ext'))]:
+                for volume in document.find_all('volume'):
+                    if volume.args and volume.find('component') is not None:
+                        volumes[volume.args[0]]=volume.find('component').args[0]
+            self.assertEqual(volumes.get('module_turret1'),'aux_turret1')
+            self.assertEqual(volumes.get('module_turret7'),'aux_turret1','a donor volume the chassis lacks too')
+            self.assertEqual(volumes.get('aux_turret1'),'aux_turret1')
+            self.assertNotIn('"turret1"',[v for v in volumes if volumes[v]=='aux_turret1'])
+            self.assertIn('id=aux_turret1',model['bones']['module_turret']['node'].render())
+            self.assertIn('id=turret',model['bones']['turret']['node'].render())
+            self.assertIn('("aux_turret"',text,'native repair time and order')
+        # Replacing the main turret leaves nothing to share with: it stays the main one.
+        with tempfile.TemporaryDirectory() as temp:
+            compile_assembly(resources,'hull','donor',{},temp,'vww_main')
+            folder=Path(temp)/'resource/entity/-vehicle/workshop/vww_main'
+            self.assertNotIn('aux_turret',(folder/'vww_main.mdl').read_text())
+            self.assertIn('id=turret',(folder/'vww_main.mdl').read_text())
+
+    def test_a_donor_machine_gun_as_main_weapon_stays_selectable_and_single(self):
+        # TheOppsAreOntoMe: on another tank the T-40's DShK ("main", no {basic})
+        # could not be selected and showed a second DShK backwards: a LinkBone
+        # hung the weapon's own model on a bone that already had the mesh.
+        resources=FakeResources()
+        self._truck(resources,b'{Weaponry {place "gun" {weapon "7mm"}{gunner "driver"}}}')
+        resources.files['entity/truck/truck.mdl']=resources.files['entity/truck/truck.mdl'].replace(
+            b'{bone "driver"}',b'{bone "driver"}{bone "gun"}')
+        resources.files['set/stuff/mgun/dshk_t40']=b'{from "dshk" {foresight "foresight1"}}'
+        resources.files['set/stuff/mgun/dshk']=b'{stuff {entity "dshk"}}'
+        resources.entries={key:SimpleNamespace(path=key) for key in resources.files if key.startswith('set/stuff/')}
+        def missing(*_):raise FileNotFoundError
+        resources.resolve_reference=missing
+        key='entity/donor/donor.def'
+        text=resources.files[key].decode()
+        self.assertIn('{place "gun"',text)
+        resources.files[key]=re.sub(r'\{weapon "[^"]*"[^}]*\}','{type "main"}{weapon "dshk_t40" filled}',text,count=1).encode()
+        model=resources.files['entity/donor/donor.mdl'].decode()
+        if 'foresight1' not in model:
+            model=model.replace('{bone "gun"','{bone "gun" {bone "foresight1"}',1)
+        resources.files['entity/donor/donor.mdl']=model.encode()
+        with tempfile.TemporaryDirectory() as temp:
+            compile_assembly(resources,'truck','donor',{'recipient_mount':'@free'},temp,'vww_dshk')
+            folder=Path(temp)/'resource/entity/-vehicle/workshop/vww_dshk'
+            root=parse((folder/'vww_dshk.def').read_bytes()).find('game_entity')
+            place=next(p for w in root.find_all('Weaponry') for p in w.find_all('place')
+                       if p.find('weapon') is not None and p.find('weapon').args[0]=='dshk_t40')
+            self.assertIsNotNone(place.find('basic'),'a secondary main weapon can be selected')
+            self.assertIsNone(place.find('LinkBone'),'its model is already in the vehicle')
+            self.assertIn(place.find('foresight').args[0],parse_model((folder/'vww_dshk.mdl').read_bytes())['bones'])
+
     def test_free_mount_role_collision_keeps_pose_and_both_bone_bindings(self):
         resources=FakeResources()
         self._truck(resources,b'{placer {place "gunner" {LinkBone "gunner"}{group "crew"}}}'
                     b'{Weaponry {place "mgun" {weapon "7mm"}{gunner "gunner"}}}'
                     b'{boarder {anm "gunner" {forward {end "chassis_gunner_pose"}}}}')
         resources.files['entity/truck/truck.mdl']=resources.files['entity/truck/truck.mdl'].replace(
-            b'{bone "driver"}',b'{bone "driver"}{bone "gunner"}')
+            b'{bone "driver"}',b'{bone "driver"}{bone "gunner"}{bone "emit1"}')
+        resources.files['entity/truck/truck.def']=resources.files['entity/truck/truck.def'].replace(
+            b'{game_entity',b'{game_entity {boarder {door "emit1"}}')
         key='entity/donor/donor.def'
         resources.files[key]=(resources.files[key].replace(b'{gunner "gunner"}',b'')
             .replace(b'{mass 9000}',
@@ -1219,6 +1414,8 @@ class CompilerTests(unittest.TestCase):
         # In game the driver ended up on a passenger seat: the armored-car
         # donor's "left" entry (with its own door clip) replaced the tank's.
         resources=FakeResources()
+        resources.files['entity/hull/hull.mdl']=resources.files['entity/hull/hull.mdl'].replace(
+            b'{bone "driver"}',b'{bone "driver"}{bone "emit1"}')
         hull,donor='entity/hull/hull.def','entity/donor/donor.def'
         resources.files[hull]=resources.files[hull].replace(b'{mass 9000}',
             b'{boarder {anm "left" {forward {begin "board_tank"}}}}{placer {place "driver" {group "crew"}}}'

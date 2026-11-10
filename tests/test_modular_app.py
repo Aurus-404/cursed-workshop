@@ -53,6 +53,23 @@ class ModularApplicationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'catálogo'):
             self.prepare({'assembly_draft':{'schema':1,'turrets':[{**row,'donor_template':'missing_vehicle'}],'guns':[]}},catalog=('test_donor',))
 
+    def test_a_gun_from_a_stored_turret_uses_up_that_part_and_leaves_nothing(self):
+        from workshop.depot import Depot
+        source=str(self.root/'source.sav')
+        turret,chassis=Depot(self.state.workspace).apply(source,[{'part':'turret','template':'kept','label':'Torreta'},{'part':'hull','template':'kept','label':'Chasis'}],[])
+        row={'schema':1,'recipient_place':'mgun1','donor_place':'gun','donor_template':'kept','donor_depot':turret['id']}
+        design=lambda r:{'assembly_draft':{'schema':1,'turrets':[],'guns':[r]}}
+        offered={'weapons':[{'place':'gun','available':True}]}
+        with patch('workshop.gun_assembly.discover',return_value=offered) as found:
+            result,draft,_=self.prepare(design(row))
+        self.assertEqual(found.call_args.args[1],'kept');self.assertIs(found.call_args.kwargs['module'],True)
+        self.assertEqual(draft.call_args.args[1],'0x100')
+        self.assertEqual(result['depot_change'],{'add':[],'take':[turret['id']]})
+        with patch('workshop.gun_assembly.discover',return_value={'weapons':[]}),self.assertRaisesRegex(ValueError,'torreta guardada'):
+            self.prepare(design(row))
+        with self.assertRaisesRegex(ValueError,'ya no coincide'):
+            self.prepare(design({**row,'donor_depot':chassis['id']}))
+
     def test_equipped_depot_entry_uses_exported_source_and_exact_mount(self):
         result,_,_=self.prepare({'assembly_draft':{'schema':1,'removals':[{'mount':'turret'}],'turrets':[],'guns':[]}},
             equipped_source={'removed_mount':'aux1','template':'mw_equipped_parts','source_mount':'aux1'})

@@ -11,6 +11,33 @@ from workshop.syntax import parse
 
 
 class RegistrationTests(unittest.TestCase):
+    def test_replaced_weapon_merges_fire_declared_by_a_native_class_macro(self):
+        from workshop.registration import _entity_sound_record, _validate_interaction_events, _interaction_events
+        self.write('set/stuff/gun/test_cannon','{weapon_bullet {fireSound "cannon/Shared/NewGun/"}}')
+        self.write('set/interaction_entity/tank/mace.inc','''
+          {"special_weapon_class" (define "native_burst" {on fire "%0" overload {view start "%0"}})}
+          {"base tank" ("base_sound") ("native_burst" args special_slot)}
+          {"donor tank" ("donor_sound") {on fire "gun" {ani_play "recoil"}}}''',mod=True)
+        self.index.build()
+        metadata={'operation':'gun_swap','gun_assembly':{'donor':{'place':'gun','weapon':'test_cannon','properties':[]},
+                  'recipient':{'place':'special_slot'},'sequences':['recoil']}}
+        record,_,_=_entity_sound_record(self.index,'base','donor','mw_class_macro',metadata)
+        native=parse('{class (define "native_burst" {on fire "%0" overload {view start "%0"}})}').children[0]
+        events=_interaction_events(record,{'native_burst':native.find('define')}).find_all('on')
+        matching=[n for n in events if n.args[:2]==['fire','special_slot']]
+        self.assertEqual(len(matching),1,'class macros must be expanded before adding a firing handler')
+        self.assertIn('ani_play "recoil"',matching[0].render())
+        self.assertNotIn('view start',matching[0].render(),'the old weapon firing effect must not survive its replacement')
+        _validate_interaction_events(self.index,record)
+        metadata['gun_assembly']['sequences']=[]
+        without_clip,_,_=_entity_sound_record(self.index,'base','donor','mw_no_clip',metadata)
+        event=next(n for n in without_clip.find_all('on') if n.args[:2]==['fire','special_slot'])
+        self.assertNotIn('view start',event.render(),'the old firing script is removed even if the donor has no recoil clip')
+        self.assertIn('overload',event.args)
+        # Validation must also catch the same error in previously generated files.
+        duplicate=parse('{"mw_bad tank" ("native_burst" args special_slot) {on fire "special_slot" {inherited}}}').children[0]
+        with self.assertRaises(RegistrationError):_validate_interaction_events(self.index,duplicate)
+
     def test_player_shop_ignores_part_research_and_does_not_register_ai_purchases(self):
         self.write('script/multiplayer/units/ger/conquest.ger.lua','Purchases["conquest.ger"] = {{Units = {{unit="base"}}}}')
         self.write('set/multiplayer/units/conquest/mace.set',
@@ -139,7 +166,7 @@ class RegistrationTests(unittest.TestCase):
         self.assertNotIn('ani_play "recoil"}',main[0].render().replace(' ',''),'the shared receiver clip is not played by the new gun')
         self.assertEqual(provenance['gun_native_fire_clips'],['recoil_main'])
 
-    def test_gun_fire_merges_into_parameterized_native_event_without_losing_other_slots(self):
+    def test_gun_fire_replaces_parameterized_native_event_without_losing_other_slots(self):
         from workshop.registration import _entity_sound_record,_interaction_events,_load_include_graph
         self.write('set/stuff/gun/test_cannon','{weapon_bullet {fireSound "cannon/Shared/NewGun/"}}')
         self.write('set/interaction_entity/tank/native.inc','''
@@ -154,8 +181,8 @@ class RegistrationTests(unittest.TestCase):
         record,_,_=_entity_sound_record(self.index,'base','donor','mw_fire',metadata)
         events=record.find_all('on');main=[n for n in events if n.args[:2]==['fire','main']]
         self.assertEqual(len(main),1);self.assertIn('overload',main[0].args)
-        self.assertIn('native_fx',main[0].render());self.assertIn('ani_play "recoil"',main[0].render())
-        self.assertIn('flash%0',main[0].render());self.assertIn('args 06',main[0].render())
+        self.assertNotIn('native_fx',main[0].render());self.assertIn('ani_play "recoil"',main[0].render())
+        self.assertNotIn('flash%0',main[0].render());self.assertIn('{inherited}',main[0].render())
         self.assertEqual(len([n for n in events if n.args[:2]==['fire','coax']]),1)
 
     def test_same_event_type_on_different_weapon_slots_is_not_collapsed(self):
@@ -621,6 +648,9 @@ class RegistrationTests(unittest.TestCase):
         # One shared addon serves every campaign; when the active mods change,
         # registrations are derived again from the new stack's files.
         register_variant(self.index, self.result, self.output, "mw_new", "Hybrid")
+        manifest_path=self.output/'workshop_manifest_mw_new.json'
+        manifest=json.loads(manifest_path.read_text());manifest['shop_archived']=True
+        manifest_path.write_text(json.dumps(manifest))
         (self.output / "assembly_mw_new.json").write_text(json.dumps({"id": "mw_new", "metadata": self.result["metadata"]}))
         self.write("set/multiplayer/units/conquest/mace.set", '{"base" ("vehicle2" side(ger) period(mid) min_stage(3) max_stage(8) cp(16) cw(4) crew1(tankman:3) crew2(commander:1)) {cost 500}}', mod=True)
         changed = ResourceIndex(self.game, [self.mod]).build()
@@ -631,6 +661,7 @@ class RegistrationTests(unittest.TestCase):
             self.assertIn("{cost 500}", roster)
             self.assertIn('include "modular_workshop/mw_new.set"', (self.output / "resource/set/multiplayer/units/roster_conquest.set").read_text())
             self.assertEqual(recorded_stack(self.output), stack_signature(changed))
+            self.assertTrue(json.loads(manifest_path.read_text())['shop_archived'],'changing sources must not restore a removed listing')
         finally:
             changed.close()
 

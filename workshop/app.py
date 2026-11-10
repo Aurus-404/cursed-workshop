@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import base64
 import copy
+import faulthandler
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime
@@ -931,7 +932,8 @@ class AppState:
         addon=self.addon_root() if self.settings.get('game_root') else None
         with self.lock:timings=self.diagnostics.timing_report()
         diagnostic=str(body.get('diagnostic') or '')[:400_000]+'\n\n'+timings
-        result=build_report(folder,game,self.workspace,diagnostic,addon=addon,save=save)
+        with self.lock:resources=self.index
+        result=build_report(folder,game,self.workspace,diagnostic,addon=addon,save=save,resources=resources)
         result['download_url']='/api/error-report?name='+urlquote(Path(result['path']).name)
         if os.name=='nt' and not body.get('quiet'):
             try: subprocess.Popen(['explorer','/select,',result['path']])
@@ -1119,7 +1121,8 @@ class AppState:
                            'gun_elevation':elevation_joint(final_root,model),
                            'crew_visibility':result.get('metadata',{}).get('crew_visibility',[]),
                            'passengers':self.passenger_listing(final_root,model,display_frame),
-                           'commander_position':point(display_frame,point(locator['world'],[0,0,2]) if locator else model['anchor'])}
+                           'commander_position':point(display_frame,point(locator['world'],[0,0,2]) if locator else model['anchor']),
+                           'shop_suggested_cost':self.suggested_shop_cost(result.get('metadata') or {})}
                 except Exception as error:
                     from .cancellation import JobCancelled
                     if isinstance(error, JobCancelled):raise
@@ -1129,10 +1132,32 @@ class AppState:
             cache[key]=value
         return cache[key]
 
+    def shop_price_table(self):
+        """Roster prices, read once per resource index."""
+        from .registration import shop_prices
+        cached=getattr(self,'_shop_prices',None)
+        if cached is None or cached[0] is not self.index:
+            cached=self._shop_prices=(self.index,shop_prices(self.index))
+        return cached[1]
+
+    def suggested_shop_cost(self,metadata):
+        """What the shop would ask for this design, by the rule it uses once built.
+        None when it cannot say: a price never stops a vehicle from being built."""
+        from .cancellation import JobCancelled
+        from .registration import _recipes, shop_offer, vehicle_parts
+        try:
+            addon=self.addon_root()
+            recipes=_recipes(addon) if addon.is_dir() else {}
+            return shop_offer(self.index,vehicle_parts(metadata),recipes,prices=self.shop_price_table())['suggested_cost'] or None
+        except JobCancelled:raise
+        except Exception as error:
+            logging.info('No suggested shop price: %s',error)
+            return None
+
     def gun_catalog(self,body):
         from .gun_assembly import discover
         if self.index is None:self.index_resources()
-        return discover(self.index,body['template'])
+        return discover(self.index,body['template'],module=body.get('module') or None)
 
     def support_catalog(self, body=None):
         from .support_vehicle import public_catalog
@@ -1271,7 +1296,7 @@ class AppState:
                     validate_limits({'turret':row.get('joint_limits') or {}},('turret',))
                     row.pop('joint_limits',None)
                     pose=row.get('pose') or {};pose_matrix(pose)
-                    if not any(pose.get('position',[])) and not any(pose.get('rotation',[])) and not any(pose.get('pivot',[])):continue
+                    if not row.get('mount_parent') and not any(pose.get('position',[])) and not any(pose.get('rotation',[])) and not any(pose.get('pivot',[])):continue
                 kept.append(row)
             draft['turrets']=kept
         return body
@@ -1370,6 +1395,8 @@ class AppState:
             # seating would move the native turret just by selecting it.
             result['hull']['seat']=result['turret']['seat']=0
             result['turret']['native_module']=True
+            # This hull leaves the module out, so it still shows the old carrier.
+            if pending.get('mount_parent') in result['hull']['module_hosts']:result['hull']['mount_parent']=pending['mount_parent']
         else:
             result={'hull':build_preview(index,template,'full',seats=seat_markers(index,template),include_inventory=True),
                 'turret':{'meshes':[],'seats':[],'joints':[],'mounts':[],'anchor':[0,0,0],'anchor_name':'','seat':0,'diagnostics':[]}}
@@ -1417,7 +1444,9 @@ class AppState:
         compiler as a combination, and only this unit is replaced.
         """
         from .geometry import parse_model
-        if self.snapshot is None or self.index is None: raise ValueError('Abrí una campaña y sus recursos primero.')
+        if self.snapshot is None: raise ValueError('Abrí una campaña y sus recursos primero.')
+        # Publishing the addon (Shop, Update vehicles) drops the index: the next operation reads it again.
+        if self.index is None: self.index_resources()
         units={u['eid']:u for u in (self.campaign_data().get('units') or self.snapshot.to_dict()['units'])}
         unit=units.get(body.get('eid'))
         if not unit or unit['kind']!='vehicle': raise ValueError('Elegí un vehículo de tu partida para editarlo.')
@@ -1452,12 +1481,13 @@ class AppState:
     def generate(self,body):
         from .compiler import compile_assembly
         from .registration import (register_variant, rebuild_registrations, recorded_stack, stack_signature, write_stack,
-                                   set_campaign, describe_addon)
+                                   set_campaign, describe_addon, shop_cost)
         from .resources import ResourceIndex
         from .campaign import plan_assembly, plan_refit, plan_edit
         from .transactions import prepare_transaction, OWNERSHIP_FILE, _owned_addon
         self.closed()
-        if self.snapshot is None or self.index is None: raise ValueError('Abrí una campaña y sus recursos primero.')
+        if self.snapshot is None: raise ValueError('Abrí una campaña y sus recursos primero.')
+        if self.index is None: self.index_resources()
         if getattr(self,'unresolved_mods',[]): raise ValueError('Faltan mods de la campaña: '+', '.join(self.unresolved_mods))
         snapshot=self.snapshot
         data=snapshot.to_dict()
@@ -1499,6 +1529,11 @@ class AppState:
                     if item['part']!='turret' or item['template']!=row['donor_template']:raise ValueError('El donante guardado ya no coincide con una unidad de la campaña.')
                     if item.get('mount') and row.get('donor_mount')!=item['mount']:
                         raise ValueError('Elegí el montaje guardado en esa pieza del depósito.')
+                    if 'donor_place' in row:
+                        from .gun_assembly import discover
+                        stored=discover(self.index,item['template'],module=item.get('mount') or True)['weapons']
+                        if not any(w['available'] and w['place']==row['donor_place'] for w in stored):
+                            raise ValueError('Esa arma no está en la torreta guardada en el depósito.')
                     continue
                 unit=units.get(row.get('donor_eid'))
                 if not unit or unit['kind']!='vehicle' or unit['template']!=row['donor_template'] or unit['eid']==recipient['eid']:
@@ -1637,6 +1672,7 @@ class AppState:
             from .registration import vehicle_parts
             # "Sell in the shop": priced from the units it is made of (registration.shop_offer).
             shop={'parts':vehicle_parts(result.get('metadata') or {})} if body.get('shop') else None
+            if shop and body.get('shop_cost') is not None:shop['cost']=shop_cost(body['shop_cost'])
             registration=register_variant(self.index,result,staging,new_id,name,**({'shop':shop} if shop else {}))
         set_campaign(staging,new_id,data.get('campaign_name') or Path(data['source_path']).stem)
         describe_addon(staging)
@@ -1670,6 +1706,8 @@ class AppState:
             if eid and eid not in complete_donors and eid not in donor_hulls and not any(r.get('donor_eid')==eid for r in spec.get('guns',[])):
                 donor_hulls.add(eid)
                 leftovers.append({'part':'hull','template':turret['donor_template'],'source':eid,'label':'Chasis de '+turret['donor_template']})
+        for gun in spec.get('guns',[]) if drafting else []:
+            if gun.get('donor_depot'):depot_change['take'].append(gun['donor_depot'])
         self.closed()
         with self.phase('Build: prepare verified transaction'):
             transaction=prepare_transaction(operation,snapshot,plan,addon_directory=staging)
@@ -1806,15 +1844,12 @@ class AppState:
     def shop_listing(self):
         """Workshop vehicles and whether each is sold in the Conquest shop, with
         the price and research stage it gets. Reading it changes nothing."""
-        from .registration import RegistrationError, _recipes, shop_offer, shop_prices, vehicle_parts, SHOP_POLICY
+        from .registration import RegistrationError, _recipes, shop_offer, vehicle_parts, SHOP_POLICY
         addon=self.addon_root();rows=[]
         if not (addon/'mod.info').is_file():return {'vehicles':rows,'priced':False}
         # Reading only: applying (set_shop) verifies the addon is ours.
         recipes=_recipes(addon)
-        cached=getattr(self,'_shop_prices',None)
-        if self.index is not None and (cached is None or cached[0] is not self.index):
-            cached=self._shop_prices=(self.index,shop_prices(self.index))  # read once per resource index
-        prices=cached[1] if self.index is not None else None
+        prices=self.shop_price_table() if self.index is not None else None
         for manifest in sorted(addon.glob('workshop_manifest_*.json')):
             try:data=json.loads(manifest.read_text(encoding='utf-8'))
             except (OSError,ValueError):continue
@@ -1822,6 +1857,7 @@ class AppState:
             if identifier not in recipes:continue
             parts=vehicle_parts(recipes[identifier])
             row={'id':identifier,'name':data.get('display_name') or identifier,'on':bool(data.get('shop')),'parts':parts,
+                 'archived':bool(data.get('shop_archived')),
                  'campaign':data.get('campaign'),'needs_update':bool(data.get('shop')) and data['shop'].get('policy')!=SHOP_POLICY}
             stored=data.get('shop') or {};row['custom_cost']=stored.get('cost')
             row['cost']=stored.get('cost',(stored.get('offer') or {}).get('cost',0))
@@ -1867,7 +1903,7 @@ class AppState:
         spending no unit of any campaign. The vehicle goes to the Conquest shop
         of its chassis army at the price of its parts; no save is written."""
         from .compiler import compile_assembly
-        from .registration import register_variant, rebuild_registrations, recorded_stack, stack_signature, write_stack, describe_addon, vehicle_parts
+        from .registration import register_variant, rebuild_registrations, recorded_stack, stack_signature, write_stack, describe_addon, vehicle_parts, shop_cost
         from .resources import ResourceIndex
         from .transactions import OWNERSHIP_FILE
         self.closed()
@@ -1914,7 +1950,9 @@ class AppState:
         result['campaign_plan']={}
         name=name or (self.index.label_for(recipient)+' + '+self.index.label_for(donor))
         with self.phase('Creative: register for the shop'):
-            registration=register_variant(self.index,result,staging,new_id,name,shop={'parts':vehicle_parts(result.get('metadata') or {})})
+            shop={'parts':vehicle_parts(result.get('metadata') or {})}
+            if body.get('shop_cost') is not None:shop['cost']=shop_cost(body['shop_cost'])
+            registration=register_variant(self.index,result,staging,new_id,name,shop=shop)
         describe_addon(staging);write_stack(staging,self.index,(rebuilt or {}).get('skipped'))
         game=self.closed() or {}
         previous=self._publish_addon(operation,staging,original)
@@ -1946,7 +1984,14 @@ class AppState:
             if type(value) is not bool:
                 if not isinstance(value,dict) or type(value.get('on')) is not bool:
                     raise ValueError('Configuración de tienda inválida.')
+                if 'archived' in value and type(value['archived']) is not bool:
+                    raise ValueError('Configuración de tienda inválida.')
                 if value.get('cost') is not None:shop_cost(value['cost'])
+            stored=json.loads((addon/f'workshop_manifest_{identifier}.json').read_text(encoding='utf-8'))
+            archived=value.get('archived',stored.get('shop_archived',False)) if isinstance(value,dict) else stored.get('shop_archived',False)
+            on=value if type(value) is bool else value['on']
+            if on and archived:
+                raise ValueError('Restaurá el vehículo en la lista antes de ponerlo en venta.')
         operation=self.workspace/'operations'/(datetime.now().strftime('%Y%m%d_%H%M%S')+'_shop_'+secrets.token_hex(3))
         staging=operation/ADDON_ID
         copy_tree(long_path(addon),long_path(staging),ignore=lambda directory,names:[OWNERSHIP_FILE] if OWNERSHIP_FILE in names else [])
@@ -1954,6 +1999,12 @@ class AppState:
             path=staging/f'workshop_manifest_{identifier}.json'
             data=json.loads(path.read_text(encoding='utf-8'))
             on=value if type(value) is bool else value['on']
+            # Keep the entity/recipe registered: campaigns and chained designs
+            # can still reference it even when it is removed from this list.
+            archived=data.get('shop_archived',False)
+            if isinstance(value,dict):archived=value.get('archived',archived)
+            if archived:data['shop_archived']=True
+            else:data.pop('shop_archived',None)
             if on:
                 previous_shop=data.get('shop') or {}
                 data['shop']={'parts':vehicle_parts(recipes[identifier]),'share':SHOP_SHARE}
@@ -2481,7 +2532,10 @@ class Handler(BaseHTTPRequestHandler):
         if host not in allowed: raise PermissionError('Host local incorrecto.')
         origin=self.headers.get('Origin')
         if origin and origin not in {'http://'+h for h in allowed}: raise PermissionError('Origen incorrecto.')
-        if self.path.startswith('/api/'): self.server.last_seen=time.monotonic()
+        if self.path.startswith('/api/'):
+            now=time.monotonic();self.server.last_seen=now
+            page=self.headers.get('X-Workshop-Page')
+            if page:self.server.__dict__.setdefault('pages',{})[page[:64]]=now
 
     def do_GET(self):
         try:
@@ -2570,7 +2624,9 @@ class Handler(BaseHTTPRequestHandler):
                 # The page is closing (browser mode). A beacon cannot carry headers.
                 length=int(self.headers.get('Content-Length','0'))
                 body=json.loads(self.rfile.read(length)) if 0<length<4096 else {}
-                if isinstance(body,dict) and body.get('token')==self.state.token: self.server.bye=time.monotonic()
+                if isinstance(body,dict) and body.get('token')==self.state.token:
+                    self.server.__dict__.setdefault('pages',{}).pop(str(body.get('page'))[:64],None)
+                    self.server.bye=time.monotonic()
                 self.send_response(204); self.end_headers(); return
             if self.headers.get('X-Workshop-Token')!=self.state.token: raise PermissionError('Sesión inválida.')
             length=int(self.headers.get('Content-Length','0')); route=urlparse(self.path).path
@@ -2628,6 +2684,7 @@ class Handler(BaseHTTPRequestHandler):
                 result=subprocess.run(args,capture_output=True,text=True,encoding='utf-8',env={**os.environ,'PYTHONUTF8':'1'},check=True)
                 return self.send_json({'path':result.stdout.strip()})
             if route=='/api/shutdown':
+                logging.info('Exit was pressed')
                 self.send_json({'ok':True})
                 window=getattr(self.server,'window',None)
                 # In the desktop window, closing it ends the program and the server.
@@ -2660,6 +2717,7 @@ def main(argv=None):
     handler=RotatingFileHandler(args.workspace/'workshop.log',maxBytes=4_000_000,backupCount=2,encoding='utf-8')
     logging.basicConfig(level=logging.INFO,handlers=[handler],format='%(asctime)s %(levelname)s %(message)s')
     logging.info('Cursed Workshop %s started (%s, Python %s)',__version__,platform.platform(),platform.python_version())
+    record_crashes(args.workspace)
     state=AppState(args.workspace)
     try: state.closed()
     except Exception as exc:
@@ -2674,6 +2732,7 @@ def main(argv=None):
     try:
         if args.no_browser or args.browser or not run_window(server,url):
             if not args.no_browser:
+                logging.info('Browser mode at %s',url)
                 webbrowser.open(url,new=1)
                 if running_under_wine(): show_address(url)
                 close_with_page(server)
@@ -2684,15 +2743,34 @@ def main(argv=None):
         state.clear_portrait_previews()
         state.stop_catalog_warmup()
         if state.index: state.index.close()
+        logging.info('Cursed Workshop ended')  # missing from the log: the process died
     return 0
 
-def page_gone(seen,bye,busy,now,*,idle=300,grace=15) -> bool:
+def record_crashes(workspace):
+    """Leave a trace of whatever ends the program without passing through main:
+    a native crash in crash.log (a player's report is all there is under Proton),
+    an uncaught exception in the log."""
+    def uncaught(kind,value,trace):
+        logging.critical('Uncaught exception',exc_info=(kind,value,trace))
+    def uncaught_in_thread(args):
+        if args.exc_type is not SystemExit:
+            logging.critical('Uncaught exception in thread %s',getattr(args.thread,'name','?'),exc_info=(args.exc_type,args.exc_value,args.exc_traceback))
+    sys.excepthook,threading.excepthook=uncaught,uncaught_in_thread
+    path=workspace/'crash.log'
+    try:
+        if path.exists() and path.stat().st_size>1_000_000:path.unlink()
+        faulthandler.enable(file=open(path,'a',encoding='utf-8'),all_threads=True)
+    except OSError:
+        logging.exception('Crash log unavailable')
+
+def page_gone(seen,bye,busy,now,*,idle=300,grace=15,open_pages=0) -> bool:
     """Browser mode: the tool has no window of its own, so it ends a few seconds
-    after its page closes (or after 5 minutes without hearing from it), never
-    during an operation. Otherwise it keeps running unseen and Steam still shows
-    it as playing, which blocks starting it again."""
+    after its last page closes (or after 5 minutes without hearing from any),
+    never during an operation. Otherwise it keeps running unseen and Steam still
+    shows it as playing, which blocks starting it again. Another open page counts
+    even if it is quiet: a background tab may call only once a minute."""
     if seen is None or busy: return False
-    if bye is not None and bye>=seen: return now-bye>grace
+    if bye is not None and bye>=seen and not open_pages: return now-bye>grace
     return now-seen>idle
 
 def close_with_page(server):
@@ -2704,8 +2782,13 @@ def close_with_page(server):
             if now-last>30 and server.last_seen is not None: server.last_seen=now
             last=now
             with server.state.lock: busy=any(job['status'] in ('queued','running') for job in server.state.jobs.values())
-            if page_gone(server.last_seen,server.bye,busy,now):
-                logging.info('The page was closed; ending the browser session'); server.shutdown(); return
+            pages=server.__dict__.setdefault('pages',{})
+            for page,heard in list(pages.items()):
+                if now-heard>300:pages.pop(page,None)
+            if page_gone(server.last_seen,server.bye,busy,now,open_pages=len(pages)):
+                closed=server.bye is not None and server.bye>=server.last_seen
+                logging.info('%s; ending the browser session','The page was closed' if closed else 'No page was heard for 5 minutes')
+                server.shutdown(); return
     threading.Thread(target=watch,daemon=True).start()
 
 def show_address(url):

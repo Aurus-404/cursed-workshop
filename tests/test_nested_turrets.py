@@ -5,7 +5,7 @@ from pathlib import Path
 
 from tests.test_compiler import FakeResources
 from workshop.compiler import compile_assembly
-from workshop.geometry import parse_model, build_preview, free_mount_options, free_spot_parent
+from workshop.geometry import descendants, parse_model, build_preview, free_mount_options, free_spot_parent
 from workshop.resources import ResourceIndex
 from workshop.syntax import parse, block
 from workshop.weapon_binding import barrel_bones
@@ -13,6 +13,34 @@ from workshop.weapon_effects import capture, install
 
 
 class NestedTurretTests(unittest.TestCase):
+    def test_single_barrel_modules_keep_their_own_flash_after_slot_renaming(self):
+        path=self.root/'game/resource/entity/donor/donor.def'
+        path.write_bytes(path.read_bytes().replace(b'native_dual',b'native_single').replace(b'{place "dual" {Barrels 2}',b'{place "gun" {foresight "shooter00"}'))
+        path=self.root/'game/resource/set/interaction_entity/entity.set'
+        path.write_text('''{entities
+          {"native_single tank" {on spawn {add_view "small_flash" "native_flash" "shooter00"}}
+            {on fire "gun" overload {view start "native_flash"}}}
+          {"hull tank" {on spawn {tags add "chassis_hatch"}}}
+        }''')
+        self.index.close();self.index=ResourceIndex(self.root/'game').build();self.addCleanup(self.index.close)
+        self.assertEqual(len(capture(self.index,'donor')),1,'single-barrel native effects are weapon-owned too')
+        transform={'assembly_draft':{'schema':1,'guns':[],'turrets':[
+            {'donor_template':'donor','recipient_mount':spot,'donor_mount':'turret'} for spot in ('@free','@free:turret')]}}
+        result=compile_assembly(self.index,'hull','donor',transform,self.root/'singles','mw_singles')
+        _,model,root=self.load(result)
+        effects=result['metadata']['weapon_effects'];self.assertEqual(len(effects),2)
+        self.assertEqual(len({e['place'] for e in effects}),2)
+        record=install(block('{"test tank" {on spawn {tags add "chassis_hatch"}}}'),effects)
+        labels=[]
+        for v in record.walk('add_view'):
+            self.assertIn(v.args[2],model['bones']);labels.append(v.args[1])
+        self.assertEqual(len(labels),len(set(labels)))
+        self.assertIn('chassis_hatch',record.render())
+        for e in effects:
+            event=next(n for n in record.find_all('on') if n.args[:2]==['fire',e['place']])
+            self.assertTrue(list(event.walk('view')))
+        self.assertNotIn('-hatch',root.find('props').args if root.find('props') else [])
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -99,6 +127,61 @@ class NestedTurretTests(unittest.TestCase):
         self.assertNotEqual(after['bones'][mount]['world'], model['bones'][mount]['world'])
         self.assertEqual(after['bones'][pitch]['node'].find('limits').args, ['-5','20'])
         self.assert_effects(edited, after, after_root)
+
+    def test_a_turret_on_a_turret_aims_by_itself(self):
+        # Natively so (panzer4h mgun_a_rot1): the game walks up to {terminator},
+        # or the small turret's gunner would drive the big turret too.
+        on_turret = compile_assembly(self.index, 'hull', 'donor', {'recipient_mount':'@free:turret'}, self.root/'roof', 'mw_roof')
+        _, model, root = self.load(on_turret)
+        mount = on_turret['metadata']['bone_mapping']['turret']
+        self.assertEqual(model['bones'][mount]['parent'], 'turret')
+        self.assertIsNotNone(model['bones'][mount]['node'].find('terminator'))
+        self.assertIsNone(model['bones']['turret']['node'].find('terminator'))
+        from workshop.articulation import weapon_joints
+        driven = {j['bone']: j['weapons'] for j in weapon_joints(model, root)}
+        self.assertEqual(driven['turret'], ['gun'], 'the big turret answers to its own gun only')
+        on_deck = compile_assembly(self.index, 'hull', 'donor', {'recipient_mount':'@free'}, self.root/'deck', 'mw_deck')
+        _, deck, _ = self.load(on_deck)
+        self.assertIsNone(deck['bones'][on_deck['metadata']['bone_mapping']['turret']]['node'].find('terminator'), 'nothing above it aims')
+
+    def test_a_built_module_can_turn_with_the_turret_where_it_is(self):
+        # Pz IV with a turret left on the deck mount: built, then made to turn with the big one.
+        built = compile_assembly(self.index, 'hull', 'donor', {'recipient_mount':'@free'}, self.root/'deck', 'mw_deck')
+        view, before, _ = self.load(built)
+        mount = built['metadata']['bone_mapping']['turret']
+        self.assertEqual(before['bones'][mount]['parent'], 'body')
+        hull = build_preview(view, built['id'], 'hull', mount)
+        self.assertEqual(hull['mount_parent'], 'body')
+        self.assertEqual(hull['module_hosts'], ['body', 'turret'])
+        self.assertEqual(build_preview(view, built['id'], 'hull', 'turret')['module_hosts'], [], 'the main turret is what others turn with')
+        moved = compile_assembly(view, built['id'], built['id'], {'commander_only':True,'module_poses':{mount:{}},
+                                                                  'module_parents':{mount:'turret'}}, self.root/'edit', 'mw_edit')
+        _, after, _ = self.load(moved)
+        self.assertEqual(after['bones'][mount]['parent'], 'turret')
+        for name in descendants(before['bones'], mount):
+            for got, want in zip(after['bones'][name]['world'], before['bones'][name]['world']):
+                for a, b in zip(got, want):
+                    self.assertAlmostEqual(a, b, places=4, msg=name)
+        self.assertIsNotNone(after['bones'][mount]['node'].find('terminator'))
+        with self.assertRaises(ValueError):
+            compile_assembly(view, built['id'], built['id'], {'commander_only':True,'module_parents':{mount:built['metadata']['bone_mapping']['pitch']}}, self.root/'loop', 'mw_loop')
+
+    def test_a_module_moved_between_free_spots_can_stay_in_place(self):
+        # The interface keeps it there: its position counts from the spot.
+        from workshop.geometry import free_anchor
+        hull = parse_model(self.index.read('entity/hull/hull.mdl'))
+        donor = parse_model(self.index.read('entity/donor/donor.mdl'))
+        deck = free_anchor(self.index, hull, 'entity/hull/hull.mdl', donor, 'entity/donor/donor.mdl', 'turret')
+        roof = free_anchor(self.index, hull, 'entity/hull/hull.mdl', donor, 'entity/donor/donor.mdl', 'turret', 'turret')
+        place = [4, 1, 2]
+        kept = [place[i] + deck[i] - roof[i] for i in range(3)]
+        first = compile_assembly(self.index, 'hull', 'donor', {'recipient_mount':'@free','turret':{'position':place}}, self.root/'a', 'mw_a')
+        second = compile_assembly(self.index, 'hull', 'donor', {'recipient_mount':'@free:turret','turret':{'position':kept}}, self.root/'b', 'mw_b')
+        _, a, _ = self.load(first)
+        _, b, _ = self.load(second)
+        name = first['metadata']['bone_mapping']['turret']
+        for i in range(3):
+            self.assertAlmostEqual(a['bones'][name]['world'][i][3], b['bones'][name]['world'][i][3], places=3)
 
     def test_multiple_modules_keep_separate_barrels_effects_and_saved_recipes(self):
         transform = {'assembly_draft':{'schema':1,'guns':[],'turrets':[

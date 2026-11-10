@@ -325,7 +325,7 @@ def bone_name(node: Node) -> str | None:
     args = node.args
     if not args:
         return None
-    return args[1] if args[0].casefold() in ("revolute", "prizmatic", "prismatic") and len(args) > 1 else args[0]
+    return args[1] if args[0].casefold() in ("revolute", "prizmatic", "prismatic", "socket") and len(args) > 1 else args[0]
 
 
 def replace_atoms(node: Node | Document, mapping: dict[str, str]) -> None:

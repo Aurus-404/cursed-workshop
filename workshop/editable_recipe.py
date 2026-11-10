@@ -67,7 +67,7 @@ def reopen(metadata, recipes, model):
                 continue
             armor_seen.add(names[0])
             row = {k:copy.deepcopy(v) for k,v in mount.items()
-                   if k in ('asset', 'parent', 'position', 'rotation', 'pivot')}
+                   if k in ('asset', 'parent', 'position', 'rotation', 'pivot', 'plate')}
             serial = re.fullmatch(r'mw_armor_(\d+)_root', names[0])
             if serial:row['serial'] = int(serial[1])
             armor.append(row)

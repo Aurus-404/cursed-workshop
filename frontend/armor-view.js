@@ -59,8 +59,17 @@ function tint(mm){const k=Math.min(mm/120,1);return new THREE.Color().setHSL(0.3
 export function armorView({state,groups,camera,canvas,viewport}){
   const layers={},tip=document.createElement('div');tip.className='armor-tip hidden';viewport.append(tip);
   const ray=new THREE.Raycaster(),pointer=new THREE.Vector2();let hover=null,built={};
+  // A see-through tint by thickness: the vehicle and its textures stay visible under it.
+  // The model's own details (tool boxes, track links, hatches) stick out of the
+  // armour volumes and hid the colour in patches, so plates are drawn over the
+  // model: the first one in each frame clears the depth the model wrote. Plates
+  // first write their own depth without colour, then colour only what is nearest,
+  // so a far plate never shows through a near one.
+  let cleared=-1;
+  const REST=.5,LIT=.82;
+  function overModel(renderer){const frame=renderer.info.render.frame;if(frame!==cleared){cleared=frame;renderer.clearDepth();}}
   function build(part){
-    layers[part]?.removeFromParent();layers[part]?.traverse(n=>{n.geometry?.dispose();n.material?.dispose?.();});
+    layers[part]?.removeFromParent();layers[part]?.traverse(n=>{n.geometry?.dispose();n.material?.dispose?.();});  // plates, their depth pass and outlines
     const data=state.previews[part],group=new THREE.Group();group.name='armor_layer';layers[part]=group;built[part]=data;
     // Armour volumes lie on the model's own surfaces and on each other (skirts on
     // the hull side): they z-fought and flickered with the camera angle and zoom.
@@ -75,9 +84,13 @@ export function armorView({state,groups,camera,canvas,viewport}){
       // Non-indexed per-face colours: one colour per triangle by its face thickness.
       const flat=geometry.toNonIndexed(),colors=[];
       for(const code of volume.faces){const c=tint(thicknessOf(volume,code));for(let k=0;k<3;k++)colors.push(c.r,c.g,c.b);}
-      flat.setAttribute('color',new THREE.Float32BufferAttribute(colors,3));flat.computeVertexNormals();geometry.dispose();      const mesh=new THREE.Mesh(flat,new THREE.MeshBasicMaterial({vertexColors:true,transparent:true,opacity:.38,side:THREE.DoubleSide,depthWrite:true,
+      flat.setAttribute('color',new THREE.Float32BufferAttribute(colors,3));flat.computeVertexNormals();geometry.dispose();      const mesh=new THREE.Mesh(flat,new THREE.MeshBasicMaterial({vertexColors:true,transparent:true,opacity:REST,side:THREE.DoubleSide,depthWrite:false,
         polygonOffset:true,polygonOffsetFactor:-1,polygonOffsetUnits:-4-index}));
-      mesh.userData.armor=volume;mesh.renderOrder=5+index++;group.add(mesh);
+      const offset={polygonOffset:true,polygonOffsetFactor:-1,polygonOffsetUnits:-4-index};
+      const depth=new THREE.Mesh(flat,new THREE.MeshBasicMaterial({colorWrite:false,transparent:true,side:THREE.DoubleSide,...offset}));  // with the see-through things, after the grid and ghosts
+      depth.name='armor_depth';depth.renderOrder=5;depth.onBeforeRender=overModel;depth.raycast=()=>{};
+      mesh.add(depth);
+      mesh.userData.armor=volume;mesh.renderOrder=6;index++;group.add(mesh);
     }
     groups[part]?.add(group);
   }
@@ -87,7 +100,7 @@ export function armorView({state,groups,camera,canvas,viewport}){
     for(const part of Object.keys(groups))if(groups[part]&&layers[part]&&layers[part].parent!==groups[part])groups[part].add(layers[part]);
     if(!on)hide();
   }
-  function hide(){tip.classList.add('hidden');if(hover){hover.material.opacity=.38;hover=null;}}
+  function hide(){tip.classList.add('hidden');if(hover){hover.material.opacity=REST;hover=null;}}
   function hits(event){
     const box=canvas.getBoundingClientRect();pointer.set((event.clientX-box.left)/box.width*2-1,-((event.clientY-box.top)/box.height)*2+1);
     ray.setFromCamera(pointer,camera);
@@ -108,17 +121,19 @@ export function armorView({state,groups,camera,canvas,viewport}){
     const seen=new Set(),rows=[];
     for(const hit of list){const name=hit.object.userData.armor.name;if(seen.has(name))continue;seen.add(name);rows.push(describe(hit));if(rows.length>=LAYERS)break;}
     const first=rows[0];
-    if(hover!==list[0].object){if(hover)hover.material.opacity=.38;hover=list[0].object;hover.material.opacity=.75;}
+    if(hover!==list[0].object){if(hover)hover.material.opacity=REST;hover=list[0].object;hover.material.opacity=LIT;}
     const mm=v=>`${Math.round(v)} mm`,material=v=>v.material==='steel'?(v.cast?t('acero fundido')+` ×${v.cast}`:t('acero')):v.material;
     tip.replaceChildren();
     const head=document.createElement('strong');head.textContent=`${first.volume.name} · ${t(FACE_NAMES[first.face]||first.face)}`;tip.append(head);
-    const lines=[`${t('Espesor')}: ${mm(first.mm)}`,`${t('Efectivo a')} ${first.angle}°: ${mm(first.line)}`,
+    const lines=[`${t('Espesor')}: ${mm(first.mm)}`,`${t('Ángulo de impacto')}: ${first.angle}°`,`${t('Espesor efectivo')}: ${mm(first.line)}`,
       first.rha!=null?`RHA: ${mm(first.rha)}`:t('No es acero: no equivale a RHA'),`${t('Material')}: ${material(first.volume)}${first.volume.high_hardness?' · '+t('alta dureza'):''}`];
     for(const text of lines){const row=document.createElement('span');row.textContent=text;tip.append(row);}
     if(rows.length>1){const more=document.createElement('small');
       more.textContent=t('Capas en esta línea')+': '+rows.map(r=>`${r.volume.name} ${mm(r.line)}`).join(' · ');tip.append(more);}
-    const box=viewport.getBoundingClientRect();tip.style.left=Math.min(event.clientX-box.left+16,box.width-260)+'px';tip.style.top=Math.max(event.clientY-box.top+16,8)+'px';
-    tip.classList.remove('hidden');
+    const box=viewport.getBoundingClientRect();tip.classList.remove('hidden');
+    // Beside the pointer, flipped to the other side where it would leave the view.
+    const x=event.clientX-box.left,y=event.clientY-box.top,w=tip.offsetWidth||240,h=tip.offsetHeight||120;
+    tip.style.left=Math.max(8,x+18+w>box.width?x-w-14:x+18)+'px';tip.style.top=Math.max(8,y+18+h>box.height?y-h-14:y+18)+'px';
   }
   canvas.addEventListener('pointermove',move);canvas.addEventListener('pointerleave',hide);
   return {sync};

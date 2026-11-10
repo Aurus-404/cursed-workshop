@@ -41,6 +41,20 @@ class CrewPlacementTests(unittest.TestCase):
         self.assertNotIn('crew_exclude',preview['transform'])
         self.assertEqual(body,original,'display must not strip adjustments from the build recipe')
 
+    def test_a_pivot_is_the_editors_and_changes_nothing_built(self):
+        # The turn about it already moved the position; the compiler reads those two.
+        resources = FakeResources()
+        for name in ('hull', 'donor'):
+            path = f'entity/{name}/{name}.def'
+            resources.files[path] = resources.files[path].replace(b'{game_entity', b'{game_entity {placer {place "driver" {group "crew"}}{place "gunner" {group "crew"}{LinkBone "gunner"}}}')
+        seat = {'position': [1, 2, 3], 'space': 'module', 'rotation': [0, 0, 90]}
+        built = []
+        for spec in (seat, {**seat, 'pivot': [4, 5, 6]}):
+            with tempfile.TemporaryDirectory() as temp:
+                result = compile_assembly(resources, 'hull', 'donor', {'auto_seat': False, 'crew_seats': {'gunner': spec}}, temp, 'mw_pivot')
+                built.append((Path(temp) / 'resource' / result['model_path']).read_bytes())
+        self.assertEqual(built[0], built[1])
+
     def test_relative_rotations_preserve_frames_fixed_and_moving(self):
         for fixed in (True,False):
             with self.subTest(fixed=fixed),tempfile.TemporaryDirectory() as tmp:

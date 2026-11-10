@@ -32,7 +32,7 @@ export function selectionData(state) {
   if(tr.passenger_seats&&typeof tr.passenger_seats==='object')result.passenger_seats={added:(tr.passenger_seats.added||[]).map(row=>({pose:id(row.pose),parent:id(row.parent),...pose(row)})),
     native:Object.fromEntries(Object.entries(tr.passenger_seats.native||{}).map(([k,v])=>[id(k),{pose:id(v.pose),offset:Array.isArray(v.offset)?v.offset:undefined}]))};
   if(Array.isArray(tr.rider_mgs))result.rider_mgs=tr.rider_mgs.map(row=>({support:id(row.support),pose:id(row.pose),item:id(row.item),parent:id(row.parent),...pose(row)}));
-  if(Array.isArray(tr.extra_armor))result.extra_armor=tr.extra_armor.map(row=>({asset:id(row.asset),parent:id(row.parent),...pose(row)}));
+  if(Array.isArray(tr.extra_armor))result.extra_armor=tr.extra_armor.map(row=>({asset:id(row.asset),parent:id(row.parent),...pose(row),...(row.plate?{plate:{width:Number(row.plate.width),height:Number(row.plate.height),thickness:Number(row.plate.thickness)}}:{})}));
   if(tr.support_vehicle){const s=tr.support_vehicle;result.mode=state.editing?'edit_support':'support';
     result.support_vehicle={schema:s.schema,profile:id(s.profile),remove_mount:id(s.remove_mount),
       cargo:(Array.isArray(s.cargo)?s.cargo:[]).map(row=>({asset:id(row.asset),...pose(row)}))};}

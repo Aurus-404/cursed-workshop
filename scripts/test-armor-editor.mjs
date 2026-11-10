@@ -114,3 +114,35 @@ assert.equal(naturalRotation(null,plain),null);
 for(const locale of ['en','zh-CN'])for(const text of ['Manteletes','Faldones laterales','Todas las naciones','Más útiles primero'])
   assert.notEqual(translate(text,locale),text,text+' '+locale);
 console.log('Armor editor: unplaced preview, native catalog filters, independent poses, parent following, recreated socket editing, recipes, diagnostics, grouped listing, nations, orders and mantlet placement passed.');
+
+// A made-to-measure plate: placed like any fitting, resized by typing or stretching.
+{const {PLATE,plateSizes,clampPlate,stretchPlate,plateLabel}=await import('../frontend/armor-editor.js');
+  assert.deepEqual(plateSizes({width:1000,height:500,thickness:40}),[0.8,20,10],'50 mm per model unit; as deep as it is thick');
+  assert.deepEqual(clampPlate({width:5,height:99999,thickness:'x'}),{width:50,height:8000,thickness:1});
+  assert.deepEqual(stretchPlate({width:1000,height:500,thickness:40},[2,1.5,-1]),{width:1500,height:500,thickness:80});
+  const before=state.transform.extra_armor.length;let stretching=0;
+  await $('armor-custom').onclick();
+  assert.equal(state.transform.extra_armor.length,before,'Choosing a plate adds nothing yet');
+  const ghost=groups.extra_armor.children.find(n=>n.userData.candidate);assert.ok(ghost,'The plate is shown before it is added');
+  assert.deepEqual(new THREE.Box3().setFromObject(ghost.children[0].children[0]).getSize(new THREE.Vector3()).toArray().map(v=>Number(v.toFixed(3))).sort((a,b)=>a-b),[0.6,20,20]);
+  assert.equal($('armor-plate-thickness').value,30);
+  $('armor-plate-thickness').value='80';$('armor-plate-thickness').oninput();$('armor-plate-thickness').onchange();
+  assert.equal(editor.target().children[0].geometry.parameters.width,1.6,'Typing a thickness changes the model at once');
+  await $('armor-add').onclick();
+  const placed=state.transform.extra_armor.at(-1);
+  assert.equal(placed.asset,PLATE);assert.deepEqual(placed.plate,{width:1000,height:1000,thickness:80});
+  $('armor-list').value=String(before);$('armor-list').selectedIndex=before;$('armor-list').onchange();
+  assert.ok($('armor-list').options[before].text.includes(plateLabel(placed.plate)));
+  editor.grab();assert.equal(editor.stretch([1,2,0.5]),true);editor.stretch([1,3,0.5]);
+  assert.deepEqual(state.transform.extra_armor[before].plate,{width:3000,height:500,thickness:80},'Each drag scales the measures it started with');
+  assert.deepEqual(editor.target().children[0].geometry.parameters,{...editor.target().children[0].geometry.parameters,width:1.6,height:60,depth:10});
+  assert.deepEqual(selectionData(state).extra_armor[before].plate,{width:3000,height:500,thickness:80});
+  const saved=structuredClone(state.transform);await editor.restore();assert.deepEqual(state.transform,saved,'Reopening keeps the plate');
+  $('armor-list').value='0';$('armor-list').selectedIndex=0;$('armor-list').onchange();editor.grab();
+  assert.equal(editor.stretch([2,2,2]),false,'A native piece is never stretched');
+  for(const locale of ['en','zh-CN'])assert.notEqual(translate('Placa a medida',locale),'Placa a medida');
+  const {plateGeometry}=await import('../frontend/armor-editor.js');
+  const uv=plateGeometry({width:2000,height:1000,thickness:40},20).attributes.uv,us=[],vs=[];
+  for(let i=0;i<uv.count;i++){us.push(uv.getX(i));vs.push(uv.getY(i));}
+  assert.equal(Math.max(...us)-Math.min(...us),2,'The paint repeats per metre: twice across a 2 m plate');
+}

@@ -274,6 +274,40 @@ def _implicit_foresight(original, place, model, transferred):
     return next((name for name in ("foresight1", "foresight") if name in model["bones"] and name in transferred), None)
 
 
+def _weapon_model(resources, place):
+    """The model a place's weapon brings itself ({entity}, inherited through {from}).
+
+    The game attaches it to a {LinkBone}. Natively no bone holds both: all 94
+    machine guns with a LinkBone point at an empty bone, the other 1000 have
+    their mesh in the vehicle and aim through {foresight} alone.
+    """
+    from .registration import _stuff_definition, RegistrationError
+    weapon = place.find("weapon")
+    if weapon is None or not weapon.args:
+        return None
+    seen = set()
+
+    def visit(path):
+        if path in seen:
+            return None
+        seen.add(path)
+        document = parse(resources.read(path))
+        node, inherited = document.find("from"), None
+        if node is not None and node.args:
+            parent = node.args[0]
+            pattern = parent.startswith("pattern ")
+            inherited = visit(_stuff_definition(resources, parent.removeprefix("pattern "), path, pattern))
+        else:
+            node = next((n for n in document.children if n.opener == "{"), None)
+        own = node.find("entity") if node is not None else None
+        return own.args[0] if own is not None and own.args else inherited
+
+    try:
+        return visit(_stuff_definition(resources, weapon.args[0]))
+    except (RegistrationError, AttributeError, FileNotFoundError, KeyError, OSError, ValueError):
+        return None
+
+
 def _rename_bone_refs(node, mapping):
     for child in node.walk():
         if child.head.casefold() == "bone":
@@ -286,14 +320,61 @@ def _rename_bone_refs(node, mapping):
                     atom.set(mapping[atom.value])
 
 
+def _volume_components(registry):
+    """Native volume name -> its component, from vehicle.ext's macros."""
+    return {call.args[1]: call.args[2] for call in registry.walk("make_component")
+            if len(call.args) >= 3 and call.args[0] == "args"}
+
+
+def _own_turret_components(resources, volumes, identifiers, mapping, kept_volumes, reserved):
+    """Give a turret added to a vehicle that keeps its own a component of its own.
+
+    Natively each extra turret has one (T-28, T-35: aux_turret1 to 4, with their
+    own health and repair). A renamed volume kept {component "turret"}, so a hit
+    on the small turret disabled the main one (TheOppsAreOntoMe). Bones and
+    volumes keep their names: saved recipes refer to them.
+    """
+    if not any(re.fullmatch(r"turret|aux_turret\d", identifier) for identifier in identifiers & mapping.keys()):
+        return {}
+    native = _volume_components(parse(resources.read("properties/vehicle.ext")))
+    held = {native[name] for name in kept_volumes if name in native}
+    taken = held | reserved | kept_volumes | identifiers
+    free = [name for name in ("aux_turret1", "aux_turret2", "aux_turret3", "aux_turret4") if name not in taken]
+    own = {}
+    for identifier in sorted(identifiers):
+        if re.fullmatch(r"turret|aux_turret\d", identifier) and identifier in held and free:
+            own[identifier] = mapping[identifier] = free.pop(0)
+    # Whatever belongs to those components has to be renamed: the native name
+    # would keep it in the chassis' macro (a donor's "turret7", its mantlet).
+    shared = set(own) | ({"mantlet"} if "turret" in own and "mantlet" in held else set())
+    for name in sorted(volumes):
+        if native.get(name) in shared and name not in mapping and name not in own:
+            mapping.update(_volume_mapping({name}, set(volumes) | kept_volumes | reserved | set(mapping.values()), mapping))
+    return own
+
+
+def _own_component_refs(node, own):
+    """Point a volume's explicit component, tags or make_component call at its own."""
+    if node.head == "make_component":
+        for atom in node.atoms[2:]:
+            if atom.value in own:
+                atom.set(own[atom.value])
+        return
+    for field in (*node.find_all("component"), *node.find_all("tags")):
+        for atom in field.atoms[1:]:
+            if atom.value in own:
+                atom.set(own[atom.value])
+
+
 def _bind_renamed_volumes(resources, root, mapping):
     if not mapping:
         return
     registry = parse(resources.read("properties/vehicle.ext"))
-    components = {}
-    for call in registry.walk("make_component"):
-        if len(call.args) >= 3 and call.args[0] == "args":
-            components[call.args[1]] = call.args[2]
+    components = _volume_components(registry)
+    # A turret with a component of its own: its mantlet belongs to it (T-35).
+    own = {source: target for source, target in mapping.items() if target.startswith("aux_turret")}
+    if "turret" in own:
+        own.setdefault("mantlet", own["turret"])
     holes = next((node for node in registry.find_all("define") if node.args and node.args[0] == "holes"), None)
     for original, emitted in mapping.items():
         volume = next((node for node in root.find_all("volume") if node.args and node.args[0] == emitted), None)
@@ -304,11 +385,13 @@ def _bind_renamed_volumes(resources, root, mapping):
                 continue
             volume = block("{volume "+quote(emitted)+"}")
             root.append(volume)
+        _own_component_refs(volume, own)
         if original in components:
+            component = own.get(components[original], components[original])
             if not volume.find("component"):
-                volume.append(block("{component "+quote(components[original])+"}"))
+                volume.append(block("{component "+quote(component)+"}"))
             if not volume.find("tags"):
-                volume.append(block("{tags "+quote(components[original])+"}"))
+                volume.append(block("{tags "+quote(component)+"}"))
         elif re.fullmatch(r"hole\d*", original) and holes:
             template = holes.find("volume")
             if template is None:
@@ -632,21 +715,55 @@ def _restore_independent_mount_capabilities(root, model):
         root.append(block('{props "'+name+'"}'))
 
 
+def _effective_props(resources, document, base="", seen=None, props=None, depth=0):
+    """Props an entity ends with through its include chain, in reading order."""
+    seen = set() if seen is None else seen
+    props = set() if props is None else props
+    if depth > 12:
+        return props
+    for node in document.children:
+        head = node.head.casefold()
+        if head == "include" and node.args and (base or node.args[0].startswith("/")):
+            path = resolve_path(base, node.args[0])
+            if path.casefold() in seen:
+                continue
+            seen.add(path.casefold())
+            try:
+                _effective_props(resources, _shared_include(resources, path), path, seen, props, depth+1)
+            except (KeyError, OSError, ValueError):
+                continue
+        elif head == "props":
+            for name in node.args:
+                if name.startswith("-"):
+                    props.discard(name[1:])
+                else:
+                    props.add(name)
+    return props
+
+
 def _apply_traverse_class(resources, root, model, carriages=()):
     """Turret tank or casemate, from where the main gun can actually turn.
 
-    Natively the class follows the gun: every vehicle whose main weapon has a
-    free yaw joint is a turret tank, and the casemates and SPGs whose yaw is
-    limited (StuG, Hetzer, Elefant, Archer, Bishop) carry no "turret" prop, so
-    the driver turns the hull to aim. A built vehicle kept its chassis class:
-    a Pz 38(t) with a QF 25-pdr traversing 4.5 degrees stayed a turret tank
-    and never turned to a target outside that arc. Only a gun decides this,
-    never a machine gun; a towed gun's carriage (carriages) is no turret ring.
-    Returns "casemate", "turret" or None when the class was left as it was.
+    The game turns the hull when two things hold (call_to_arms.exe, aimer):
+    the model's top bone is a revolute with {limits 0 0}, so the azimuth the
+    chain cannot reach stays as a difference between its target and its limit,
+    and the weapon place has {rotate}, which natively comes from
+    tank_assaultgun.ext (StuG, Hetzer, Elefant, Archer, Bishop). Both lead to
+    the aimer's require_rotate state, which asks the chassis to turn. The
+    "-turret" prop plays no part: the SU-76 turns without it.
+
+    A built vehicle includes its chassis' tank.ext, which sets neither: a
+    Pz 38(t) with a QF 18-pdr traversing 6.5 degrees never turned to a target
+    outside that arc. Only a gun decides this, never a machine gun; a towed
+    gun's carriage (carriages) is no turret ring. A vehicle nobody drives keeps
+    its class: a towed gun's crew swing it on its free root, which this lock
+    would take away, and an aircraft cannot turn on the spot. Returns
+    "casemate", "turret" or None when the class was left as it was.
     """
     from .gun_assembly import _primary_place
     from .articulation import weapon_joints
     from .registration import _stuff_definition, RegistrationError
+    from .weapon_binding import weapon_link
     primary = _primary_place(root)
     place = next((p for w in root.find_all('Weaponry') for p in w.find_all('place')
                   if p.args and p.args[0] == primary), None)
@@ -657,19 +774,22 @@ def _apply_traverse_class(resources, root, model, carriages=()):
         kind = _stuff_definition(resources, weapon.args[0]).split('/')[2]
     except (RegistrationError, FileNotFoundError, ValueError, IndexError):
         return None
-    if kind != 'gun':
+    if kind != 'gun' or _effective_props(resources, root) & {'cannon', 'airborne'}:
+        return None
+    anchor = weapon_link(place, model)
+    if anchor not in model['bones']:
         return None
     yaw = [j for j in weapon_joints(model, root) if primary in j['weapons'] and j['bone'] not in carriages
            and model['bones'][j['bone']]['parent'] is not None
            and abs(j['matrix'][2][2]) > 0.9]  # a yaw joint turns about the vertical
-    if not yaw:
-        return None
+    # A gun without any yaw joint (Grille, SU-14) only aims by turning the hull.
     turret = any(abs(j['limits'][1] - j['limits'][0]) >= 180 for j in yaw)
+    for old in place.find_all('rotate'):
+        place.remove(old)  # a design edited from a limited arc to a free one
     if not turret:
-        # Native casemates carry the aiming chain through a locked revolute
-        # chassis root. A plain tank root stops IK at the end of the gun arc;
-        # changing only the turret prop does not ask the driver to turn.
-        anchor = yaw[0]['bone']
+        place.append(block('{rotate}'))
+        # A fixed root is no revolute, so the aimer never reads a difference
+        # from it; a free one absorbs the azimuth, so there is no difference.
         while model['bones'][anchor]['parent'] in model['bones']:
             anchor = model['bones'][anchor]['parent']
         chassis = model['bones'][anchor]['node']
@@ -1010,7 +1130,7 @@ def _aiming_roles(places):
 
 
 def _static_crew(mounted, crew_bones, rotating, world_of, parent_inverse, footprint, margin=0.06, spacing=10.0,
-                 overrides=None, body=6.0):
+                 overrides=None, body=6.0, floor=None):
     """Detach crew seats from the turning part of a carried weapon.
 
     On the ground a Pak's loaders stand beside the gun and turn with it; on a
@@ -1020,8 +1140,9 @@ def _static_crew(mounted, crew_bones, rotating, world_of, parent_inverse, footpr
     (min/max X and Y, shrunk by `margin` of each extent, and at least `body`
     units so a seated or kneeling body does not hang over the edge). Seats the
     player placed in the editor (`overrides`: bone -> {"position", "yaw"} in
-    final model space) are used as given. Returns the detached bone nodes,
-    re-expressed in the chassis bone's frame, plus a report.
+    final model space) are used as given. With `floor`, no other seat ends below
+    that height. Returns the detached bone nodes, re-expressed in the chassis
+    bone's frame, plus a report.
     """
     overrides = overrides or {}
     detached, report = [], []
@@ -1066,10 +1187,88 @@ def _static_crew(mounted, crew_bones, rotating, world_of, parent_inverse, footpr
                 step = spacing if world[0][3] < centre_x else -spacing
                 world[0][3] = min(max(world[0][3]+step, low_x+pad_x), high_x-pad_x)
             placed.append((world[0][3], world[1][3]))
+        if floor is not None and not manual:
+            world[2][3] = max(world[2][3], floor)
         _set_matrix(node, multiply(parent_inverse, world))
         report.append({"bone": name, "from": [round(v, 3) for v in before],
                        "to": [round(world[i][3], 3) for i in range(3)], "manual": bool(manual)})
     return detached, report
+
+
+def _guns_first(resources, root):
+    """The weapon bar numbers weapons in Weaponry order, so a second gun added
+    to a tank came after its machine guns (fourth on a Pz IV). Guns lead, each
+    group in its own order. A vehicle whose main weapon is no gun stays as it is."""
+    from .gun_assembly import _primary_place
+    from .registration import _stuff_definition, RegistrationError
+    if not hasattr(resources, 'entries'):
+        return
+
+    def is_gun(place):
+        weapon = place.find('weapon')
+        if weapon is None or not weapon.args:
+            return False
+        try:
+            return _stuff_definition(resources, weapon.args[0]).split('/')[2] == 'gun'
+        except (RegistrationError, FileNotFoundError, ValueError, IndexError):
+            return False
+    primary = _primary_place(root)
+    for weaponry in root.find_all('Weaponry'):
+        places = weaponry.find_all('place')
+        guns = [place for place in places if is_gun(place)]
+        if not any(place.args and place.args[0] == primary for place in guns):
+            continue
+        ids = {id(place) for place in guns}
+        ordered = iter([*guns, *(place for place in places if id(place) not in ids)])
+        placed = {id(place) for place in places}
+        weaponry.items = [next(ordered) if id(item) in placed else item for item in weaponry.items]
+
+
+def _stop_module_aim(model, root, mount):
+    """A weapon put on another weapon's joint aims by itself.
+
+    The game walks a weapon's chain up to {terminator}, turning every joint on
+    the way: without one the small turret's gunner also drives the big turret.
+    Natively each independent mount on a turret stops at its top traverse joint
+    (panzer4h mgun_a_rot1, is2 rear_mgun_rot). A module with no traverse of its
+    own needs the joint that carries it, so it stays in that chain, and so does
+    one whose carrier aims nothing else.
+    """
+    from .articulation import weapon_joints
+    from .syntax import block
+    from .weapon_binding import weapon_link
+    bones = model["bones"]
+    if mount not in bones:
+        return
+    own = set(descendants(bones, mount))
+    mine = {place.args[0] for weaponry in root.find_all("Weaponry") for place in weaponry.find_all("place")
+            if place.args and weapon_link(place, model) in own}
+    joints = weapon_joints(model, root)
+    above, name = set(), bones[mount]["parent"]
+    while name:
+        above.add(name)
+        name = bones[name]["parent"]
+    if not any(j["bone"] in above and bones[j["bone"]]["parent"] is not None and set(j["weapons"]) - mine for j in joints):
+        return
+    traverse = {j["bone"] for j in joints if j["bone"] in own and abs(j["matrix"][2][2]) > 0.9 and j["limits"][1] > j["limits"][0]}
+    for joint in traverse:
+        name = bones[joint]["parent"]
+        while name in own and name not in traverse:
+            name = bones[name]["parent"]
+        if name not in traverse and bones[joint]["node"].find("terminator") is None:
+            bones[joint]["node"].append(block("{terminator}"))
+
+
+def _free_traverse(root, model, mount):
+    """Does this mount turn all the way round? A seat outside it then has no
+    fixed distance to it, so that distance means nothing on another chassis."""
+    bone = model["bones"].get(mount)
+    if bone is None or len(bone["node"].args) < 2 or bone["node"].args[0].casefold() != "revolute":
+        return False
+    limits = next((node.find("limits") for node in root.find_all("bone")
+                   if bone_name(node) == mount and node.find("limits") is not None), bone["node"].find("limits"))
+    values = [float(v) for v in limits.args] if limits is not None and limits.args else []
+    return len(values) != 2 or abs(values[1] - values[0]) >= 180
 
 
 def _crew_positions(spec, roles, excluded, role_mapping, link_bones, model, bone_mapping, module_frame):
@@ -2351,6 +2550,12 @@ def _compile_vehicle_edit(resources, template, transform, output_dir, new_id):
         from .modular_assembly import apply_native_poses
         apply_native_poses(model,transform['module_poses'],root=root)
         model=parse_model(model['document'].render())
+    if transform.get('module_parents') is not None:
+        from .modular_assembly import rehang_native_modules
+        rehang_native_modules(model,transform['module_parents'],root=root)
+        model=parse_model(model['document'].render())
+        for mount in transform['module_parents']:
+            _stop_module_aim(model,root,mount)
     support_contract = None
     removal_contract = None
     if transform.get('remove_module') is not None:
@@ -2440,6 +2645,10 @@ def _compile_vehicle_edit(resources, template, transform, output_dir, new_id):
             poses={n if n in state_model['bones'] else n+'_'+tag:p for n,p in transform['module_poses'].items()}
             apply_native_poses(state_model,poses,wreck=True)
             state_model=parse_model(state_model['document'].render())
+        if transform.get('module_parents') is not None:
+            from .modular_assembly import rehang_native_modules
+            rehang_native_modules(state_model,transform['module_parents'],wreck=tag)
+            state_model=parse_model(state_model['document'].render())
         if support_contract is not None or removal_contract is not None:
             from .support_vehicle import strip_turret
             mount = (support_contract or removal_contract)['removed_mount']
@@ -2452,12 +2661,13 @@ def _compile_vehicle_edit(resources, template, transform, output_dir, new_id):
         if not _is_identity(adjustment):
             for bone in state_model['skeleton'].find_all('bone'):
                 _set_matrix(bone,multiply(adjustment,state_model['bones'][bone_name(bone)]['local']))
-        copy_state('h'+tag,doc,state,state_model,original_state if support_contract is not None or removal_contract is not None or transform.get('module_poses') is not None else state_model)
+        copy_state('h'+tag,doc,state,state_model,original_state if support_contract is not None or removal_contract is not None or transform.get('module_poses') is not None or transform.get('module_parents') is not None else state_model)
         _place_model_extension(state_root,new_id+'_'+tag+'.mdl')
         assets.files[new_id+'_'+tag+'.mdl']=state_model['document'].render().encode('utf8')
         assets.files[new_id+'_'+tag+'.def']=doc.render().encode('utf8')
         wrecks.append({'state':tag,'module_lost':bool(contract),'native_chassis_preserved':True})
     final=parse_model(model['document'].render())
+    _guns_first(resources, root)
     _apply_traverse_class(resources, root, final)
     model = final
     _validate_carriage_crew(root)
@@ -2651,6 +2861,8 @@ def compile_assembly(resources, recipient_template, donor_template, transform, o
     # The common ancestor of several muzzles establishes ownership, not a
     # native attachment socket. Keep that inference out of the emitted place.
     donor_place_names = {id(p):p.args[0] for p in donor_places if p.args}
+    from .gun_assembly import _primary_place
+    donor_primary = _primary_place(donor_root)
     weapon_reference_sources = {}
     for place in donor_places:
         if not barrel_bones(place, donor_model) or place.find('foresight') is not None:
@@ -2680,8 +2892,30 @@ def compile_assembly(resources, recipient_template, donor_template, transform, o
     donor_complete = (not free and len(recipient_places) == len(recipient_weaponry.find_all("place") if recipient_weaponry else [])
                       and len(donor_places) == len(donor_weaponry.find_all("place") if donor_weaponry else []))
     diagnostics = []
+    # Resolve native seat declarations before deciding who belongs to the
+    # module. A loader/observer can live beside the gun, on an arbitrarily
+    # named seat, without an explicit reference from Weaponry.place.
+    _crew_expansion(resources, donor_root)
     roles = set().union(*(_place_roles(place, implicit_gunner=True) for place in donor_places)) if donor_places else set()
     roles |= {name for name in donor_names if name in ("gunner", "commander", "charger")}
+    native_roles = _crew_roles(donor_root)
+    for placer in donor_root.find_all('placer'):
+        for place in placer.find_all('place'):
+            link=place.find('LinkBone')
+            if (place.args and place.args[0] in native_roles and link is not None
+                    and link.args and link.args[0] in donor_names):
+                roles.add(place.args[0])
+    if any(place.args and place.args[0]==donor_primary for place in donor_places):
+        other_operators=set().union(set(),*(_place_roles(place,implicit_gunner=True)
+            for place in (donor_weaponry.find_all('place') if donor_weaponry else [])
+            if not any(place is selected for selected in donor_places)))
+        # Unclaimed crew belongs to the main station; operators of weapons
+        # left on the donor chassis do not. Never bring another driver.
+        inherited=native_roles-other_operators-{'driver'}-roles
+        roles |= inherited
+        if inherited:
+            diagnostics.append({'code':'native_module_crew_preserved','level':'info',
+                'roles':sorted(inherited),'message':'Native main-module crew retained from seat declarations, including implicit workers.'})
     roles.discard("driver")
     # Editor: module crew the player leaves behind (never whoever aims a weapon).
     excluded = {str(name) for name in (transform.get("crew_exclude") or [])} & roles
@@ -2773,11 +3007,16 @@ def compile_assembly(resources, recipient_template, donor_template, transform, o
     if not free:
         chassis_crew &= retained_roles | {"driver"}
         chassis_anm_names &= retained_roles
-    if free or roles & chassis_crew:
-        chassis_places = {place.args[0] for place in chassis_weapons if place.args}
+    chassis_places = {place.args[0] for place in chassis_weapons if place.args}
+    donor_place_ids = {p.args[0] for p in donor_places if p.args}
+    if free or roles & chassis_crew or donor_place_ids & chassis_places:
         role_map = _allocate_crew_roles(resources, roles, chassis_crew | chassis_anm_names)
-        place_map = {place.args[0]: _unique_name(place.args[0], chassis_places | {p.args[0] for p in donor_places if p.args})
-                     for place in donor_places if place.args and place.args[0] in chassis_places}
+        place_map = {}
+        occupied = chassis_places | donor_place_ids
+        for place in donor_places:
+            if place.args and place.args[0] in chassis_places:
+                place_map[place.args[0]] = _unique_name(place.args[0], occupied)
+                occupied.add(place_map[place.args[0]])
         if ("gunner" in role_map and _mans_main_weapon(donor_places, "gunner")
                 and not _mans_main_weapon(chassis_weapons, "gunner")
                 and "gunner" not in set(recipient_model["bones"]) - recipient_names):  # a seat bone that stays
@@ -2850,6 +3089,7 @@ def compile_assembly(resources, recipient_template, donor_template, transform, o
     if not free:
         _remove_bone(recipient_model, recipient_mount)
     removed_role_bones = set()
+    hull_seats = set()
     for role in sorted(replaced_roles):
         if not free and role in recipient_model["bones"] and role not in recipient_names:
             _remove_bone(recipient_model, role)
@@ -2869,6 +3109,8 @@ def compile_assembly(resources, recipient_template, donor_template, transform, o
             _set_matrix(extra, multiply(inverse(donor_model["bones"][donor_mount]["world"]), donor_model["bones"][anchor]["world"]))
             mounted.append(extra)
             donor_names.add(anchor)
+            if not carried:
+                hull_seats.add(anchor)
     if not _is_identity(hull_transform):
         for root_bone in recipient_model["skeleton"].find_all("bone"):
             name = bone_name(root_bone)
@@ -2896,13 +3138,8 @@ def compile_assembly(resources, recipient_template, donor_template, transform, o
         transform.get("crew_seats") or {}, roles, excluded, crew_rename, donor_link_bones,
         donor_model, bone_mapping, multiply(donor_adjustment, translation(source_anchor)))
     static_crew = []
-    if carried and transform.get("crew_static", True):
-        # Loaders/commanders of a carried gun stay on the chassis instead of
-        # swinging with the gun; whoever aims it stays on the gun.
-        seat_bones = {bone_mapping.get(bone, bone) for bone in
-                      (donor_link_bones.get(role, role) for role in roles - _aiming_roles(donor_places))}
-        seat_bones -= {bone_mapping.get(bone, bone) for bone in
-                       (donor_link_bones.get(role, role) for role in _aiming_roles(donor_places))}
+    carried_static = carried and transform.get("crew_static", True)
+    if carried_static or hull_seats:
         reverse_mapping = {value: key for key, value in bone_mapping.items()}
         kept_hull = [name for name in recipient_model["bones"] if name not in recipient_names | removed_role_bones]
         points = list(_points(resources, recipient_model, recipient["model_path"], kept_hull))
@@ -2911,10 +3148,35 @@ def compile_assembly(resources, recipient_template, donor_template, transform, o
             moved_points = [point(hull_transform, value) for value in points]
             footprint = ((min(p[0] for p in moved_points), min(p[1] for p in moved_points)),
                          (max(p[0] for p in moved_points), max(p[1] for p in moved_points)))
+        seat_frame = donor_adjustment
+        seat_floor = None
+        if carried_static:
+            # Loaders/commanders of a carried gun stay on the chassis instead of
+            # swinging with the gun; whoever aims it stays on the gun.
+            seat_bones = {bone_mapping.get(bone, bone) for bone in
+                          (donor_link_bones.get(role, role) for role in roles - _aiming_roles(donor_places))}
+            seat_bones -= {bone_mapping.get(bone, bone) for bone in
+                           (donor_link_bones.get(role, role) for role in _aiming_roles(donor_places))}
+            rotating = _rotating_bones(donor_root)
+        else:
+            # A seat the donor keeps in its hull (the LVT(A)-4's bow loader)
+            # never turned with the turret, so it must not orbit it here. Its
+            # distance to a full turret is meaningless on another hull: kept,
+            # it left that loader on the ground under a Chi-Nu. It keeps its
+            # place in the hull instead. Around a limited mount it stays beside
+            # the gun it serves.
+            seat_bones = {bone_mapping.get(bone, bone) for bone in hull_seats}
+            rotating = _rotating_bones(donor_root) | {bone_name(mounted)}
+            if _free_traverse(donor_root, donor_model, donor_mount):
+                seat_frame = hull_transform
+            # A gun riding higher on its own deck (Sexton, Ho-Ni I) would leave
+            # them below this hull: nobody sits under its floor.
+            hull_points = list(_points(resources, recipient_model, recipient["model_path"], [parent_name])) if parent_name else []
+            seat_floor = min((point(hull_transform, value)[2] for value in hull_points), default=None)
         detached, static_crew = _static_crew(
-            mounted, seat_bones, _rotating_bones(donor_root),
-            lambda name: multiply(donor_adjustment, donor_model["bones"][reverse_mapping.get(name, name)]["world"]),
-            inverse(multiply(hull_transform, parent_world)), footprint, overrides=overrides)
+            mounted, seat_bones, rotating,
+            lambda name: multiply(seat_frame, donor_model["bones"][reverse_mapping.get(name, name)]["world"]),
+            inverse(multiply(hull_transform, parent_world)), footprint, overrides=overrides, floor=seat_floor)
         for node in detached:
             recipient_parent.append(node)
     recipient_parent.append(mounted)
@@ -2940,6 +3202,7 @@ def compile_assembly(resources, recipient_template, donor_template, transform, o
     components = _component_ids(donor_model, donor_geometry_names)
     reserved = _component_ids(recipient_model, set(recipient_model['bones']) - recipient_names)
     volume_mapping = _volume_mapping(donor_volumes | components, kept_volumes | reserved)
+    own_components = _own_turret_components(resources, donor_volumes, components, volume_mapping, kept_volumes, reserved)
     _rename_module_components(recipient_model['document'], {bone_mapping.get(n, n) for n in donor_geometry_names}, volume_mapping)
     for name in sorted(donor_volumes):
         volume = _rename_volume(donor_model["volumes"][name]["node"], volume_mapping)
@@ -2953,6 +3216,20 @@ def compile_assembly(resources, recipient_template, donor_template, transform, o
             recipient_root.remove(node)
     _copy_module_armor(resources, donor_root, recipient_root, donor_volumes, donor_ids, volume_mapping, bone_mapping, components)
     _bind_renamed_volumes(resources, recipient_root, volume_mapping)
+    if own_components:
+        # Volumes the chassis has no namesake for were copied under their own name.
+        own_refs = {**own_components, "mantlet": own_components.get("turret")} if "turret" in own_components else own_components
+        own_refs = {source: target for source, target in own_refs.items() if target}
+        emitted_volumes = {volume_mapping.get(name, name) for name in donor_volumes}
+        for node in recipient_root.children:
+            if (node.head.casefold() == "volume" and node.args and node.args[0] in emitted_volumes) or (
+                    node.head == "make_component" and _values(node) & emitted_volumes):
+                _own_component_refs(node, own_refs)
+        if not any(node.head == "aux_turret" for node in recipient_root.children):
+            recipient_root.append(parse('("aux_turret" repair(45))').children[0])  # repair time and order
+    elif "turret" in components and "turret" in volume_mapping:
+        diagnostics.append({'code': 'turret_components_exhausted', 'level': 'warning',
+                            'message': 'This vehicle already uses every separate turret component the game has: damage to the added turret also counts for the main one.'})
     # Weaponry uses explicit mount ownership; additional chassis weapons stay in place.
     weaponry = recipient_root.find("Weaponry")
     if weaponry is None:
@@ -2973,17 +3250,22 @@ def compile_assembly(resources, recipient_template, donor_template, transform, o
     for place in donor_places:
         fallback = donor_place_bones.get(id(place))
         sight = _implicit_foresight(donor_place_names.get(id(place)), place, donor_model, donor_names)
+        # A donor's main weapon, whatever its {type} (the T-40's DShK is "main").
+        leads = donor_place_names.get(id(place)) == donor_primary
         place = place.clone()
-        if (fallback in bone_mapping or (fallback and place.args[0] != fallback)) and place.find('LinkBone') is None:
+        if ((fallback in bone_mapping or (fallback and place.args[0] != fallback)) and place.find('LinkBone') is None
+                and not ((sight or place.find('foresight') is not None) and _weapon_model(resources, place))):
             # Native places implicitly use the bone of the same name. If the
-            # bone or place was renamed to avoid a collision, bind it explicitly.
+            # bone or place was renamed to avoid a collision, bind it explicitly,
+            # unless the sight binds it: a LinkBone also hangs the weapon's own
+            # model on that bone, a second DShK backwards on the T-40's.
             place.append(block('{LinkBone '+quote(fallback)+'}'))
         if sight:
             # Same for the sight: renamed or added behind the chassis gun, the
             # donor gun would aim through the chassis gun's sight instead.
             place.append(block('{foresight '+quote(sight)+'}'))
         _rename_bone_refs(place, bone_mapping)
-        if not primary_replacement and place.find('type') is None and place.find('basic') is None:
+        if not primary_replacement and (place.find('type') is None or leads) and place.find('basic') is None:
             # The implicit primary slot works while first in native Weaponry.
             # Added behind the chassis primary it needs the same explicit
             # selectable marker as the Nb.Fz's native second cannon (gun2).
@@ -2993,7 +3275,7 @@ def compile_assembly(resources, recipient_template, donor_template, transform, o
             # Native independently crewed auxiliary guns (T-35) retain AI
             # control even when another place is the selected primary weapon.
             place.append(block('{ai_in_manual}'))
-        if primary_replacement and place.find("type") is None and kept is not None:
+        if primary_replacement and (place.find("type") is None or leads) and kept is not None:
             # A new turret's gun is the vehicle's main gun. Direct control and
             # the weapon bar offer only the first untyped place: after a kept
             # hull gun (Char B1/B2 "gun1") the turret gun fired for the AI
@@ -3101,31 +3383,37 @@ def compile_assembly(resources, recipient_template, donor_template, transform, o
     crew_nodes = []
     rider_links = [link for boarder in donor_crew.find_all("boarder") for link in boarder.find_all("link")
                    if len(link.args) > 1 and link.args[1] in riders]
-    if rider_links:
-        # The rider climbs on through the donor hull's doors; one the chassis
-        # lacks becomes one of the chassis' own doors, never a missing bone.
+    donor_doors = {d.args[0] for b in donor_crew.find_all('boarder') for d in b.find_all('door') if d.args}
+    door_links = [link for b in donor_crew.find_all('boarder') for link in b.find_all('link')
+                  if len(link.args)>1 and (link.args[0] in donor_doors or link in rider_links)]
+    if door_links:
+        # Every imported seat must climb the assembled hull, including gun
+        # crews. A donor door outside the transplanted branch was left behind.
+        # Place-to-place push/tow transitions are not physical exit doors.
         bones = {name.casefold() for name in parse_model(recipient_model["document"].render())["bones"]}
         own_doors = [door.args[0] for boarder in recipient_root.find_all("boarder") for door in boarder.find_all("door")
                      if door.args and door.args[0].casefold() in bones]
-        missing = set()
-        for link in rider_links:
+        for link in door_links:
             door = link.args[0]
+            mapped = bone_mapping.get(door,door)
+            if mapped.casefold() in bones:
+                link.atoms[1].set(mapped)
+                continue
             if door.casefold() in bones:
                 continue
-            missing.add(door)
             if own_doors:
                 link.atoms[1].set(own_doors[0])
                 diagnostics.append({"code": "rider_door_rebased", "level": "info",
-                                    "message": f"Rider door {door!r} is not on the chassis; boards through {own_doors[0]!r}"})
+                                    "message": f"Imported seat door {door!r} is not on the chassis; boards through {own_doors[0]!r}"})
         used = {link.args[0] for boarder in donor_crew.find_all("boarder") for link in boarder.find_all("link") if link.args}
         for boarder in donor_crew.find_all("boarder"):
             for door in list(boarder.find_all("door")):
-                if door.args and door.args[0] in missing and door.args[0] not in used:
+                if door.args and door.args[0].casefold() not in bones and door.args[0] not in used:
                     boarder.remove(door)
         for boarder in donor_crew.find_all("boarder"):
             for link in list(boarder.find_all("link")):
-                if link in rider_links and link.args[0].casefold() not in bones:
-                    boarder.remove(link)  # no door at all on the chassis
+                if link in door_links and link.args[0].casefold() not in bones:
+                    raise CompileError('La tripulación importada no tiene una salida física en el chasis: '+link.args[1])
     # Shared clip names ("left", "right") climb the chassis but end in the
     # pose of a seat: module crew sits in the module, so they climb like the
     # chassis crew and end in the module's pose (a Tiger I commander at its AA
@@ -3377,6 +3665,9 @@ def compile_assembly(resources, recipient_template, donor_template, transform, o
     rider_mgs = apply_riders(resources, recipient_root, recipient_model, fittings.get('rider_mgs'), assets, diagnostics)
     from .passenger_seats import apply as apply_passengers
     passenger_seats = apply_passengers(resources, recipient_root, recipient_model, transform.get('passenger_seats'), assets, diagnostics)
+    current_model = parse_model(recipient_model["document"].render())
+    _stop_module_aim(current_model, recipient_root, bone_mapping.get(donor_mount, donor_mount))
+    recipient_model.update(current_model)
     from .crew_attachment import apply_crew_fixed
     crew_attachment=apply_crew_fixed(resources,recipient_root,recipient_model,transform.get('crew_fixed'))
     from .crew_visibility import apply_visibility
@@ -3386,6 +3677,7 @@ def compile_assembly(resources, recipient_template, donor_template, transform, o
         _restore_independent_mount_capabilities(recipient_root, final_model)
     carriages = {bone_mapping.get(name, name) for name, bone in donor_model["bones"].items()
                  if bone["parent"] is None and name in donor_names}
+    _guns_first(resources, recipient_root)
     traverse_class = _apply_traverse_class(resources, recipient_root, final_model, carriages)
     recipient_model["document"] = final_model["document"]
     if traverse_class == 'casemate':

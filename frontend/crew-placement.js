@@ -5,6 +5,7 @@ export function canPlaceCrew(figure, excluded=[]) {
   return !!figure?.userData?.weapon && !excluded.includes(figure.name);
 }
 
+// Only where it stands and how it turns: a pivot is the editor's, kept by crew-pose.js.
 export function saveCrewPlacement(figure, module) {
   module.updateWorldMatrix(true,true);
   const local=module.worldToLocal(figure.getWorldPosition(new THREE.Vector3()));
@@ -12,7 +13,7 @@ export function saveCrewPlacement(figure, module) {
   return {position:local.toArray().map(v=>Number(v.toFixed(3))),space:'module',...(rotation.some(v=>v)?{rotation}:{})};
 }
 
-export function placeCrewFigure(figure,module,manual,fixed,box) {
+export function placeCrewFigure(figure,module,manual,fixed,box,hull=null,floor=null) {
   figure.position.set(...figure.userData.origin);
   figure.rotation.set(...(manual?.rotation||[0,0,0]).map(THREE.MathUtils.degToRad),'ZYX');
   if(manual?.position) {
@@ -21,11 +22,14 @@ export function placeCrewFigure(figure,module,manual,fixed,box) {
     figure.position.copy(manual.space==='module'?position:module.worldToLocal(position));
     return;
   }
-  if(!fixed||!figure.userData.staticSeat||box.isEmpty())return;
+  const hullSeat=figure.userData.hullSeat;
+  if(!(hullSeat||(fixed&&figure.userData.staticSeat))||box.isEmpty())return;
   const size=box.getSize(new THREE.Vector3());
   const padX=Math.min(Math.max(size.x*.06,6),size.x*.45),padY=Math.min(Math.max(size.y*.06,6),size.y*.45);
-  const world=module.localToWorld(new THREE.Vector3(...figure.userData.origin));
+  // A seat the source keeps in its hull stays there, the same as in the compiler.
+  const world=hullSeat?.position&&hull?hull.localToWorld(new THREE.Vector3(...hullSeat.position)):module.localToWorld(new THREE.Vector3(...figure.userData.origin));
   world.x=THREE.MathUtils.clamp(world.x,box.min.x+padX,box.max.x-padX);
   world.y=THREE.MathUtils.clamp(world.y,box.min.y+padY,box.max.y-padY);
+  if(hullSeat&&hull&&floor!==null&&floor!==undefined)world.z=Math.max(world.z,hull.localToWorld(new THREE.Vector3(0,0,floor)).z);
   figure.position.copy(module.worldToLocal(world));
 }

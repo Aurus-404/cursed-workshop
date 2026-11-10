@@ -784,7 +784,10 @@ def prune_operations(workspace: str | Path, keep: int = 3) -> dict:
         return (item.is_dir() and not item.is_symlink()
                 and (any((item / name).is_dir() for name in _PRUNABLE)
                      or any(item.glob("operations/*/previous_addon")) or any(item.glob("operations/*/stage/addon"))))
-    heavy = sorted((item for item in root.iterdir() if bulky(item)), key=lambda item: item.name)
+    # Names have second precision plus a random suffix. Alphabetic order can
+    # prune the operation that just finished when several share that second.
+    heavy = sorted((item for item in root.iterdir() if bulky(item)),
+                   key=lambda item: (item.stat().st_mtime_ns,item.name))
     pruned, freed = [], 0
     for operation in heavy[:-keep] if keep > 0 else heavy:
         states = set()

@@ -2,20 +2,20 @@ import {t} from './i18n.js';
 
 // Navigation owns editing focus only. Recipes remain owned by the existing editors.
 export const INSPECTOR_TOOLS={
-  chassis:{label:'Posición del chasis',fields:[],part:'hull',pose:true},
-  position:{label:'Posición y montaje',fields:['design-turret-pos-field','mount-select'],pose:true},
-  joints:{label:'Límites de torreta y cañón',fields:['design-turret-limits-field','weapon-joints']},
-  mobility:{label:'Movilidad del chasis',fields:['mobility-field'],part:'hull'},
-  crew:{label:'Tripulantes',fields:['design-module-crew-field','crew-pending-field','crew-static-field','crew-field','crew-visibility-field']},
-  commander:{label:'Arma del comandante',fields:['commander-field'],part:'commander_mg',pose:true},
-  armor:{label:'Blindaje extra',fields:['armor-section'],part:'extra_armor',pose:true},
-  smoke:{label:'Lanzadores de humo',fields:['smoke-section'],part:'smoke_launchers',pose:true},
-  rider:{label:'MG de pasajero',fields:['rider-section'],part:'rider_mgs',pose:true},
-  towing:{label:'Remolque',fields:['towing-section'],part:'towing',pose:true},
-  charge:{label:'Carga explosiva',fields:['charge-section'],part:'charge',pose:true},
-  passengers:{label:'Pasajeros',fields:['passenger-section'],part:'passenger_seats',pose:true},
-  cargo:{label:'Servicio y carga',fields:['support-fields'],part:'turret',pose:true},
-  operation:{label:'Operación y piezas',fields:['operation-controls'],selection:true},
+  chassis:{hint:'Mové o girá el chasis completo dentro del diseño.',label:'Posición del chasis',fields:[],part:'hull',pose:true},
+  position:{hint:'Colocá la torreta o el arma y elegí con qué parte gira.',label:'Posición y montaje',fields:['design-turret-pos-field','mount-select','module-host-field'],pose:true},
+  joints:{hint:'Ajustá cuánto giran y se elevan la torreta y el cañón, y a qué velocidad.',label:'Límites de torreta y cañón',fields:['design-turret-limits-field','weapon-joints']},
+  mobility:{hint:'Cambiá la velocidad, el giro y la potencia del chasis.',label:'Movilidad del chasis',fields:['mobility-field'],part:'hull'},
+  crew:{hint:'Mové, ocultá o fijá a los tripulantes del vehículo.',label:'Tripulantes',fields:['design-module-crew-field','crew-pending-field','crew-static-field','crew-field','crew-visibility-field']},
+  commander:{hint:'Agregá un arma que usa el comandante desde su escotilla.',label:'Arma del comandante',fields:['commander-field'],part:'commander_mg',pose:true},
+  armor:{hint:'Agregá piezas de protección: del juego o una placa a medida.',label:'Blindaje extra',fields:['armor-section'],part:'extra_armor',pose:true},
+  smoke:{hint:'Agregá tubos lanzahumo al vehículo.',label:'Lanzadores de humo',fields:['smoke-section'],part:'smoke_launchers',pose:true},
+  rider:{hint:'Agregá una ametralladora que usa quien suba al vehículo.',label:'MG de pasajero',fields:['rider-section'],part:'rider_mgs',pose:true},
+  towing:{hint:'Permití que el vehículo remolque cañones y elegí dónde va el enganche.',label:'Remolque',fields:['towing-section'],part:'towing',pose:true},
+  charge:{hint:'Convertí el vehículo en una carga explosiva que detona el conductor.',label:'Carga explosiva',fields:['charge-section'],part:'charge',pose:true},
+  passengers:{hint:'Agregá o mové asientos para pasajeros.',label:'Pasajeros',fields:['passenger-section'],part:'passenger_seats',pose:true},
+  cargo:{hint:'Elegí el servicio de apoyo y la carga visible.',label:'Servicio y carga',fields:['support-fields'],part:'turret',pose:true},
+  operation:{hint:'Elegí qué operación hacer y con qué piezas.',label:'Operación y piezas',fields:['operation-controls'],selection:true},
 };
 
 export function inspectorNavigation({busy=()=>false,support=()=>false,gun=()=>false,movingMount=()=>false,focusPart=()=>null,ready=()=>true,onEnter=()=>{},onLeave=()=>{},onChange=()=>{}}={}){
@@ -77,6 +77,8 @@ export function inspectorMenus({document=globalThis.document,state,support,gun=(
     else if(!inline&&recipient.parentElement!==context)context.insertBefore(recipient,fixed);
     recipient.classList.toggle('working-target-field',!inline);
     context.classList.toggle('hidden',!editing||inline);context.inert=busy;
+    // Placed armor is reset by removing it; a turret seat means nothing there.
+    $('align-button').parentElement?.classList.toggle('hidden',navigation.tool==='armor');
     for(const [key,field] of Object.entries(selectors))field.classList.toggle('hidden',inline?key!=='gun-recipient':!usable||key!==contextKey);
     fixed.classList.toggle('hidden',!!usable);
     fixedSelect.textContent='';const option=document.createElement('option');option.textContent=t(navigation.tool==='chassis'?'Chasis completo':state.hull?'Elegí una pieza en esta herramienta':'Elegí un vehículo');fixedSelect.append(option);
@@ -94,6 +96,8 @@ export function inspectorMenus({document=globalThis.document,state,support,gun=(
     $('inspector-finish').disabled=busy;
     $('inspector-cancel').classList.toggle('hidden',!state.toolCancellable);
     $('inspector-tool-title').textContent=t(navigation.tool==='position'&&gun()?'Posición del cañón':INSPECTOR_TOOLS[navigation.tool]?.label||'Ajustes');
+    // One plain sentence on what the open tool is for.
+    const hint=$('inspector-tool-hint');if(hint)hint.textContent=INSPECTOR_TOOLS[navigation.tool]?.hint?t(INSPECTOR_TOOLS[navigation.tool].hint):'';
     const working=usable&&choices?choices[$(contextKey).selectedIndex]?.text:null;
     $('inspector-context').textContent=working||t(navigation.section==='hull'?'Chasis':'Torreta');
     for(const section of ['hull','turret']){

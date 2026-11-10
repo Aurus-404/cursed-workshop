@@ -44,4 +44,18 @@ vehicles[0].needs_update=true;vehicles[0].cost=400;await editor.open();
 assert.equal($('shop-apply').disabled,false,'existing enabled offers can be upgraded without toggling them');
 await $('shop-apply').onclick();
 assert.deepEqual(calls.pop().body.changes,{mw_a:{on:true,cost:null}});
+// List removal is independent of delisting, reversible, and not an asset purge.
+vehicles[0].needs_update=false;
+await editor.open();rows=$('shop-list').children;
+rows[0].children[5].onclick();rows[0].children[5].onclick();
+assert.equal($('shop-apply').disabled,true,'undoing removal also restores its sale state');
+rows[0].children[5].onclick();await $('shop-apply').onclick();
+assert.deepEqual(calls.pop().body.changes,{mw_a:{on:false,cost:null,archived:true}});
+vehicles[0].on=false;vehicles[0].archived=true;
+await editor.open();rows=$('shop-list').children;
+assert.equal(rows[0].children[2].textContent,'B','active variants remain in the main list');
+const archived=rows[1].children[1];
+assert.equal(archived.children[0].disabled,true,'archived vehicles cannot be accidentally listed');
+archived.children[5].onclick();await $('shop-apply').onclick();
+assert.deepEqual(calls.pop().body.changes,{mw_a:{on:false,cost:null,archived:false}});
 console.log('Shop: price-only edits, zero/unpriced vehicles, removal, invalid values and restore-suggested passed.');

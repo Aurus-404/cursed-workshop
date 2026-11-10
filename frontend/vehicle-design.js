@@ -3,7 +3,7 @@ import {t} from './i18n.js';
 const zero=()=>({position:[0,0,0],rotation:[0,0,0]});
 const mountOf=row=>row?.recipient_mount||'turret';
 export function vehicleDesign({state,$,job,displayPart,updateSelection,remember,reportError,mountLabel=name=>name,confirm=globalThis.confirm,receiveCrew=()=>{},onFocus=()=>{}}){
-  let previewRevision=0,chassis={template:'',mounts:[],preferred:''},loading=null,changing=false;
+  let previewRevision=0,chassis={template:'',mounts:[],preferred:''},loading=null,changing=false,hosts=[],carrier='';
   const active=()=>!!state.transform.assembly_draft;
   const draft=()=>state.transform.assembly_draft;
   const removals=()=>draft()?.removals||[];
@@ -31,13 +31,15 @@ export function vehicleDesign({state,$,job,displayPart,updateSelection,remember,
     result.turret=zero();return result;}
   const nativeRow=()=>({native:true,recipient_mount:state.pendingTurret.recipient_mount,
     donor_template:state.hull.template,pose:structuredClone(state.transform.turret),
+    ...(state.pendingTurret.mount_parent?{mount_parent:state.pendingTurret.mount_parent}:{}),
     ...(state.transform.joint_limits?.turret?{joint_limits:structuredClone(state.transform.joint_limits.turret)}:{})});
   function settleNative(){if(!state.pendingTurret?.native)return false;const row=nativeRow();
     draft().turrets=[...turrets().filter(r=>mountOf(r)!==mountOf(row)),row];delete state.pendingTurret;
     if(state.transform.joint_limits)delete state.transform.joint_limits.turret;
     state.transform.turret=zero();placeholder();return true;}
   const body=()=>({hull:state.hull.template,transform:transform()});
-  const key=()=>JSON.stringify(body());
+  // Crew are placed over the drawn vehicle: moving one is no new preview.
+  const key=()=>{const value=body();delete value.transform.crew_seats;return JSON.stringify(value);};
   // The chassis' own turrets name the targets: they keep their names however
   // many of them the design already replaced.
   function loadChassis(){
@@ -68,6 +70,7 @@ export function vehicleDesign({state,$,job,displayPart,updateSelection,remember,
     const version=++previewRevision,stamp=key(),data=await job('/api/design-preview',{...body(),...(pending?{pending}:{})});
     if(version!==previewRevision||stamp!==key())return;
     state.designWeapons=data.saved_weapons||[];
+    hosts=pending?.native?data.hull.module_hosts||[]:[];carrier=data.hull.mount_parent||'';
     state.mounts={hull:data.hull.anchor_name||'',turret:data.turret.anchor_name||''};
     if(!pending)receiveCrew(data.crew_visibility||[]);
     state.designPreviewKey=stamp;displayPart('hull',data.hull);displayPart('turret',data.turret);updateSelection();
@@ -129,7 +132,7 @@ export function vehicleDesign({state,$,job,displayPart,updateSelection,remember,
       if(!chassis.mounts.includes(mount)||String(mount).startsWith('@')||removals().some(r=>r.mount===mount))return false;
       if(state.pendingTurret?.native)settleNative();
       const own=turrets().find(r=>mountOf(r)===mount&&r.native);
-      state.designTarget=mount;placeholder();state.pendingTurret={kind:'native',native:true,recipient_mount:mount,original:mount};
+      state.designTarget=mount;placeholder();state.pendingTurret={kind:'native',native:true,recipient_mount:mount,original:mount,...(own?.mount_parent?{mount_parent:own.mount_parent}:{})};
       state.inspectorFocusPart='turret';onFocus('turret');
       state.transform.turret=structuredClone(own?.pose||zero());
       state.transform.joint_limits={...state.transform.joint_limits,turret:structuredClone(own?.joint_limits||{})};
@@ -206,6 +209,8 @@ export function vehicleDesign({state,$,job,displayPart,updateSelection,remember,
       $('turret-target').replaceChildren(...chassis.mounts.map(m=>new Option(label(m)+(rows.some(r=>mountOf(r)===m)?' · '+t('cambiada'):''),m)));
       if(chassis.mounts.includes(current))$('turret-target').value=current;
       $('turret-target').disabled=state.busy||!chassis.mounts.length;
+      // Choosing a free spot only says where the next donor goes: say so, or it reads as done.
+      $('turret-target-hint').classList.toggle('hidden',!!state.pendingTurret||!String(current).startsWith('@')||rows.some(r=>mountOf(r)===current));
       const chosen=$('turret-saved').value;
       const donor=r=>(state.campaign?.units||[]).find(u=>u.eid===r.donor_eid)?.label||(state.campaign?.depot||[]).find(d=>d.id===r.donor_depot)?.label||r.donor_template;
       $('turret-saved').replaceChildren(...rows.map(r=>new Option(label(mountOf(r))+' ← '+donor(r),mountOf(r))));
@@ -229,6 +234,11 @@ export function vehicleDesign({state,$,job,displayPart,updateSelection,remember,
       $(id).value=loaded;
       $(id).disabled=state.busy;
     }
+    const carriers=state.pendingTurret?.native?hosts:[];
+    $('module-host-field').classList.toggle('hidden',carriers.length<2);
+    $('module-host').replaceChildren(...carriers.map((name,i)=>new Option(i?label(name):t('Nada: se queda fija en el chasis'),name)));
+    if(carriers.length)$('module-host').value=state.pendingTurret.mount_parent||carrier;
+    $('module-host').disabled=state.busy;
     if(active()&&state.turret?.designPlaceholder){$('turret-name').textContent=t('Elegí un donante para el próximo cambio');$('turret-detail').textContent=t('El diseño guardado se conserva.');}
   }
   const run=fn=>async()=>{try{await fn();}catch(e){reportError(e);}};
@@ -237,6 +247,7 @@ export function vehicleDesign({state,$,job,displayPart,updateSelection,remember,
   $('design-edit-turret').onclick=run(()=>editTurret($('turret-saved').value));
   $('turret-remove-change').onclick=run(()=>removeTurret($('turret-saved').value));
   $('turret-target').onchange=run(()=>chooseTarget($('turret-target').value));
+  $('module-host').onchange=run(async()=>{if(!state.pendingTurret?.native)return;state.pendingTurret.mount_parent=$('module-host').value;await refresh(state.pendingTurret);});
   $('turret-retire').onclick=change(retireTurret);
   $('turret-undo-removal').onclick=change(undoRemoval);
   $('assembly-scope').onchange=change(chooseScope);

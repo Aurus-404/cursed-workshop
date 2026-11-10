@@ -759,6 +759,7 @@ def build_preview(resources, template_id, part="full", mount_name=None, seats=No
     free_spot = free_mount_spec(mount_name)
     free = part == "hull" and (free_spot[0] or (not mount_name and not model["anchor_name"]))
     options = free_mount_options(model) if part == "hull" else []
+    main_anchor = model["anchor_name"]
     if mount_name and not free_spot[0]:
         if mount_name not in model["bones"]:
             raise GeometryError(f"Mount bone {mount_name!r} does not exist")
@@ -770,6 +771,20 @@ def build_preview(resources, template_id, part="full", mount_name=None, seats=No
         model["anchor_name"] = whole_model_mount(model)
         model["anchor"] = point(model["bones"][model["anchor_name"]]["world"], [0, 0, 0]) if model["anchor_name"] else [0, 0, 0]
         carried = True
+    # The bone the module will hang from, by the compiler's rule: what it turns with.
+    mount_parent = None
+    if free:
+        spot = free_spot[1]
+        mount_parent = free_spot_parent(model, spot) if spot in model["bones"] else free_mount_parent(model)
+    elif part == "hull" and model["anchor_name"] in model["bones"]:
+        mount_parent = model["bones"][model["anchor_name"]]["parent"]
+    # What this installed module can turn with: the chassis, or a turret that shows.
+    module_hosts = []
+    if part == "hull" and not free and mount_parent and model["anchor_name"] != main_anchor:
+        spots = [option[len(FREE_MOUNT) + 1:] for option in options if option.startswith(FREE_MOUNT + ":")]
+        below = descendants(model["bones"], model["anchor_name"])
+        carriers = [free_mount_parent(model), *(spot for spot in spots if spot in model["mounts"] and model["bones"][spot]["assets"]), mount_parent]
+        module_hosts = list(dict.fromkeys(name for name in carriers if name and name not in below))
     if free:
         # No ring on this chassis (or a free mount chosen): nothing is removed
         # and the module rests on the deck point the compiler also uses.
@@ -780,6 +795,11 @@ def build_preview(resources, template_id, part="full", mount_name=None, seats=No
     selected = descendants(model["bones"], model["anchor_name"]) if model["anchor_name"] in model["bones"] else set()
     meshes, warnings = [], []
     adjustment = translation([-v for v in model["anchor"]]) if part == "turret" else identity()
+    # The bone the mount hangs from: what the compiler measures a hull's floor on.
+    floor_bone, hull_floor = None, None
+    if part == "hull":
+        anchor_bone = model["bones"].get(model["anchor_name"])
+        floor_bone = anchor_bone["parent"] if anchor_bone else free_mount_parent(model)
     for name, bone in model["bones"].items():
         if (part == "turret" and name not in selected) or (part == "hull" and name in selected):
             continue
@@ -796,6 +816,8 @@ def build_preview(resources, template_id, part="full", mount_name=None, seats=No
             transformed, normal_values = [], []
             for i in range(0, len(mesh["positions"]), 3):
                 transformed.extend(point(matrix, mesh["positions"][i:i+3]))
+            if name == floor_bone and transformed:
+                hull_floor = min(transformed[2::3]) if hull_floor is None else min(hull_floor, *transformed[2::3])
             normal_matrix = inverse(matrix)
             for i in range(0, len(mesh["normals"]), 3):
                 n = mesh["normals"][i:i+3]
@@ -811,10 +833,11 @@ def build_preview(resources, template_id, part="full", mount_name=None, seats=No
     if part == "turret" and seats:
         # Match the compiler's selected module, not every role in the donor.
         # A commander's native seat can belong to the carriage being discarded.
-        from .compiler import _load_entity, _explicit_weapon_operators, _selected_places, _place_roles
+        from .compiler import _load_entity, _explicit_weapon_operators, _free_traverse, _selected_places, _place_roles
         _, _, crew_root = _load_entity(resources, template_id)
         _explicit_weapon_operators(resources, crew_root)
         module_places, _ = _selected_places(crew_root, model, selected)
+        free_ring = _free_traverse(crew_root, model, model["anchor_name"])
         module_roles = set().union(set(), *(_place_roles(p, implicit_gunner=True) for p in module_places))
         module_roles |= selected & {"gunner", "commander", "charger"}
         module_roles.discard("driver")
@@ -838,6 +861,9 @@ def build_preview(resources, template_id, part="full", mount_name=None, seats=No
             cursor=current['parent']
         seat={**seat,'fixed':not moving}
         world = multiply(adjustment, bone["world"])
+        if part == "turret" and not carried and seat["bone"] not in selected:
+            # Where the compiler leaves a seat that stays out of the turning part.
+            seat["hull_seat"] = {"position": point(bone["world"], [0, 0, 0]) if free_ring else None}
         seat_points.append({**seat, "position": point(world, [0, 0, 0]),
                             "rotation": [[round(world[r][c], 6) for c in range(3)] for r in range(3)]})
     if include_inventory:
@@ -896,7 +922,7 @@ def build_preview(resources, template_id, part="full", mount_name=None, seats=No
             "module_mounts": modules,
             "anchor": model["anchor"], "anchor_name": model["anchor_name"], "mounts": (replaceable_mounts(model) if part == 'hull' else model["mounts"]) + options,
             "seat": seat, "carried": bool(part == "turret" and carried),
-            "seats": seat_points, "internal_crew": internal,
+            "seats": seat_points, "internal_crew": internal, "hull_floor": hull_floor, "mount_parent": mount_parent, "module_hosts": module_hosts,
             "bounds": bounds_of(positions), "diagnostics": warnings,
             "armor": armor,
             "bones": [{"name": name, "parent": bone["parent"], "position": point(bone["world"], [0, 0, 0])}

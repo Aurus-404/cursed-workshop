@@ -89,6 +89,18 @@ function screenSize(handle,view,renderer){
   handle.updateMatrixWorld(true);
 }
 
+// Which rig turns a fitting. An installed module being edited (native) is a branch of
+// the same model: only its own branch is the module's, the turret under its plates is
+// the chassis'. A donor is another model, so a bone it also has belongs to it.
+export function ownsFitting(part,bone,hullBones,module){
+  if(!module?.native_module){
+    const here=new Set(hullBones.map(b=>b.name));
+    return here.has(bone)&&(part==='turret'||!module?.bones?.some(b=>b.name===bone));
+  }
+  const parents=new Map((module.bones||[]).map(b=>[b.name,b.parent])),seen=new Set();let cursor=bone,inside=false;
+  while(cursor&&!seen.has(cursor)){if(cursor===module.anchor_name){inside=true;break;}seen.add(cursor);cursor=parents.get(cursor);}
+  return hullBones.some(b=>b.name===bone)&&(part==='turret')===inside;
+}
 export function weaponArcs({state,groups,camera,viewport,orbit,rigs,describe=()=>''}){
   let built=[],signature='',drag=null,hoverText='';
   const label=document.createElement('div');label.className='weapon-hover-label';label.hidden=true;label.setAttribute('aria-hidden','true');
@@ -131,7 +143,10 @@ export function weaponArcs({state,groups,camera,viewport,orbit,rigs,describe=()=
       // towing points) live in their own groups but turn with that bone.
       for(const node of source.extras?.()||[])if(source.jointOf(node)){node.userData.weaponFitting=true;objects.push(node);}
       for(const object of objects){
-        object.updateMatrix();object.userData.weaponRest=object.matrix.clone();object.userData.weaponAuto=object.matrixAutoUpdate;object.matrixAutoUpdate=false;
+        // Editors can own the matrix directly; their TRS fields need not describe
+        // the loaded pose. Only compose TRS for objects that actually use it.
+        if(object.matrixAutoUpdate)object.updateMatrix();
+        object.userData.weaponRest=object.matrix.clone();object.userData.weaponAuto=object.matrixAutoUpdate;object.matrixAutoUpdate=false;
       }
       const overlay=new THREE.Group();overlay.name='weapon_arcs';overlay.userData.keepGeometry=false;source.group.add(overlay);
       const joints=[],rows=[];

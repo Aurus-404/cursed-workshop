@@ -23,8 +23,6 @@ def apply_crew_fixed(resources,root,model,choices):
         current=parse_model(model['document'].render());seat=values.get('linkbone')
         if not seat or seat not in current['bones']:
             raise CompileError('Este puesto es interno y no tiene una posición visible para fijar.\n'+role)
-        static=free_mount_parent(current)
-        if not static:raise CompileError('No se pudo determinar dónde fijar al tripulante.\n'+role)
         free_name='cw_crew_follow_'+role;fixed_name='cw_crew_fixed_'+role
         source=current['bones'][seat];world=source['world']
         if free_name in current['bones']:
@@ -54,6 +52,14 @@ def apply_crew_fixed(resources,root,model,choices):
                             if driven:following=driven[-1];break
                         else:continue
                         break
+        # Fixed against its own weapon, not against what carries that weapon: a
+        # seat in a turret on a turret still goes around with the big one.
+        static,cursor=None,following
+        while cursor in current['bones'] and not static:
+            if current['bones'][cursor]['node'].find('terminator') is not None:static=current['bones'][cursor]['parent']
+            cursor=current['bones'][cursor]['parent']
+        static=static or free_mount_parent(current)
+        if not static:raise CompileError('No se pudo determinar dónde fijar al tripulante.\n'+role)
         # Dedicated empty anchors preserve the seat's full reflected frame and
         # leave the original bone/children (possibly gun geometry) untouched.
         for name,parent in ((free_name,following),(fixed_name,static)):

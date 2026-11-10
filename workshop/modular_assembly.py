@@ -28,6 +28,35 @@ def apply_native_poses(model, spec, *, root=None, wreck=False):
         _set_matrix(bone['node'],multiply(inverse(parent),world))
 
 
+def rehang_native_modules(model, spec, *, root=None, wreck=None):
+    """Hang installed modules from another bone, exactly where they are: what a
+    module hangs from is what it turns with. wreck: the state tag; a destroyed
+    source can have lost the module or what would carry it."""
+    from .compiler import _set_matrix, _hull_system
+    from .geometry import replaceable_mounts, editable_mounts, multiply, inverse
+    if not isinstance(spec,dict) or len(spec)>16:
+        raise ValueError('La selección de módulos instalados no es válida.')
+    bones=model['bones']
+    named=lambda name:name if name in bones or not wreck else str(name)+'_'+wreck
+    top=set(editable_mounts(model,root)) if root is not None else set(replaceable_mounts(model))
+    for mount,parent in spec.items():
+        mount,parent=named(mount),named(parent)
+        if wreck and (mount not in bones or parent not in bones):continue
+        if mount not in bones or parent not in bones or (not wreck and mount not in top):
+            raise ValueError('Elegí una torreta separable para ajustar.')
+        below=descendants(bones,mount)
+        if parent in below or any(_hull_system(n) for n in below):
+            raise ValueError('Esa torreta no puede girar con esa parte.')
+        # A seat fixed in this module rests on what carries it, not on the chassis.
+        fixed=[n.replace('cw_crew_follow_','cw_crew_fixed_',1) for n in below if n.startswith('cw_crew_follow_')]
+        for name in [mount,*(n for n in fixed if n in bones)]:
+            bone=bones[name]
+            if bone['parent']==parent:continue
+            bones[bone['parent']]['node'].remove(bone['node'])
+            _set_matrix(bone['node'],multiply(inverse(bones[parent]['world']),bone['world']))
+            bones[parent]['node'].append(bone['node'])
+
+
 def removal_mount(spec):
     if (not isinstance(spec, dict) or spec.get('schema') != 1
             or not isinstance(spec.get('mount'), str) or not spec['mount']

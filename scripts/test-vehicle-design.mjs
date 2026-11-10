@@ -193,6 +193,41 @@ const inheritedSource={template:'mw_old',recipient:'base',donor:'base',transform
 const inheritedState={hull:carrier,turret:carrier,campaign:{units:[carrier]},editing:{eid:carrier.eid},
   designOrigin:{eid:carrier.eid,recipient:'original_hull',donor:'original_donor'},
   transform:{source_recipe:inheritedSource,commander_mg:{item:'kept'},smoke_launchers:[{tubes:2}]}};
+// A built module can be made to turn with another part, and that choice is the recipe's.
+{
+  const nativeState={busy:false,tab:'campaign',campaign:{units:[base]},hull:{...base},turret:{...base},pendingTurret:null,
+    transform:{hull:{position:[0,0,0],rotation:[0,0,0]},turret:{position:[0,0,0],rotation:[0,0,0]},assembly_draft:{schema:1,guns:[],turrets:[]}}};
+  const calls=[];
+  const nativeJob=async(path,body)=>{calls.push([path,structuredClone(body)]);
+    if(path==='/api/preview')return {anchor_name:'turret',mounts:['turret','module_turret','@free','@free:turret'],module_mounts:['turret','module_turret'],bones:[{name:'body',parent:null},{name:'turret',parent:'body'},{name:'module_turret',parent:'body'}]};
+    return {hull:{anchor_name:'module_turret',mount_parent:body.pending?.mount_parent||'body',module_hosts:body.pending?['body','turret']:[],meshes:[]},turret:{anchor_name:'module_turret',meshes:[]}};};
+  const native=vehicleDesign({state:nativeState,$,job:nativeJob,displayPart(){},updateSelection(){},remember(){},reportError(e){throw e;}});
+  assert.equal(await native.editTurret('module_turret'),true);native.controls();
+  assert.deepEqual($('module-host').options.map(o=>o.value),['body','turret']);
+  assert.equal($('module-host').value,'body','it shows what the module hangs from now');
+  $('module-host').value='turret';await $('module-host').onchange();
+  assert.equal(calls.at(-1)[1].pending.mount_parent,'turret');
+  native.settleNative();
+  assert.equal(native.turrets()[0].mount_parent,'turret');
+  await native.editTurret('module_turret');native.controls();
+  assert.equal($('module-host').value,'turret','reopened, the choice is still there');
+  assert.equal(native.transform().assembly_draft.turrets[0].mount_parent,'turret');
+  // Only a free spot with nothing to put there says what choosing it really does.
+  native.settleNative();nativeState.designTarget=null;
+  const hint=[];$('turret-target-hint').classList.toggle=(name,on)=>hint.push(on);
+  $('operation-select').value='turret';
+  await $('turret-target').onchange.call(null,($('turret-target').value='@free:turret',null));native.controls();
+  assert.equal(hint.at(-1),false,'the hint shows, it does not act as if it were done');
+  assert.equal(native.turrets().length,1);assert.equal(native.turrets()[0].recipient_mount,'module_turret');
+  $('turret-target-hint').classList.toggle=()=>{};
+}
+// Moving a crew member asks for no new preview: the server draws them over the same vehicle.
+{
+  const before=design.key();
+  const saved=state.transform.crew_seats;state.transform.crew_seats={gunner:{position:[1,2,3],space:'module'}};
+  assert.equal(design.key(),before);assert.ok(design.body().transform.crew_seats.gunner,'the seat still goes with the design');
+  state.transform.crew_seats=saved;
+}
 const inheritedDesign=vehicleDesign({state:inheritedState,$,job,displayPart(){},updateSelection(){},remember(){},reportError(e){throw e;}});
 inheritedDesign.ensure();
 assert.equal(inheritedState.transform.source_recipe,undefined,'replayed source belongs only to the seed when starting another operation');

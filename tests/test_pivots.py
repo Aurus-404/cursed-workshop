@@ -39,7 +39,8 @@ class PivotTests(unittest.TestCase):
             read=lambda r:parse_model((Path(r['output_dir'])/'resource'/r['model_path']).read_bytes())
             old,new=read(a),read(b);contract=b['metadata']['gun_assembly'];root=contract['bone_mapping'][contract['donor']['pivot']];oldroot=contract['recipient']['pivot']
             self.assertEqual(point(new['bones'][root]['world'],[0,0,0]),[old['bones'][oldroot]['world'][0][3]+4,old['bones'][oldroot]['world'][1][3],old['bones'][oldroot]['world'][2][3]])
-            self.assertEqual(old['bones'][oldroot]['world'],new['bones'][oldroot]['world'],'shared receiver joint must remain native')
+            self.assertEqual(root,oldroot,'gun and coax stay on one joint: the shared one moves')
+            self.assertFalse(any(n.startswith('cw_joint_') for n in new['bones']))
             for name in ('coax','sight'):
                 self.assertEqual(point(old['bones'][name]['world'],[0,0,0]),point(new['bones'][name]['world'],[0,0,0]))
             self.assertTrue(any(n.startswith('cw_pivot_') for n in new['bones']))
