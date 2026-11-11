@@ -81,7 +81,18 @@ def _expand(scope, defines, stack=()):
 
 
 def capture(resources, template):
-    """Read generated contracts from their authoritative overlay, else native data."""
+    """Read generated contracts from their authoritative overlay, else native data.
+
+    The answer only depends on the indexed files, so it is kept per index:
+    every preview of the same design asked for it again."""
+    kept = getattr(resources, '__dict__', {}).setdefault('_weapon_effects', {}) if hasattr(resources, '__dict__') else {}
+    key = (template, len(getattr(resources, 'entries', ())))
+    if key not in kept:
+        kept[key] = _capture(resources, template)
+    return copy.deepcopy(kept[key])
+
+
+def _capture(resources, template):
     from .compiler import _load_entity, _explicit_weapon_operators, _include_defines, _implicit_foresight
     from .geometry import parse_model, editable_mounts, descendants
     from .registration import _load_include_graph, _interaction_defines

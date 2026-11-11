@@ -217,6 +217,8 @@ class AppState:
     def phase(self,label):
         from .cancellation import JobCancelled
         started=time.perf_counter();state='done'
+        active=self.__dict__.setdefault('active_phases',{});token=object()
+        active[token]=label
         try:yield
         except JobCancelled:
             state='cancelled'
@@ -225,6 +227,7 @@ class AppState:
             state='error'
             raise
         finally:
+            active.pop(token,None)
             elapsed=(time.perf_counter()-started)*1000
             # Never under the application lock: a file append per texture or
             # image request would hold up every other request.
@@ -291,6 +294,7 @@ class AppState:
         key=secrets.token_hex(8)
         cancel=threading.Event()
         queued_at=time.perf_counter()
+        self.watch_jobs()
         with self.lock:
             self.jobs[key]={'id':key,'label':label,'status':'queued','started':time.time(),'cancellable':cancellable}
             controls=self.__dict__.setdefault('job_controls',{})
@@ -314,6 +318,8 @@ class AppState:
                 self.jobs[key]['status']='running'
                 self.foreground+=1
             timing_context=timing_job.set(key)
+            from .memory import describe
+            logging.info('Operation start: %s | %s',label,describe())
             try:
                 checkpoint()
                 result=serial(operation())
@@ -334,13 +340,29 @@ class AppState:
                 with self.lock:
                     status=self.jobs[key]['status']
                     self.diagnostics.record_operation(label,status,elapsed_ms,queued_ms,(self.token,str(Path.home())))
-                logging.info('Operation timing: %s | %s | elapsed_ms=%.0f | queued_ms=%.0f',label,status,elapsed_ms,queued_ms)
+                logging.info('Operation timing: %s | %s | elapsed_ms=%.0f | queued_ms=%.0f | %s',label,status,elapsed_ms,queued_ms,describe())
                 timing_job.reset(timing_context)
         with self.lock:
             future=self.pool.submit(work)
             self.__dict__.setdefault('job_futures',{})[key]=future
             if lane:self.preview_futures[lane]=(key,future)
         return {'job_id':key}
+
+    def watch_jobs(self):
+        """Every 10 s while an operation runs, write what runs and the memory
+        left. Under Proton Linux can kill the tool without any trace; the last
+        of these lines then says what it was doing and whether memory ran out."""
+        with self.lock:
+            if self.__dict__.get('job_watch'):return
+            self.job_watch=True
+        def watch():
+            from .memory import describe
+            while True:
+                time.sleep(10)
+                with self.lock:running=[job['label'] for job in self.jobs.values() if job['status']=='running']
+                running+=list(dict(self.__dict__.get('active_phases',{})).values())
+                if running:logging.info('Still working: %s | %s',', '.join(running),describe())
+        threading.Thread(target=watch,name='workshop-job-watch',daemon=True).start()
 
     def cancel_job(self, body):
         key=body.get('id')
@@ -359,7 +381,8 @@ class AppState:
     def unit_image(self, template):
         """Artwork from the effective local stack, never arbitrary user paths."""
         index=self.index
-        if index is None:raise ValueError('Read resources first')
+        # No campaign read yet (the shop opens without one): no artwork, not an error.
+        if index is None:raise FileNotFoundError('Read resources first')
         if not re.fullmatch(r'[A-Za-z0-9_().-]{1,96}',template):raise ValueError('Invalid unit image identifier')
         index.resolve_entity(template)
         base=re.sub(r'\([^()]*\)$','',template)
@@ -649,7 +672,7 @@ class AppState:
         actual={name:digest for name,digest in _tree_hashes(addon).items() if name!=OWNERSHIP_FILE}
         change={'added':sorted(set(actual)-set(expected)),'removed':sorted(set(expected)-set(actual)),
                 'changed':sorted(name for name in set(actual)&set(expected) if actual[name]!=expected[name])}
-        backup=self.workspace/'backups'/'addon'/(datetime.now().strftime('%Y%m%d_%H%M%S')+'_changed_outside')
+        backup=self.workspace/'backups'/'addon'/(datetime.now().strftime('%Y%m%d_%H%M%S_%f')+'_changed_outside')  # two in one second must not collide
         self.make_room(addon)
         shutil.copytree(long_path(addon),long_path(backup))
         for old in sorted(backup.parent.glob('*_changed_outside'))[:-3]:  # a whole addon each: keep the latest three
@@ -1850,14 +1873,19 @@ class AppState:
         # Reading only: applying (set_shop) verifies the addon is ours.
         recipes=_recipes(addon)
         prices=self.shop_price_table() if self.index is not None else None
+        # Vehicles the last registration could not place in the active mods.
+        try:missing={row['id']:row.get('reason') or '' for row in json.loads((addon/'workshop_stack.json').read_text(encoding='utf-8')).get('skipped',[])}
+        except (OSError,ValueError,KeyError,TypeError,AttributeError):missing={}
         for manifest in sorted(addon.glob('workshop_manifest_*.json')):
             try:data=json.loads(manifest.read_text(encoding='utf-8'))
             except (OSError,ValueError):continue
             identifier=data.get('id')
-            if identifier not in recipes:continue
+            # Removed from the list: gone from this dialog for good. Its entity
+            # stays registered for campaigns that already own it.
+            if identifier not in recipes or data.get('shop_archived'):continue
             parts=vehicle_parts(recipes[identifier])
             row={'id':identifier,'name':data.get('display_name') or identifier,'on':bool(data.get('shop')),'parts':parts,
-                 'archived':bool(data.get('shop_archived')),
+                 'archived':False,'unavailable':missing.get(identifier),
                  'campaign':data.get('campaign'),'needs_update':bool(data.get('shop')) and data['shop'].get('policy')!=SHOP_POLICY}
             stored=data.get('shop') or {};row['custom_cost']=stored.get('cost')
             row['cost']=stored.get('cost',(stored.get('offer') or {}).get('cost',0))
@@ -2017,9 +2045,15 @@ class AppState:
             base=ResourceIndex(self.settings['game_root'],roots).build()
             try:registrations=rebuild_registrations(base,staging,identifiers=set(changes))
             finally:base.close()
-        failed=[row for row in registrations.get('skipped',[]) if row.get('id') in changes]
+        # A vehicle whose parts are not in the active mods (built with another
+        # stack) cannot be sold here, but taking it off sale or off the list
+        # needs nothing from those mods and must not be blocked by it.
+        selling={identifier for identifier,value in changes.items() if (value if type(value) is bool else value['on'])}
+        failed=[row for row in registrations.get('skipped',[]) if row.get('id') in selling]
         if failed:
-            raise ValueError('No se pudo cambiar la tienda de: '+'; '.join(f"{row['id']} ({row.get('reason')})" for row in failed))
+            names={row['id']:json.loads((staging/f"workshop_manifest_{row['id']}.json").read_text(encoding='utf-8')).get('display_name') or row['id'] for row in failed}
+            raise ValueError('No se puede vender con los mods activos: '+'; '.join(f"{names[row['id']]} ({row.get('reason')})" for row in failed)
+                             +'. Activá los mods con los que se construyó o sacalo de la lista.')
         describe_addon(staging)
         game=self.closed() or game
         previous=self._publish_addon(operation,staging,original)
@@ -2716,7 +2750,8 @@ def main(argv=None):
     args.workspace.mkdir(parents=True,exist_ok=True)
     handler=RotatingFileHandler(args.workspace/'workshop.log',maxBytes=4_000_000,backupCount=2,encoding='utf-8')
     logging.basicConfig(level=logging.INFO,handlers=[handler],format='%(asctime)s %(levelname)s %(message)s')
-    logging.info('Cursed Workshop %s started (%s, Python %s)',__version__,platform.platform(),platform.python_version())
+    from .memory import describe as memory_now
+    logging.info('Cursed Workshop %s started (%s, Python %s, %s)',__version__,platform.platform(),platform.python_version(),memory_now())
     record_crashes(args.workspace)
     state=AppState(args.workspace)
     try: state.closed()

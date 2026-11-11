@@ -523,6 +523,24 @@ def _validate_interaction_events(index,record):
         seen.add(key)
 
 
+def _stuff_names(index):
+    """{file name: [paths]} of everything under set/stuff, read once per index.
+
+    Every weapon of every compile asked for its definition by walking the whole
+    game (hundreds of thousands of entries): moving one fitting took seconds."""
+    entries = index.entries
+    cached = getattr(index, '__dict__', {}).get('_stuff_names')
+    if cached is not None and cached[0] is entries and cached[1] == len(entries):
+        return cached[2]
+    names = {}
+    for key, entry in entries.items():
+        if key.startswith("set/stuff/"):
+            names.setdefault(key.rsplit('/', 1)[-1], []).append(entry.path)
+    if hasattr(index, '__dict__'):
+        index.__dict__['_stuff_names'] = (entries, len(entries), names)
+    return names
+
+
 def _stuff_definition(index, identifier, from_path=None, pattern=False):
     suffixes = (".pattern",) if pattern else ("", ".weapon")
     # The game also names a weapon by its kind: {weapon "weapon 82mm_bm8_24"} (BM-8-24, Goliath).
@@ -533,9 +551,8 @@ def _stuff_definition(index, identifier, from_path=None, pattern=False):
             return index.resolve_reference(identifier, from_path, suffixes)
         except FileNotFoundError:
             pass
-    matches = [entry.path for key, entry in index.entries.items()
-               if key.startswith("set/stuff/") and any(PurePosixPath(key).name == identifier.casefold() + suffix
-                                                       for suffix in suffixes)]
+    names = _stuff_names(index)
+    matches = [path for suffix in suffixes for path in names.get(identifier.casefold() + suffix, ())]
     if len(matches) != 1:
         raise RegistrationError(f"Native weapon definition must resolve uniquely: {identifier}")
     return matches[0]

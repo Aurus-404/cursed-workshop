@@ -2,6 +2,15 @@ import {t} from './i18n.js';
 
 const zero=()=>({position:[0,0,0],rotation:[0,0,0]});
 const mountOf=row=>row?.recipient_mount||'turret';
+// Fittings the editor draws itself: where they sit, and a plate's size, change nothing in the drawn vehicle.
+export const DRAWN_FITTINGS=['extra_armor','smoke_launchers','towing','charge','rider_mgs','passenger_seats','commander_mg'];
+// Of those, the ones nothing else hangs from: moving them cannot change whether the vehicle builds.
+export const LOOSE_FITTINGS=['extra_armor','smoke_launchers','towing','charge'];
+const unplaced=value=>Array.isArray(value)?value.map(unplaced):value&&typeof value==='object'?
+  Object.fromEntries(Object.entries(value).filter(([name])=>!['position','rotation','pivot','plate'].includes(name)).map(([name,inner])=>[name,unplaced(inner)])):value;
+export function withoutPlacement(transform,names){const result={...transform};
+  for(const name of names)if(result[name]!==undefined)result[name]=unplaced(result[name]);return result;}
+
 export function vehicleDesign({state,$,job,displayPart,updateSelection,remember,reportError,mountLabel=name=>name,confirm=globalThis.confirm,receiveCrew=()=>{},onFocus=()=>{}}){
   let previewRevision=0,chassis={template:'',mounts:[],preferred:''},loading=null,changing=false,hosts=[],carrier='';
   const active=()=>!!state.transform.assembly_draft;
@@ -39,7 +48,10 @@ export function vehicleDesign({state,$,job,displayPart,updateSelection,remember,
     state.transform.turret=zero();placeholder();return true;}
   const body=()=>({hull:state.hull.template,transform:transform()});
   // Crew are placed over the drawn vehicle: moving one is no new preview.
-  const key=()=>{const value=body();delete value.transform.crew_seats;return JSON.stringify(value);};
+  // Fittings the editor draws itself (armour, smoke tubes, hooks, charges, mounted MGs, seats):
+  // where they sit, and a plate's size, change nothing in the drawn vehicle.
+  const key=()=>{const value=body();delete value.transform.crew_seats;
+    return JSON.stringify({...value,transform:withoutPlacement(value.transform,DRAWN_FITTINGS)});};
   // The chassis' own turrets name the targets: they keep their names however
   // many of them the design already replaced.
   function loadChassis(){

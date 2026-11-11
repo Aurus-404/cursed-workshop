@@ -1,2 +1,2 @@
 """Cursed Workshop (formerly Modular Workshop): independent Gates of Hell vehicle assembly tool."""
-__version__ = "0.11.11"
+__version__ = "0.11.12"

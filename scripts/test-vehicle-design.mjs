@@ -233,3 +233,21 @@ inheritedDesign.ensure();
 assert.equal(inheritedState.transform.source_recipe,undefined,'replayed source belongs only to the seed when starting another operation');
 assert.deepEqual(inheritedState.transform.assembly_draft.seed.transform.source_recipe,inheritedSource);
 assert.equal(inheritedState.transform.commander_mg.item,'kept');
+
+// Moving a fitting the editor draws itself asks for no new preview; adding or removing one does.
+{state.transform.extra_armor=[{asset:'a',parent:'body',position:[0,0,0],rotation:[0,0,0]}];const placed=design.key();
+  state.transform.extra_armor[0].position=[5,6,7];state.transform.extra_armor[0].rotation=[0,0,90];
+  if(design.key()!==placed)throw Error('moving armour must not change the preview key');
+  state.transform.extra_armor.push({asset:'b',parent:'body',position:[0,0,0],rotation:[0,0,0]});
+  if(design.key()===placed)throw Error('adding armour must change the preview key');
+  delete state.transform.extra_armor;}
+
+// The compatibility check ignores where loose fittings sit, but not what they hang from or mounted weapons' poses.
+{const {withoutPlacement,LOOSE_FITTINGS}=await import('../frontend/vehicle-design.js');
+  const base={extra_armor:[{asset:'a',parent:'body',position:[0,0,0],rotation:[0,0,0],plate:{width:1,height:1,thickness:1}}],commander_mg:{position:[1,2,3]},mobility:{speed:40}};
+  const same=x=>JSON.stringify(withoutPlacement(x,LOOSE_FITTINGS));
+  const moved=structuredClone(base);moved.extra_armor[0].position=[9,9,9];moved.extra_armor[0].plate.thickness=80;
+  if(same(moved)!==same(base))throw Error('moving or resizing armour must not ask for a new check');
+  const rehung=structuredClone(base);rehung.extra_armor[0].parent='turret';if(same(rehung)===same(base))throw Error('a new attachment point is a new check');
+  const mount=structuredClone(base);mount.commander_mg.position=[0,0,0];if(same(mount)===same(base))throw Error('other fittings hang from the commander mount: it is checked');
+  if(base.extra_armor[0].position.length!==3)throw Error('the design itself is left untouched');}

@@ -713,7 +713,7 @@ class ApplicationTests(unittest.TestCase):
             removed=self.state.set_shop({'changes':{'mw_a':{'on':False,'archived':True}}})
             stored=json.loads((addon/'workshop_manifest_mw_a.json').read_text())
             self.assertTrue(stored['shop_archived']);self.assertNotIn('shop',stored)
-            self.assertTrue(self.state.shop_listing()['vehicles'][0]['archived'])
+            self.assertEqual(self.state.shop_listing()['vehicles'],[],'a removed vehicle leaves the list for good')
             self.assertEqual(payload.read_bytes(),b'original geometry')
             self.assertEqual(json.loads(chained.read_text())['metadata']['recipient'],'mw_a')
             self.assertTrue((Path(removed['backup'])/'resource/entity/-vehicle/workshop/mw_a/model.ply').is_file())
@@ -724,6 +724,18 @@ class ApplicationTests(unittest.TestCase):
             self.assertFalse(self.state.shop_listing()['vehicles'][0]['archived'])
             self.assertNotIn('shop',json.loads((addon/'workshop_manifest_mw_a.json').read_text()))
             _owned_addon(addon,'modular_workshop:0')
+
+        # A design built with mods that are not active now (its donor is
+        # missing): it cannot be sold, but taking it off the list must work.
+        missing=lambda index,staging,identifiers:{'registered':[],'skipped':[{'id':'mw_a','reason':'Entity template not found: pzspwg_204'}]}
+        (addon/'workshop_stack.json').write_text(json.dumps({'skipped':[{'id':'mw_a','reason':'Entity template not found: pzspwg_204'}]}))
+        (addon/OWNERSHIP_FILE).write_text(json.dumps({'addon_mod':'modular_workshop:0','files':_tree_hashes(addon)}))
+        self.assertEqual(self.state.shop_listing()['vehicles'][0]['unavailable'],'Entity template not found: pzspwg_204')
+        with patch('workshop.registration.rebuild_registrations',side_effect=missing),patch('workshop.resources.ResourceIndex'):
+            with self.assertRaisesRegex(ValueError,'mods activos'):self.state.set_shop({'changes':{'mw_a':{'on':True}}})
+            self.state.set_shop({'changes':{'mw_a':{'on':False,'archived':True}}})
+            self.assertTrue(json.loads((addon/'workshop_manifest_mw_a.json').read_text())['shop_archived'])
+            self.assertEqual(self.state.shop_listing()['vehicles'],[])
 
     def test_creative_build_goes_to_the_shop_without_any_campaign(self):
         # Geofisika: any parts from the catalog, no unit spent, sold in the shop.
