@@ -1,6 +1,7 @@
 import {applyPose} from './pivot-editor.js';
 import * as THREE from 'three';
 import {t} from './i18n.js';
+import {shown} from './number-field.js';
 
 // Passenger seats: new ones anywhere (each a soldier the player places like a
 // smoke launcher), and the vehicle's own ones with another pose or spot.
@@ -47,7 +48,7 @@ export function passengerEditor({state,$,groups,scene,job,loading,remember,selec
     const current=index()>=0?rows()[index()].pose:place()?(changes()[place()]?.pose||native.find(s=>s.place===place())?.pose):'';
     if(current&&[...$('passenger-pose').options].some(o=>o.value===current))$('passenger-pose').value=current;
     const parent=index()>=0?rows()[index()].parent:'';$('passenger-parent').replaceChildren(...hosts.map(h=>new Option(h.name,h.name)));if(parent)$('passenger-parent').value=parent;
-    const offset=(place()&&changes()[place()]?.offset)||[0,0,0];for(let i=0;i<3;i++)$('passenger-offset-'+i).value=offset[i];
+    const offset=(place()&&changes()[place()]?.offset)||[0,0,0];for(let i=0;i<3;i++)$('passenger-offset-'+i).value=shown(offset[i]);
     controls();}
   async function ensureCatalog(){if(poses)return;poses=(await job('/api/passenger-catalog',{})).poses;
     $('passenger-pose').replaceChildren(...poses.map(p=>new Option(p.id+' ('+p.source+')',p.id)));

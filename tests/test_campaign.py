@@ -63,6 +63,46 @@ def make_save(path, scene=SCENE, status=STATUS):
 
 
 class CampaignTests(unittest.TestCase):
+    def test_weapon_attributes_reach_the_saved_vehicle(self):
+        # Aurus 12/11: a build with edited weapons stopped at "Unknown state
+        # profile fields". The copied places lose their saved state; the
+        # vehicle's saved ammunition takes the chosen count.
+        from workshop.campaign import _snapshot
+        scene=SCENE.replace('{Weaponry {State {Bullets 7}}}}','{Weaponry {State "gun" {Weapon "37mm"}} {State "mg" {Bullets 7}}}}')
+        source=make_save(self.path,scene)
+        snapshot=load_campaign(source)
+        profile={**PROFILE,'weapon_copy_places':['gun'],'ammo_totals':{'old_ammo':9}}
+        plan=plan_edit(snapshot,'0x9000','mw_attr',2,state_profile=profile,keep_names=True)
+        after=_snapshot(build_save_copy(snapshot,apply_plan(snapshot,plan)),source)
+        text=after._scene.render()
+        self.assertNotIn('{Weapon "37mm"}',text)
+        self.assertIn('{State "mg" {Bullets 7}}',text)
+        self.assertIn('{item "old_ammo" "ammo" 9 {cell 0 0}}',text)
+        for bad in ({'ammo_totals':{'old_ammo':-1}},{'ammo_totals':{'old_ammo':1.5}},{'weapon_copy_places':['']}):
+            with self.subTest(bad=bad),self.assertRaises(CampaignError):
+                plan_edit(snapshot,'0x9000','mw_attr',2,state_profile={**PROFILE,**bad},keep_names=True)
+
+    def test_creative_vehicle_joins_as_a_new_unit_with_empty_seats(self):
+        # A creative build put in the campaign: one new vehicle, its crew seats
+        # written as the game writes fallen soldiers; nothing else changes.
+        from workshop.campaign import _snapshot, plan_new
+        source=make_save(self.path)
+        snapshot=load_campaign(source)
+        plan=plan_new(snapshot,'mw_creative',3)
+        self.assertEqual((plan['consumed_eids'],plan['mid']),([],51))
+        replacements=apply_plan(snapshot,plan)
+        after=_snapshot(build_save_copy(snapshot,replacements),source)
+        new=next(u for u in after.units if u['eid']==plan['new_eid'])
+        self.assertEqual((new['template'],new['kind'],new['mid'],new['crew_eids']),('mw_creative','vehicle',51,[]))
+        self.assertEqual(after.squads[-1]['eids'],[plan['new_eid']]+['0xffffffff']*3)
+        self.assertEqual([s['eids'] for s in after.squads[:-1]],[s['eids'] for s in snapshot.squads])
+        self.assertEqual(after.mods[-1],'modular_workshop:0')
+        self.assertEqual(len(after.units),len(snapshot.units)+1)
+        self.assertEqual(source.read_bytes(),snapshot._zip_bytes)
+        with self.assertRaises(CampaignError):plan_new(snapshot,'tank_hull',3)
+        stale=dict(plan,new_template='mw_other')
+        with self.assertRaises(CampaignError):apply_plan(snapshot,stale)
+
     def test_existing_addon_is_moved_last_without_reordering_other_mods(self):
         from workshop.campaign import _snapshot
         for position in ('"modular_workshop:0" "first:0" "second:1"',

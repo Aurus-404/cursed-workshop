@@ -219,6 +219,40 @@ class GunAssemblyTests(unittest.TestCase):
         self.assertEqual(model['bones']['jet00']['parent'],'coax')
         self.assertNotEqual(model['bones'][names[0]]['world'],model['bones'][names[1]]['world'])
 
+    def test_the_replaced_barrel_is_never_kept_as_a_mantlet(self):
+        # Aurus 12/11: on the 280 mm Br-5 the recoiling barrel "gun" carries its
+        # breech cap; "keep the original mantlet" kept the whole old barrel.
+        from workshop.gun_assembly import _receiver_housings
+        model=parse_model(b'{skeleton {bone "basis" {bone "turret" {VolumeView "t.ply"} {bone revolute "gun_rot" {VolumeView "cradle.ply"}'
+                          b' {bone "gun" {VolumeView "barrel.ply"} {bone "breech_cap" {VolumeView "cap.ply"}} {bone "foresight1"}}}}}}')
+        spec={'bones':['breech_cap','foresight1','gun','gun_rot'],'link':'gun','pivot':'gun_rot','barrel':['gun']}
+        self.assertEqual(_receiver_housings(model,spec),{'gun_rot'})
+        # MB-2-12: the socket is a sight under the tube; the cradle is still the only housing.
+        self.assertEqual(_receiver_housings(model,{**spec,'link':'foresight1'}),{'gun_rot'})
+
+    def test_ammunition_without_shell_type_is_the_familys_only_one(self):
+        # MB-2-12 carries {item "bulletrus_305" 50}; the file is bulletrus_305.he.ammo.
+        from types import SimpleNamespace
+        from workshop.gun_assembly import _ammunition
+        files={'set/stuff/shell/bulletrus_305.he.ammo':b'{from "pattern shell" {entity "shell_305"}}',
+               'set/stuff/shell/shell.pattern':b'{bullet {entity "generic"}}'}
+        resources=SimpleNamespace(entries={k:SimpleNamespace(path=k) for k in files},read=files.__getitem__)
+        resources.resolve_reference=lambda *a:(_ for _ in ()).throw(FileNotFoundError())
+        found=_ammunition(resources,'bulletrus_305',{})
+        self.assertEqual(found['definition'],'set/stuff/shell/bulletrus_305.he.ammo')
+        files['set/stuff/shell/bulletrus_305.ap.ammo']=files['set/stuff/shell/bulletrus_305.he.ammo']
+        resources.entries['set/stuff/shell/bulletrus_305.ap.ammo']=SimpleNamespace(path='set/stuff/shell/bulletrus_305.ap.ammo')
+        with self.assertRaises(Exception):_ammunition(resources,'bulletrus_305',{})
+
+    def test_barrel_is_the_visible_piece_nearest_the_socket(self):
+        # StuG III / KV-2 / SU-76: "barrel only" kept the mantlet; MB-2-12 its cradle.
+        from workshop.gun_assembly import _contract
+        root=parse('{game_entity {Weaponry {place "gun" {weapon "g"} {LinkBone "foresight1"}}}}').find('game_entity')
+        model=parse_model(b'{skeleton {bone "basis" {bone "turret" {VolumeView "t.ply"} {bone revolute "gun_rot"'
+                          b' {bone "mantlet" {VolumeView "m.ply"} {bone "gun" {VolumeView "barrel.ply"} {bone "foresight1"}}}}}}}')
+        spec=_contract(root,model,root.find('Weaponry').find('place'))
+        self.assertEqual(spec['barrel'],['gun'])
+
     def test_shared_housing_follows_replacement_without_moving_coax_joint(self):
         for pivot in ([0,0,0],[3,0,1]):
             with self.subTest(pivot=pivot):

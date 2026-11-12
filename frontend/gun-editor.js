@@ -81,14 +81,15 @@ export function gunEditor({state,$,job,displayPart,updateSelection,selectEdit,re
     // joins it costing no unit); a catalog recipient (creative mode) builds
     // for the shop, where every part only names its model.
     const owned=u=>!!u?.eid&&!u.depot&&!u.designPlaceholder;
-    const designed=!!design&&(part==='hull'?owned(unit):owned(state.hull));
+    const designable=u=>owned(u)||!!u?.creative;
+    const designed=!!design&&(part==='hull'?designable(unit):designable(state.hull));
     const fromDepot=part==='turret'&&storedTurret(unit)&&state.tab==='depot';
-    if(designed&&!(unit.creative&&part!=='hull')&&!fromDepot&&(!owned(unit)||state.tab!=='campaign'))throw Error(t('Cambiar cañón requiere un receptor de tu campaña y un donante: otra unidad o una torreta del depósito.'));
+    if(designed&&!unit.creative&&!fromDepot&&(!owned(unit)||state.tab!=='campaign'))throw Error(t('Cambiar cañón requiere un receptor de tu campaña y un donante: otra unidad o una torreta del depósito.'));
     if(!designed&&!(unit.creative||state.hull?.creative)&&(design||!owned(unit)||state.tab!=='campaign'))throw Error(t('Cambiar cañón requiere un receptor de tu campaña y un donante: otra unidad o una torreta del depósito.'));
     if(!designed&&design?.active()){delete state.transform.assembly_draft;delete state.pendingTurret;if(state.turret?.designPlaceholder)state.turret=null;}
     if(designed){
       if(part==='hull'){await design.select(unit,part);await catalog('hull');controls();return;}
-      design.ensure();if(unit.eid===state.hull.eid)throw Error(t('Elegí otro vehículo como donante.'));
+      design.ensure();if(unit.eid&&unit.eid===state.hull.eid)throw Error(t('Elegí otro vehículo como donante.'));
       const recipient=state.transform.gun_swap?.recipient_place||'';
       state.turret=unit;state.transform.gun_swap={schema:1,recipient_place:recipient,donor_place:'',upright:true};
       if(!state.transform.gun_edit)state.transform.turret={position:[0,0,0],rotation:[0,0,0]};

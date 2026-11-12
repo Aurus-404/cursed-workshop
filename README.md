@@ -69,7 +69,7 @@ folder and keep working. Install this version and press **Update vehicles** once
 2. In Cursed Workshop, open your Conquest campaign.
 3. Pick a chassis and a turret (or a gun, or a tool such as extra armour), adjust it in the 3D view and press
    **Build vehicle**. The tool shows what will change and asks for confirmation; your save is backed up first.
-4. In the game, go to **Extras > Mods**, enable **Cursed Workshop - Built Vehicles** last in the list and apply.
+4. In the game, go to **Extras > Mods**, enable **Cursed Workshop - Built Vehicles (ACTIVATE THIS)** last in the list and apply.
 5. Use **Check loaded mod** in the tool before opening the campaign.
 
 [User guide and compatibility](docs/USER_GUIDE.md) · [Release notes](docs/releases/0.8.9.md)

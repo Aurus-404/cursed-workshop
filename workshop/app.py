@@ -660,7 +660,8 @@ class AppState:
         log and the build history, and they become the new record. An addon
         that is not the tool's stays untouched.
         """
-        from .transactions import OWNERSHIP_FILE, TransactionError, _owned_addon, _tree_hashes
+        from .transactions import OWNERSHIP_FILE, TransactionError, _owned_addon, _tree_hashes, refuse_newer_addon
+        refuse_newer_addon(addon)  # never adopt (rewrite) a newer version's addon
         try:
             return _owned_addon(addon,ADDON_MOD)
         except TransactionError:
@@ -1111,6 +1112,9 @@ class AppState:
         if self.index is None: self.index_resources()
         transform=dict(body.get('transform') or {})
         transform.update({key:body[key] for key in ('recipient_mount','donor_mount','crew_exclude') if body.get(key)})
+        # Weapon attributes change no geometry or crew: checked here, applied at build.
+        from .weapon_attributes import validate as validate_weapons
+        validate_weapons(transform.pop('weapon_attributes',None))
         key=json.dumps([body['hull'],body['donor'],transform,self.index.dlc_availability().key()],sort_keys=True)
         cache=self.__dict__.setdefault('checks',{})
         if key not in cache:
@@ -1145,7 +1149,8 @@ class AppState:
                            'crew_visibility':result.get('metadata',{}).get('crew_visibility',[]),
                            'passengers':self.passenger_listing(final_root,model,display_frame),
                            'commander_position':point(display_frame,point(locator['world'],[0,0,2]) if locator else model['anchor']),
-                           'shop_suggested_cost':self.suggested_shop_cost(result.get('metadata') or {})}
+                           'shop_suggested_cost':self.suggested_shop_cost(result.get('metadata') or {}),
+                           'weapons':self.weapon_listing(final_root)}
                 except Exception as error:
                     from .cancellation import JobCancelled
                     if isinstance(error, JobCancelled):raise
@@ -1258,7 +1263,9 @@ class AppState:
     def design_context(self,body,*,display=False,limit_body=None):
         from .draft import compile_draft
         if self.index is None:self.index_resources()
-        transform=body['transform'];signature=copy.deepcopy(transform)
+        # Weapon attributes change nothing drawn: the same preview serves them all.
+        transform={k:v for k,v in body['transform'].items() if k!='weapon_attributes'};body={**body,'transform':transform}
+        signature=copy.deepcopy(transform)
         hull=signature.get('hull') or {}
         from .pivots import pose_matrix
         pose_matrix(hull)  # An identity cache hit must not hide an invalid pivot.
@@ -1292,6 +1299,34 @@ class AppState:
         except BaseException:
             if view:view.close()
             temp.cleanup();raise
+
+    def play(self):
+        """Start Gates of Hell the way its Steam library entry does; the
+        game's own executable if Steam cannot be asked. Nothing else changes."""
+        from .process_guard import running_game_processes
+        from .locations import GAME_APP_ID
+        root=self.settings.get('game_root')
+        if running_game_processes(root):
+            return {'started':False,'running':True}
+        try:
+            os.startfile('steam://rungameid/'+GAME_APP_ID)  # Windows and Wine/Proton alike
+            logging.info('Play: asked Steam to start the game')
+            return {'started':True,'via':'steam'}
+        except (OSError,AttributeError) as error:
+            logging.warning('Play: Steam did not answer (%s)',error)
+        exe=Path(root or '')/'binaries'/'x64'/'call_to_arms.exe'
+        if not exe.is_file():
+            raise ValueError('No se pudo abrir el juego: Steam no respondió y no está call_to_arms.exe en la carpeta del juego.')
+        subprocess.Popen([str(exe)],cwd=str(exe.parent))
+        logging.info('Play: started %s',exe)
+        return {'started':True,'via':'exe'}
+
+    def weapon_listing(self,root):
+        """The vehicle's weapons and their native values (Weapon attributes tool)."""
+        from .weapon_attributes import describe
+        try:return describe(self.index,root)
+        except Exception as error:
+            logging.warning('Weapon attributes unavailable: %s',error);return []
 
     def design_catalog(self,body):
         from .gun_assembly import discover
@@ -1506,7 +1541,7 @@ class AppState:
         from .registration import (register_variant, rebuild_registrations, recorded_stack, stack_signature, write_stack,
                                    set_campaign, describe_addon, shop_cost)
         from .resources import ResourceIndex
-        from .campaign import plan_assembly, plan_refit, plan_edit
+        from .campaign import plan_assembly, plan_refit, plan_edit, plan_new
         from .transactions import prepare_transaction, OWNERSHIP_FILE, _owned_addon
         self.closed()
         if self.snapshot is None: raise ValueError('Abrí una campaña y sus recursos primero.')
@@ -1532,9 +1567,25 @@ class AppState:
             return unit
         supporting=body.get('mode')=='support'
         editing=body.get('mode')=='edit'
-        transform=body.get('transform',{})
-        drafting=transform.get('assembly_draft') is not None and not editing
-        if drafting:
+        # Creative: catalog models only. In the campaign it is a new unit; no
+        # unit or depot part is used.
+        creative=body.get('mode')=='creative'
+        # Where the vehicle goes: the campaign (its units become it), the
+        # Conquest shop (no unit is used and the save is not touched) or both.
+        destination=body.get('destination') or ('both' if body.get('shop') else 'campaign')
+        if destination not in ('campaign','shop','both'):raise ValueError('Elegí si el vehículo va a tu partida, a la tienda o a ambas.')
+        to_campaign,to_shop=destination!='shop',destination!='campaign'
+        transform=self.catalog_transform(body.get('transform')) if creative else body.get('transform',{})
+        drafting=transform.get('assembly_draft') is not None and not editing and not creative
+        if creative:
+            pieces=[]
+            for key in ('recipient_template','donor_template'):
+                template=body.get(key)
+                if not isinstance(template,str) or not template or not self.index.has_entity(template):
+                    raise ValueError('Elegí un chasis y una torreta del catálogo.')
+                pieces.append({'template':template,'label':self.index.label_for(template),'eid':None})
+            recipient,donor=pieces
+        elif drafting:
             from .draft import specification
             spec=specification(transform);recipient=part('recipient');resolved=[]
             if not recipient.get('eid'):raise ValueError('Elegí un vehículo receptor de tu campaña.')
@@ -1589,9 +1640,9 @@ class AppState:
             recipient,donor=part('recipient'),part('donor')
         if recipient.get('eid') and recipient.get('eid')==donor.get('eid'):
             raise ValueError('Elegiste el mismo vehículo como chasis y como módulo. Cambiá una de las dos partes.')
-        if not recipient.get('eid') and not donor.get('eid'):
+        if not creative and not recipient.get('eid') and not donor.get('eid'):
             raise ValueError('Usá al menos un vehículo de tu partida: dos piezas del depósito no tienen tripulación ni lugar en la campaña.')
-        transform=body.get('transform',{})
+        if not creative:transform=body.get('transform',{})
         if not drafting and donor.get('depot') and donor.get('mount'):
             if transform.get('donor_mount') not in (None,donor['mount']):
                 raise ValueError('Elegí el montaje guardado en esa pieza del depósito.')
@@ -1602,14 +1653,14 @@ class AppState:
             raise ValueError('Editar conserva la conversión de apoyo. Para convertir, usá la operación de apoyo.')
         if supporting and not transform.get('support_vehicle'):
             raise ValueError('Elegí un perfil de suministro nativo disponible.')
-        if transform.get('support_vehicle') and not (supporting or editing):
+        if transform.get('support_vehicle') and not (supporting or editing or creative):
             raise ValueError('La conversión de apoyo usa un solo vehículo y retira su torreta.')
         def weapon_choices(tr):
             from .draft import weapon_identity
             return weapon_identity(tr)
         if editing and weapon_choices(transform)!=weapon_choices(source.get('transform',{})):
             raise ValueError('Editar conserva el cañón instalado; para cambiarlo usá dos unidades con Cambiar cañón.')
-        if (transform.get('gun_swap') or transform.get('gun_swaps')) and not editing and (not recipient.get('eid') or not donor.get('eid')):
+        if (transform.get('gun_swap') or transform.get('gun_swaps')) and not editing and not creative and (not recipient.get('eid') or not donor.get('eid')):
             raise ValueError('Cambiar cañón requiere dos unidades de la campaña; las piezas del depósito no identifican un cañón individual.')
         fingerprint=hashlib.sha256(json.dumps({'hull':recipient['template'],'module':donor['template'],'transform':transform,
             'sources':self.index.sources},sort_keys=True).encode()).hexdigest()[:12]
@@ -1623,10 +1674,10 @@ class AppState:
         addon_id=ADDON_ID
         operation=self.workspace/'operations'/(datetime.now().strftime('%Y%m%d_%H%M%S')+'_'+secrets.token_hex(3))
         staging=operation/addon_id
-        rebuilt=None
+        rebuilt=None;original=None
         if existing.is_dir():
             with self.phase('Build: validate and copy existing addon'):
-                self.owned_addon(existing)
+                original=self.owned_addon(existing)
                 copy_tree(long_path(existing),long_path(staging),ignore=lambda directory,names:[OWNERSHIP_FILE] if OWNERSHIP_FILE in names else [])
             recorded=recorded_stack(staging)
             if recorded is None or recorded!=stack_signature(self.index) or self.stack_problem():
@@ -1673,7 +1724,10 @@ class AppState:
             emitted_root = parse((staging/'resource'/result['definition_path']).read_bytes()).find('game_entity')
             preserve_unchanged_loadout(metadata['state_profile'], original_root, emitted_root)
         crew_slots=metadata.get('crew_slots',len(metadata.get('crew_roles',[])) or None)
-        if drafting:
+        if not to_campaign:plan={}
+        elif creative:
+            plan=plan_new(snapshot,new_id,crew_slots,addon_mod=ADDON_MOD)
+        elif drafting:
             from .campaign import plan_draft
             plan=plan_draft(snapshot,recipient['eid'],new_id,crew_slots,metadata['draft_steps'],
                 addon_mod=ADDON_MOD,state_profile=metadata.get('state_profile'))
@@ -1694,12 +1748,23 @@ class AppState:
         with self.phase('Build: register variant'):
             from .registration import vehicle_parts
             # "Sell in the shop": priced from the units it is made of (registration.shop_offer).
-            shop={'parts':vehicle_parts(result.get('metadata') or {})} if body.get('shop') else None
+            shop={'parts':vehicle_parts(result.get('metadata') or {})} if to_shop else None
             if shop and body.get('shop_cost') is not None:shop['cost']=shop_cost(body['shop_cost'])
             registration=register_variant(self.index,result,staging,new_id,name,**({'shop':shop} if shop else {}))
-        set_campaign(staging,new_id,data.get('campaign_name') or Path(data['source_path']).stem)
+        if to_campaign:set_campaign(staging,new_id,data.get('campaign_name') or Path(data['source_path']).stem)
         describe_addon(staging)
         write_stack(staging,self.index,(rebuilt or {}).get('skipped'))
+        if not to_campaign:
+            # Shop only: the addon is published as in creative mode; the save,
+            # its units and the depot stay exactly as they are.
+            game=self.closed() or {}
+            previous=self._publish_addon(operation,staging,original)
+            offer=(registration.get('shop') or {}).get('offer')
+            self.record_history('shop_build',{'vehicle':new_id,'name':name,'recipient':recipient.get('template'),'donor':donor.get('template'),
+                'offer':offer,'transform':(result.get('metadata') or {}).get('transform')})
+            return {'destination':'shop','new_template':new_id,'name':name,'offer':offer,
+                    'backup':str(previous) if previous and previous.is_dir() else None,'reload_steps':self.reload_steps(game),
+                    'diagnostics':result.get('diagnostics',[])}
         # Leftover parts go to the depot once the build is installed.
         leftovers=[]
         if recipient.get('eid') and not drafting and not editing and not (transform.get('gun_swap') or transform.get('gun_swaps')) and (not supporting or metadata.get('support_vehicle',{}).get('removed_mount')):
@@ -1734,7 +1799,7 @@ class AppState:
         self.closed()
         with self.phase('Build: prepare verified transaction'):
             transaction=prepare_transaction(operation,snapshot,plan,addon_directory=staging)
-        response={'transaction':transaction,'compilation':result,'registration':registration,'plan':plan,
+        response={'destination':destination,'transaction':transaction,'compilation':result,'registration':registration,'plan':plan,
                   'addon_id':addon_id,'new_template':new_id,'operation_dir':str(operation),'source_path':data['source_path'],
                   'rebuilt_for_new_mods':rebuilt,'depot_change':depot_change,'name':name}
         self.last_result=response
@@ -1926,6 +1991,24 @@ class AppState:
         self.prune_old_operations()
         return previous
 
+    def catalog_transform(self,transform):
+        """Creative mode does everything: the vehicle is only models. A part
+        taken from a campaign or its depot is used as its catalog model and
+        spends nothing; unsaved changes are dropped."""
+        transform=copy.deepcopy(transform or {})
+        if not isinstance(transform,dict):raise ValueError('El diseño no es válido.')
+        for key in ('gun_swap','gun_edit','remove_module','source_recipe'):transform.pop(key,None)
+        draft=transform.get('assembly_draft')
+        if draft is not None:
+            if not isinstance(draft,dict):raise ValueError('El diseño no es válido.')
+            draft.pop('seed',None)
+            for row in [*(draft.get('turrets') or []),*([draft['turret']] if isinstance(draft.get('turret'),dict) else []),*(draft.get('guns') or [])]:
+                if not isinstance(row,dict) or row.get('native'):continue
+                row.pop('donor_eid',None);row.pop('donor_depot',None);row['donor_catalog']=True
+                if not isinstance(row.get('donor_template'),str) or not self.index.has_entity(row['donor_template']):
+                    raise ValueError('Una pieza del diseño no está en el catálogo con los mods activos.')
+        return transform
+
     def creative(self,body):
         """Creative mode (Geofisika): build from any vehicles of the catalog,
         spending no unit of any campaign. The vehicle goes to the Conquest shop
@@ -1942,12 +2025,7 @@ class AppState:
         for template in (recipient,donor):
             if not isinstance(template,str) or not template or not self.index.has_entity(template):
                 raise ValueError('Elegí un chasis y una torreta del catálogo.')
-        transform=copy.deepcopy(body.get('transform') or {})
-        if not isinstance(transform,dict):raise ValueError('El diseño no es válido.')
-        for key in ('assembly_draft','gun_swap','support_vehicle','remove_module'):
-            # Those operations take their parts from a campaign (or are unsaved);
-            # saved gun changes only name catalog models, like the chassis.
-            transform.pop(key,None)
+        transform=self.catalog_transform(body.get('transform'))
         name=str(body.get('name') or '').strip()[:100]
         fingerprint=hashlib.sha256(json.dumps({'hull':recipient,'module':donor,'transform':transform,'creative':True,
             'sources':self.index.sources},sort_keys=True).encode()).hexdigest()[:12]
@@ -2320,7 +2398,7 @@ class AppState:
                 if not exists(start):continue
                 try:_load_include_graph(index,start,generated=True)
                 except FileNotFoundError:
-                    return ('El addon local «Cursed Workshop - Built Vehicles» conserva referencias de otra combinación de mods. '
+                    return ('El addon local «Cursed Workshop - Built Vehicles (ACTIVATE THIS)» conserva referencias de otra combinación de mods. '
                             'Pulsá «Actualizar vehículos» para reconstruirlo con los mods actuales. Se conserva una copia de recuperación.')
                 except JobCancelled:raise
                 except Exception:logging.exception('Generated registration check skipped for %s',start)
@@ -2488,6 +2566,10 @@ class AppState:
                         target=staging/'resource'/'entity'/'-vehicle'/'workshop'/identifier
                         shutil.rmtree(long_path(target),ignore_errors=True)
                         shutil.copytree(long_path(compiled/'resource'/'entity'/'-vehicle'/'workshop'/identifier),long_path(target))
+                        for relative in result.get('weapon_files') or []:
+                            # Each edited weapon's own copy lives beside the native one.
+                            destination=staging/relative;destination.parent.mkdir(parents=True,exist_ok=True)
+                            shutil.copyfile(long_path(compiled/relative),long_path(destination))
                         recipe.unlink()
                         (staging/f'assembly_{identifier}.json').write_text(json.dumps(serial(result),ensure_ascii=False,indent=2),encoding='utf-8')
                         rebuilt.append(identifier)
@@ -2497,7 +2579,12 @@ class AppState:
                                 ('seat_rebased','orphan_slot_removed','boarding_clip_restored','rider_door_rebased')}))
                 finally:
                     if index is not base: index.close()
-            registrations=rebuild_registrations(base,staging,identifiers=set(rebuilt))
+            # Shop-only vehicles are not rebuilt here; refresh the ones whose
+            # stored weapon effects carry a fault the game crashes on.
+            from .weapon_effects import _BROKEN_DELAY
+            broken={p.stem[len('assembly_'):] for p in staging.glob('assembly_*.json')
+                    if _BROKEN_DELAY.search(p.read_text(encoding='utf-8',errors='replace'))}
+            registrations=rebuild_registrations(base,staging,identifiers=set(rebuilt)|broken)
             describe_addon(staging)
         finally:
             base.close()
@@ -2711,6 +2798,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(self.state.job(label,lambda:action(body),lane=lane,cancellable=cancellable),202)
             if route=='/api/screenshot':
                 return self.send_json(self.state.screenshot(body))
+            if route=='/api/play':
+                return self.send_json(self.state.play())
             if route=='/api/error-report':
                 return self.send_json(self.state.error_report(body))
             if route=='/api/pick':

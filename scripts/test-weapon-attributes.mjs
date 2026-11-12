@@ -1,0 +1,20 @@
+import assert from 'node:assert/strict';
+import {setValue,placeLabel} from '../frontend/weapon-attributes.js';
+// Only changed values are kept; going back to the native one removes it.
+let spec=setValue(undefined,['places','gun','range'],250,200);
+assert.deepEqual(spec,{places:{gun:{range:250}}});
+spec=setValue(spec,['places','gun','shells','ap','velocity'],800,750);
+assert.deepEqual(spec.places.gun.shells,{ap:{velocity:800}});
+spec=setValue(spec,['places','gun','shells','ap','penetration'],[1,2],null);
+assert.deepEqual(spec.places.gun.shells.ap.penetration,[1,2]);
+spec=setValue(spec,['places','gun','shells','ap','penetration'],null,null);
+spec=setValue(spec,['places','gun','shells','ap','velocity'],750,750);
+assert.deepEqual(spec,{places:{gun:{range:250}}});
+spec=setValue(spec,['ammo','shell_75 ap'],10,30);
+spec=setValue(spec,['places','gun','range'],200,200);
+assert.deepEqual(spec,{ammo:{'shell_75 ap':10}});
+assert.equal(setValue(spec,['ammo','shell_75 ap'],30,30),undefined);
+assert.equal(placeLabel({place:'gun',type:'',weapon:'37mm_kwk38t'}),'Cañón principal · 37mm_kwk38t');
+assert.equal(placeLabel({place:'mgun2',type:'coaxial',weapon:'mg37t'}),'Coaxial · mg37t');
+assert.equal(placeLabel({place:'mgun3',type:'',weapon:'mg34'}),'mgun3 · mg34');
+console.log('weapon attributes ok');

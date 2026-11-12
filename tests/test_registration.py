@@ -848,3 +848,22 @@ class ReserveSquadTests(unittest.TestCase):
         self.assertEqual(squad.find("content").args, ["mp/fra/early/tankman:1"])
         with self.assertRaises(RegistrationError):
             _register_reserves(Index(), [{"template": "mw_reserve_c(eng)", "breed": "mp/ger/early/tankman", "eids": ["0x4"]}])
+
+
+class SoundMacroTests(unittest.TestCase):
+    def test_positional_sound_macro_is_filled_like_the_game(self):
+        # Ima ballin 12/11: trucks and cars (Blitz, CCKW, ZiS...) use
+        # ("animation_sound" args "open_left"), which stopped every build.
+        from workshop.registration import RegistrationError, _expand_sound
+        from workshop.syntax import parse
+        document = parse('(define "animation_sound" {on animation_event %0 {play_sound %0}})'
+                         '(define "two_sound" {on %0 {play_sound %1}})'
+                         '{truck ("animation_sound" args "open_left") ("two_sound" args fire "boom") {on "x"}}')
+        defines = {n.args[0].casefold(): n for n in document.children if n.head == 'define'}
+        truck = next(n for n in document.children if n.head == 'truck')
+        rendered = [n.render() for n in _expand_sound(truck, defines)]
+        self.assertEqual(rendered, ['{on animation_event "open_left" {play_sound "open_left"}}',
+                                    '{on fire {play_sound "boom"}}', '{on "x"}'])
+        missing = parse('{truck ("two_sound" args fire)}').children[0]
+        with self.assertRaisesRegex(RegistrationError, 'needs adapter'):
+            _expand_sound(missing, defines)

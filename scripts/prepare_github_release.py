@@ -109,7 +109,7 @@ def prepare():
             'or run CursedWorkshop.exe --browser. Select your game folder in Settings.\n'
             'The former Steam Workshop item is not required.\n'
             'Close the game or leave it at the main menu before editing a campaign.\n'
-            'Enable Cursed Workshop - Built Vehicles LAST in Extras > Mods; apply.\n'
+            'Enable Cursed Workshop - Built Vehicles (ACTIVATE THIS) LAST in Extras > Mods; apply.\n'
             'Try a campaign copy first and keep backups. Read USER_GUIDE.md.\n'
             'Data/backups: %LOCALAPPDATA%\\ModularWorkshop.\n'
             'Source, updates, issues: https://github.com/Aurus-404/cursed-workshop\n'

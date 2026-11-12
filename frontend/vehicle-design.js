@@ -50,7 +50,7 @@ export function vehicleDesign({state,$,job,displayPart,updateSelection,remember,
   // Crew are placed over the drawn vehicle: moving one is no new preview.
   // Fittings the editor draws itself (armour, smoke tubes, hooks, charges, mounted MGs, seats):
   // where they sit, and a plate's size, change nothing in the drawn vehicle.
-  const key=()=>{const value=body();delete value.transform.crew_seats;
+  const key=()=>{const value=body();delete value.transform.crew_seats;delete value.transform.weapon_attributes;
     return JSON.stringify({...value,transform:withoutPlacement(value.transform,DRAWN_FITTINGS)});};
   // The chassis' own turrets name the targets: they keep their names however
   // many of them the design already replaced.
@@ -102,13 +102,15 @@ export function vehicleDesign({state,$,job,displayPart,updateSelection,remember,
     // chassis first, even if the previous selection mode was Turret.
     if(!state.hull){part='hull';state.pick='hull';}
     if(part==='hull'){
-      if(active()&&state.hull?.eid!==unit.eid){
+      const identity=u=>u?.eid||u?.template;
+      if(active()&&identity(state.hull)!==identity(unit)){
         if(!confirm(t('Elegir otro vehículo descarta este diseño sin construir. ¿Continuar?')))return;
         state.transform={hull:zero(),turret:zero()};
       }
       state.hull=unit;state.designTarget=null;ensure();placeholder();await refresh();return;
     }
-    ensure();if(unit.eid===state.hull.eid)throw Error(t('Elegí otro vehículo como donante.'));
+    // The catalog never runs out: a creative chassis may take its own model's turret.
+    ensure();if(unit.eid&&unit.eid===state.hull.eid)throw Error(t('Elegí otro vehículo como donante.'));
     if(!unit.eid&&!unit.depot)throw Error(t('Este diseño requiere donantes que sean vehículos de tu campaña.'));
     await loadChassis();
     const original=state.pendingTurret?.original;

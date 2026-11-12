@@ -22,8 +22,8 @@ ROOT = Path(__file__).resolve().parents[1]
 DOCS = ROOT / "docs"
 
 MOD_INFO = """{mod
-\t{name "Cursed Workshop (WIP) (External Tool)"}
-\t{desc "External tool for Dynamic Conquest. Run CursedWorkshop.exe from the CursedWorkshop folder of this item. Enable the generated local mod Cursed Workshop - Built Vehicles last in Extras > Mods."}
+\t{name "Cursed Workshop - Tool (DO NOT ACTIVATE)"}
+\t{desc "External tool for Dynamic Conquest. Run CursedWorkshop.exe from the CursedWorkshop folder of this item. Enable the generated local mod Cursed Workshop - Built Vehicles (ACTIVATE THIS) last in Extras > Mods."}
 \t{minGameVersion "any"}
 \t{maxGameVersion "any"}
 }
@@ -38,11 +38,11 @@ Probá primero con una copia de tu campaña.
 1. Cerrá el juego o dejalo en el menú principal, sin campaña cargada.
 2. Abrí CursedWorkshop\\CursedWorkshop.exe (está en esta misma carpeta).
 3. Elegí y abrí tu campaña, armá el vehículo y tocá "Construir vehículo".
-4. En Extras > Mods, activá "Cursed Workshop - Built Vehicles" al final de la lista y aplicá.
+4. En Extras > Mods, activá "Cursed Workshop - Built Vehicles (ACTIVATE THIS)" al final de la lista y aplicá.
 5. Usá "Comprobar mod cargado" en la herramienta antes de abrir la campaña. Conservá sus backups.
 
 No hace falta activar este ítem en la lista de mods: activá el mod local
-"Cursed Workshop - Built Vehicles" (carpeta mods\\modular_workshop del juego).
+"Cursed Workshop - Built Vehicles (ACTIVATE THIS)" (carpeta mods\\modular_workshop del juego).
 Guía completa: GUIA_DE_USO.md
 Soporte: Diagnóstico → copiar el informe como texto. No envía archivos automáticamente.
 """,
@@ -54,11 +54,11 @@ Test with a copy of your campaign first.
 1. Close the game or leave it in its main menu, with no campaign loaded.
 2. Run CursedWorkshop\\CursedWorkshop.exe (in this same folder).
 3. Select and open your campaign, assemble the vehicle and press "Build vehicle".
-4. In Extras > Mods, enable "Cursed Workshop - Built Vehicles" last and apply the list.
+4. In Extras > Mods, enable "Cursed Workshop - Built Vehicles (ACTIVATE THIS)" last and apply the list.
 5. Use "Check loaded mod" in the tool before opening the campaign. Keep its backups.
 
 You do not need to enable this item in the mod list: enable the generated local mod
-"Cursed Workshop - Built Vehicles" (the game's mods\\modular_workshop folder).
+"Cursed Workshop - Built Vehicles (ACTIVATE THIS)" (the game's mods\\modular_workshop folder).
 Full English guide: USER_GUIDE.md. Spanish guide: GUIA_DE_USO.md. Chinese guide: USER_GUIDE_ZH.md.
 Support: Diagnostics → copy the report as text. No files are sent automatically.
 """,

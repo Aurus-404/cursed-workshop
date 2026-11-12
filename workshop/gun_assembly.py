@@ -20,7 +20,7 @@ from .geometry import (parse_model, descendants, multiply, inverse, identity,
 from .compiler import (CompileError, _load_entity, _state_template, _explicit_weapon_operators, _crew_expansion,
     _include_defines, _set_matrix, _remove_bone, _rename_bone_refs, _module_ids,
     _volume_mapping, _rename_volume, _bind_renamed_volumes, _parameters, _values,
-    _edit_complete_crew, _Assets, _validate_export, _animation_map, _animation_layout, _animation_is_empty, _place_model_extension, _allowed_damage_ids, _prioritize_crew, _camera_sockets, _crew_roles, _validate_carriage_crew,
+    _edit_complete_crew, _Assets, _validate_export, _animation_map, _animation_layout, _animation_is_empty, _place_model_extension, _allowed_damage_ids, _prioritize_crew, _camera_sockets, _crew_roles, _validate_carriage_crew, _with_alternates, _crew_people,
     _append_inherited_crew, _optical_sockets, _write_generated)
 
 
@@ -150,9 +150,12 @@ def _contract(root, model, place, resources=None):
                     raise GunError('GunAssembly: Una referencia requerida queda fuera del conjunto desmontable.\n'+head+': '+reference.args[0])
     if not any(model['bones'][n]['assets'] for n in owned):
         raise GunError('GunAssembly: El conjunto desmontable no tiene geometría visible.')
-    # The barrel: the piece right under the elevation pivot on the way to the
-    # gun's own socket (the recoiling "gun" bone), with what hangs from it.
-    barrel=chain[chain.index(pivot)-1] if chain.index(pivot)>0 else None
+    # The barrel: the visible piece nearest the gun's own socket on the way up
+    # to the elevation pivot (the recoiling tube). Above it, up to the pivot,
+    # sit the cradle and mantlet: the MB-2-12 hangs its tube "gun1" from a
+    # cradle "gun1_rot". Without a visible piece there, the branch under the pivot.
+    below=chain[:chain.index(pivot)]
+    barrel=next((n for n in below if model['bones'][n]['assets']),below[-1] if below else None)
     spec={'place':place.args[0],'weapon':weapon.args[0],'link':link,'pivot':pivot,
           'bones':sorted(owned),'shared':sorted(shared),'yaw':pivots[1] if len(pivots)>1 else None,
           'barrel':_barrel(model,barrel,owned)}
@@ -223,15 +226,21 @@ def _receiver_housings(model, spec):
     """Visible socket ancestors and armor branches outside the firing branch."""
     owned=set(spec['bones'])
     link=spec['link']
-    path=set()
-    cursor=link
+    chain=[];cursor=link
     while cursor in owned:
-        path.add(cursor)
-        cursor=model['bones'][cursor]['parent']
+        chain.append(cursor);cursor=model['bones'][cursor]['parent']
+    # Only what holds the barrel: the barrel itself and what lies under it is
+    # the gun being replaced, even when a part hangs from it (Br-5: the barrel
+    # "gun" carries its breech cap, so "keep the original mantlet" kept the
+    # whole old barrel; MB-2-12: the socket is a sight under the tube).
+    barrel=set(spec.get('barrel') or [])
+    top=max((i for i,name in enumerate(chain) if name in barrel),default=0)
+    path=set(chain[top+1:])
+    gun=set(chain[:top+1])-{spec['pivot']}
     result=set()
     for name in owned:
         bone=model['bones'][name]
-        if not bone['assets']:continue
+        if not bone['assets'] or name in gun:continue
         children=descendants(model['bones'],name)-{name}
         armored=any(v['bone']==name for v in model['volumes'].values())
         if name==spec['pivot'] or (name in path and any(model['bones'][n]['assets'] for n in children)):
@@ -337,8 +346,13 @@ def _mounted_ammo(resources,root):
 def _ammunition(resources,item,sources):
     from .registration import _stuff_definition
     tokens=item.removeprefix('ammo ').casefold().split()
-    matches=[entry.path for key,entry in resources.entries.items() if key.startswith('set/stuff/')
-             and key.endswith('.ammo') and posixpath.basename(key)[:-5].split('.')==tokens]
+    files=[(posixpath.basename(key)[:-5].split('.'),entry.path) for key,entry in resources.entries.items()
+           if key.startswith('set/stuff/') and key.endswith('.ammo')]
+    matches=[path for names,path in files if names==tokens]
+    if not matches:
+        # An item without its shell type ({item "bulletrus_305" 50}, MB-2-12)
+        # is the family's only ammunition (bulletrus_305.he.ammo).
+        matches=[path for names,path in files if names[:len(tokens)]==tokens]
     if len(matches)!=1:
         raise GunError('GunAssembly: La munición no tiene una definición efectiva inequívoca.\n'+item)
     seen=set()
@@ -784,8 +798,11 @@ def compile_gun(resources, recipient, donor, transform, output, identifier, *, r
         _rename_bone_refs(sensor,vision_mapping)
     assets=_Assets(resources,output/'resource/entity/-vehicle/workshop'/identifier,sources,diagnostics)
     if transform.get('_design_crew'):
+        roles -= _with_alternates(rr,transform.get('crew_exclude') or [])
+        people=_crew_people(rr,roles)
         _edit_complete_crew(resources,rr,rm,transform)
-        roles -= set(transform.get('crew_exclude') or [])
+    else:
+        people=_crew_people(rr,roles)
     final=parse_model(rm['document'].render())
     assets.note_source(roriginal);assets.note_source(dm)
     assets.context('h',roriginal,final,exclude=rnames)
@@ -929,7 +946,7 @@ def compile_gun(resources, recipient, donor, transform, output, identifier, *, r
               'gun_camera_donor':donor if rs['place']==_primary_place(original_root) else recipient,
               'camera_bone_mapping':camera_mapping if rs['place']==_primary_place(original_root) else {},
               'donor_mount':ds['pivot'],'bone_mapping':({n:mapping.get(n,n) for n in dnames}
-                  if rs['place']==_primary_place(original_root) else {}),'crew_roles':sorted(roles),'crew_slots':len(roles),
+                  if rs['place']==_primary_place(original_root) else {}),'crew_roles':sorted(roles),'crew_slots':len(people),
               'source_hashes':sources,'state_profile':profile,'wrecks':wrecks,'crew_visibility':crew_visibility,'crew_attachment':crew_attachment,
               'validation':{'structural':'passed','dependencies':validation,'game_runtime':'pending','campaign_acceptance':'pending'}}
     from .weapon_effects import capture, transplant, interaction_source

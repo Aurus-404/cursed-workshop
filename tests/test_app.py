@@ -254,7 +254,41 @@ class ApplicationTests(unittest.TestCase):
         from workshop.registration import RegistrationError
         with self.assertRaises(RegistrationError):self.state.generate({**body,'shop':True,'shop_cost':-5})
 
-    def test_interface_preferences_survive_restart_without_changing_game_configuration(self):
+    def test_build_destination_campaign_shop_or_both(self):
+        profile,compiler,registrar,planner,transaction=self._generate_with_fixture_compiler()
+        body={'recipient_eid':'0x100','donor_eid':'0x200','transform':{'gun_swap':{'schema':1,'recipient_place':'gun','donor_place':'gun'}}}
+        with patch.object(self.state,'_publish_addon',return_value=self.root/'no-backup') as publish:
+            result=self.state.generate({**body,'destination':'shop'})
+        # Shop only: sold, no unit used, no save transaction, no depot change.
+        self.assertEqual(result['destination'],'shop');self.assertIn('shop',registrar.call_args.kwargs)
+        planner.assert_not_called();transaction.assert_not_called();publish.assert_called_once()
+        self.assertNotIn('depot_change',result)
+        result=self.state.generate({**body,'destination':'both'})
+        self.assertEqual(result['destination'],'both');self.assertIn('shop',registrar.call_args.kwargs);self.assertTrue(transaction.called)
+        result=self.state.generate({**body,'destination':'campaign'})
+        self.assertNotIn('shop',registrar.call_args.kwargs)
+        with self.assertRaises(ValueError):self.state.generate({**body,'destination':'nowhere'})
+
+    def test_creative_build_can_join_the_campaign_as_a_new_unit(self):
+        # A creative vehicle in the campaign: a new unit, no unit or depot part
+        # is used and nothing goes to the depot; parts of a campaign count as models.
+        profile,compiler,registrar,planner,transaction=self._generate_with_fixture_compiler()
+        self.state.index.has_entity=lambda template:template in ('cat_hull','cat_turret')
+        self.state.index.label_for=lambda template:template.title()
+        body={'mode':'creative','recipient_template':'cat_hull','donor_template':'cat_hull','destination':'both',
+              'transform':{'assembly_draft':{'schema':1,'turrets':[{'donor_template':'cat_turret','donor_eid':'0x200','recipient_mount':'turret'}],'guns':[]},
+                           'support_vehicle':None}}
+        with patch('workshop.campaign.plan_new',return_value={'fixture_new':True}) as plan_new:
+            result=self.state.generate(body)
+        self.assertEqual(plan_new.call_args.args[1:],(result['new_template'],3))
+        planner.assert_not_called();self.assertTrue(transaction.called)
+        self.assertEqual(result['depot_change'],{'add':[],'take':[]})
+        self.assertIn('shop',registrar.call_args.kwargs)
+        row=compiler.call_args.args[3]['assembly_draft']['turrets'][0]
+        self.assertTrue(row['donor_catalog']);self.assertNotIn('donor_eid',row)
+        with self.assertRaisesRegex(ValueError,'catálogo'):
+            self.state.generate({**body,'recipient_template':'missing'})
+
         original=copy.deepcopy(self.state.settings)
         with patch.object(self.state,'closed',side_effect=AssertionError('No game action')):
             self.assertEqual({k:v for k,v in self.state.ui_preferences().items() if k!='system_language'},{})
@@ -757,15 +791,26 @@ class ApplicationTests(unittest.TestCase):
              patch('workshop.registration.register_variant',side_effect=register), \
              patch('workshop.registration.describe_addon'),patch('workshop.registration.write_stack'), \
              patch.object(self.state,'mod_stack_problem',return_value=None):
+            with self.assertRaisesRegex(ValueError,'catálogo'):
+                self.state.creative({'recipient':'hull','donor':'hull','transform':{'assembly_draft':{'schema':1,'turrets':[{'donor_template':'nope'}]}}})
             result=self.state.creative({'recipient':'hull','donor':'donor','transform':{'gun_swaps':[{'recipient_place':'gun','donor_place':'gun'}],
-                'gun_swap':{'recipient_place':'gun'},'assembly_draft':{'schema':1},'towing':{'tier':'light'}}})
+                'gun_swap':{'recipient_place':'gun'},'towing':{'tier':'light'},'support_vehicle':{'schema':1},
+                'assembly_draft':{'schema':1,'seed':{'recipient':'x'},'turrets':[{'donor_template':'donor','donor_eid':'7','recipient_mount':'turret'},
+                    {'native':True,'recipient_mount':'aux_turret1','donor_template':'hull'}],
+                    'guns':[{'donor_template':'donor','donor_depot':'d1','recipient_place':'gun','donor_place':'gun'}]}}})
             with self.assertRaises(ValueError):self.state.creative({'recipient':'hull','donor':'nope'})
-        self.assertEqual(seen['shop'],{'parts':['hull','donor']})
+        self.assertEqual(seen['shop'],{'parts':['hull','donor','donor']},'the chassis, its new turret and the gun donor')
         self.assertEqual(seen['plan'],{},'no campaign plan: no save is written')
-        # Potato Emperor: saved gun changes only name catalog models, so they build;
-        # a design or an unsaved change belongs to a campaign and is dropped.
+        # Potato Emperor: saved gun changes only name catalog models, so they build.
+        # Creative does everything: several turrets, gun changes and support kits
+        # build too; a part from a campaign is used as its catalog model.
         self.assertEqual(seen['transform']['gun_swaps'],[{'recipient_place':'gun','donor_place':'gun'}])
-        self.assertNotIn('gun_swap',seen['transform']);self.assertNotIn('assembly_draft',seen['transform'])
+        self.assertNotIn('gun_swap',seen['transform']);self.assertIn('support_vehicle',seen['transform'])
+        draft=seen['transform']['assembly_draft']
+        self.assertNotIn('seed',draft)
+        self.assertEqual(draft['turrets'][0],{'donor_template':'donor','recipient_mount':'turret','donor_catalog':True})
+        self.assertEqual(draft['turrets'][1],{'native':True,'recipient_mount':'aux_turret1','donor_template':'hull'})
+        self.assertEqual(draft['guns'][0],{'donor_template':'donor','recipient_place':'gun','donor_place':'gun','donor_catalog':True})
         self.assertEqual(seen['name'],'Hull + Donor')
         self.assertEqual(result['offer'],{'cost':300,'stage':2})
         addon=self.state.addon_root()

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "goh-modular-workshop"
-version = "0.11.12"
+version = "0.12.12"
 description = "Offline campaign and vehicle assembly workshop for Gates of Hell"
 requires-python = ">=3.12"
 

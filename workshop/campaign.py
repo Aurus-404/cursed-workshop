@@ -235,11 +235,13 @@ def _profile(profile: dict | None) -> dict:
                "weaponry_policy", "weapon_places", "inventory_policy", "compatible_recipient_inventory",
                "removed_module_bones", "removed_module_volumes", "donor_module_bones",
                "donor_module_volumes", "allowed_damage_ids", "damage_id_mapping",
-               "hull_authority", "turret_authority", "commander_mg", "retired_inventory_users", "gun_swap", "smoke_launchers", "rider_mgs"}
+               "hull_authority", "turret_authority", "commander_mg", "retired_inventory_users", "gun_swap", "smoke_launchers", "rider_mgs",
+               "weapon_copy_places", "ammo_totals"}
     if set(profile) - allowed:
         raise CampaignError(f"Unknown state profile fields: {sorted(set(profile) - allowed)}")
     for key in ("recipient_module_names", "donor_module_names", "removed_module_bones",
-                "removed_module_volumes", "donor_module_bones", "donor_module_volumes", "allowed_damage_ids", "retired_inventory_users", "weapon_places"):
+                "removed_module_volumes", "donor_module_bones", "donor_module_volumes", "allowed_damage_ids", "retired_inventory_users", "weapon_places",
+                "weapon_copy_places"):
         if key in profile and (not isinstance(profile[key], list) or
                                any(not isinstance(x, str) or not x for x in profile[key])):
             raise CampaignError(f"{key} must be a list of component/volume names")
@@ -251,6 +253,12 @@ def _profile(profile: dict | None) -> dict:
         raise CampaignError("Weaponry policy is unsupported; a verified slot mapping is required")
     if profile.get("inventory_policy") not in (None, "donor", "recipient", "none_present", "reset", "gun_replace"):
         raise CampaignError("Unsupported vehicle inventory policy; grids cannot be blindly merged")
+    # Weapon attributes: the vehicle's ammunition by item name, whole rounds.
+    totals = profile.get("ammo_totals")
+    if totals is not None and (not isinstance(totals, dict) or any(
+            not isinstance(k, str) or not k or isinstance(v, bool) or not isinstance(v, int) or v < 0
+            for k, v in totals.items())):
+        raise CampaignError("ammo_totals must map ammunition items to whole round counts")
     gun=profile.get('gun_swap')
     if profile.get('inventory_policy')=='gun_replace':
         if not isinstance(gun,dict) or not isinstance(gun.get('place'),str) or not isinstance(gun.get('ammo_items'),list):
@@ -642,6 +650,31 @@ def _remove_inventory_ammo(inventory, families):
             if _inventory_ammo_family(item) in families:box.remove(item)
 
 
+def _set_ammo_totals(inventory, totals):
+    """The ammunition chosen in Weapon attributes, in the vehicle's saved
+    inventory: {item "bulletger_37" "aphe" "ammo" 117 {cell 0 3}} gets the count
+    chosen for "bulletger_37 aphe". Other stacks of it go; a missing one is added."""
+    if not totals:
+        return
+    from .weapon_attributes import save_item_key
+    box = inventory.find('box')
+    if box is None:
+        box = block('{box}');inventory.append(box)
+    for name, count in sorted(totals.items()):
+        key = tuple(w for w in name.split() if w.casefold() != 'ammo')
+        stacks = [item for item in box.find_all('item') if save_item_key(item) == key]
+        numbers = [item for item in stacks if any(re.fullmatch(r'\d+', a.value) and not a.quoted for a in item.atoms[1:])]
+        if numbers:
+            first = numbers[0]
+            next(a for a in first.atoms[1:] if re.fullmatch(r'\d+', a.value) and not a.quoted).set(str(int(count)))
+            for item in stacks:
+                if item is not first:box.remove(item)
+            if not count:box.remove(first)
+        elif count:
+            words = ' '.join(quote(w) for w in key)
+            box.append(block('{item ' + words + ' "ammo" ' + str(int(count)) + '}'))
+
+
 def _draft_inventory(inventories,reid,steps,final_profile=None):
     current=inventories[reid].clone() if reid in inventories else None
     final_gun=(final_profile or {}).get('gun_swap') or {}
@@ -906,6 +939,74 @@ def plan_removal(snapshot: CampaignSnapshot, vehicle_eid: str | int, *, addon_mo
     return plan
 
 
+def plan_new(snapshot: CampaignSnapshot, new_template: str, crew_slots: int | None, *,
+             addon_mod: str = "modular_workshop:0") -> dict:
+    """Add one new vehicle to the campaign (creative mode): no unit is used.
+
+    Its crew seats are empty, written as the game writes fallen soldiers, so
+    the player fills them in the game. Nothing else in the save changes.
+    """
+    if not re.fullmatch(r"mw_[A-Za-z0-9_-]+", str(new_template or "")):
+        raise CampaignError("Only a workshop vehicle can be added to the campaign")
+    slots = int(crew_slots or 0)
+    if not 0 <= slots <= 32:
+        raise CampaignError("The new vehicle has an invalid number of crew seats")
+    campaign = _one(snapshot._scene, "campaign", required=True)
+    nodes = _entity_nodes(campaign)
+    mids = [int(n.find("MID").args[0]) for n in nodes.values()
+            if n.find("MID") is not None and n.find("MID").args and str(n.find("MID").args[0]).isdigit()]
+    players = Counter(str(n.find("Player").args[0]) for n in nodes.values()
+                      if n.head.casefold() == "entity" and n.find("Player") is not None and n.find("Player").args)
+    plan = {"schema_version": 1, "operation": "add_new", "source_hash": snapshot.source_hash,
+            "new_template": new_template, "new_eid": _fresh_eid(campaign), "mid": max(mids, default=0) + 1,
+            "player": players.most_common(1)[0][0] if players else "0",
+            "crew_slots": slots, "crew_eids": [], "vacant_crew_slots": slots, "consumed_eids": [],
+            "consumed_squad_indices": [], "reserve_squads": [], "addon_mod": addon_mod,
+            "warnings": ["New vehicle with empty crew seats: fill them in the game."]}
+    plan["plan_id"] = hashlib.sha256(json.dumps(plan, sort_keys=True, ensure_ascii=False,
+                                                separators=(",", ":")).encode()).hexdigest()
+    return plan
+
+
+def _apply_new(snapshot: CampaignSnapshot, plan: dict) -> dict[str, bytes]:
+    expected = plan_new(snapshot, plan["new_template"], plan["crew_slots"], addon_mod=plan["addon_mod"])
+    if plan != expected:
+        raise CampaignError("Migration plan differs from the validated snapshot; recompute it")
+    scene = snapshot._scene.clone()
+    campaign = _one(scene, "campaign", required=True)
+    squads = _one(campaign, "CampaignSquads", required=True)
+    eid = plan["new_eid"]
+    entity = block("{Entity " + quote(plan["new_template"]) + " " + eid + "\n\t\t{Position 0 0}\n\t\t{Player "
+                   + plan["player"] + "}\n\t\t{MID " + str(plan["mid"]) + "}\n\t}")
+    # Units sit before the squads list, as the game writes them.
+    campaign.items.insert(campaign.items.index(squads), entity)
+    campaign.items.insert(campaign.items.index(squads), Trivia("\n\t"))
+    values = " ".join([eid] + ["0xffffffff"] * plan["vacant_crew_slots"])
+    squads.append(block("{" + quote(plan["new_template"]) + ' "" ' + values + "}"))
+    status = snapshot._status.clone()
+    _addon_last(status, plan["addon_mod"])
+    replacements = {"campaign.scn": scene.render().encode(snapshot._scene_encoding),
+                    "status": status.render().encode(snapshot._status_encoding)}
+    after = _snapshot(build_save_copy(snapshot, replacements), snapshot.source_path)
+    before_nodes = _entity_nodes(_one(snapshot._scene, "campaign", required=True))
+    after_nodes = _entity_nodes(_one(after._scene, "campaign", required=True))
+    if set(after_nodes) != set(before_nodes) | {eid} or eid in before_nodes:
+        raise CampaignError("Emitted save does not add exactly the new vehicle")
+    for other, node in before_nodes.items():
+        if after_nodes[other].render() != node.render():
+            raise CampaignError(f"Unrelated entity or veteran {other} was altered")
+    if _inventory_nodes(_one(after._scene, "campaign")).keys() != _inventory_nodes(_one(snapshot._scene, "campaign")).keys():
+        raise CampaignError("Inventories changed while adding a vehicle")
+    if [s["eids"] for s in after.squads[:-1]] != [s["eids"] for s in snapshot.squads] or after.squads[-1]["vehicle_eids"] != [eid]:
+        raise CampaignError("Existing squads changed while adding a vehicle")
+    new = next(u for u in after.units if u["eid"] == eid)
+    if not new["owned"] or new["template"] != plan["new_template"]:
+        raise CampaignError("The new vehicle is not in a squad of the campaign")
+    if not {m.casefold() for m in snapshot.mods} <= {m.casefold() for m in after.mods} or plan["addon_mod"] not in after.mods:
+        raise CampaignError("Existing mod requirements were not preserved")
+    return replacements
+
+
 def _apply_removal(snapshot: CampaignSnapshot, plan: dict) -> dict[str, bytes]:
     if plan != plan_removal(snapshot, plan["recipient_eid"], addon_mod=plan["addon_mod"]):
         raise CampaignError("Migration plan differs from the validated snapshot; recompute it")
@@ -954,6 +1055,8 @@ def apply_plan(snapshot: CampaignSnapshot, plan: dict) -> dict[str, bytes]:
         return (apply_storage if plan['operation']=='store_one' else apply_restoration)(snapshot,plan)
     if plan.get('operation') == 'remove_one':
         return _apply_removal(snapshot, plan)
+    if plan.get('operation') == 'add_new':
+        return _apply_new(snapshot, plan)
     try:
         if plan.get('operation')=='assemble_draft':
             expected=plan_draft(snapshot,plan['recipient_eid'],plan['new_template'],plan['crew_slots'],plan['draft_steps'],
@@ -1063,6 +1166,7 @@ def apply_plan(snapshot: CampaignSnapshot, plan: dict) -> dict[str, bytes]:
                                   or (places is not None and user.args[0] not in keep)):
                     item.remove(user)
         campaign.append(copied)
+        _set_ammo_totals(copied, plan['state_profile'].get('ammo_totals'))
         gun=plan['state_profile'].get('gun_swap')
         if gun and plan.get('operation')!='assemble_draft':
             # An edit must not replenish spent ammo. It may still remove only

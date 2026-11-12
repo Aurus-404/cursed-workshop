@@ -3,6 +3,7 @@ import * as THREE from 'three';
 import {t} from './i18n.js';
 import {previewMesh} from './model-geometry.js';
 import {dlcCatalogNote} from './dlc-catalog.js';
+import {shown} from './number-field.js';
 
 // Extra MGs manned by whoever climbs on the vehicle (like the Stuart's .50).
 // Same placement flow as the smoke launchers: a green preview, then Add, then
@@ -41,7 +42,7 @@ export function riderEditor({state,$,groups,scene,job,loading,remember,selectEdi
   }
   function fields(){const row=editing();if(!row)return;
     for(const [id,key] of [['rider-support','support'],['rider-pose','pose'],['rider-item','item']])if([...$(id).options].some(o=>o.value===row[key]))$(id).value=row[key];
-    for(let i=0;i<3;i++)$('rider-seat-'+i).value=(row.seat||[0,0,0])[i];
+    for(let i=0;i<3;i++)$('rider-seat-'+i).value=shown((row.seat||[0,0,0])[i]);
     for(const type of ['yaw','pitch'])for(let i=0;i<2;i++)$(`rider-${type}-${i}`).value=row[type][i];
   }
   function render(){selected=Math.max(0,Math.min(selected,rows().length-1));

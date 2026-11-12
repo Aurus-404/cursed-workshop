@@ -486,7 +486,45 @@ def verify_transaction(journal_path: str | Path) -> dict:
             "addon_files": len(journal["addon_hashes"]), "journal_path": str(path)}
 
 
+def _version_key(text: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in text.split("."))
+
+
+def addon_tool_version(path: Path) -> str | None:
+    """The newest Cursed Workshop version that wrote this addon: the one in
+    mod.info and the one each vehicle was built with."""
+    import re
+    found = []
+    try:
+        found += re.findall(r"Cursed Workshop (\d+(?:\.\d+)+)", (path / "mod.info").read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        pass
+    for recipe in path.glob("assembly_*.json"):
+        try:
+            value = json.loads(recipe.read_text(encoding="utf-8")).get("tool_version")
+        except (OSError, ValueError, AttributeError):
+            continue
+        if isinstance(value, str) and re.fullmatch(r"\d+(?:\.\d+)+", value):
+            found.append(value)
+    return max(found, key=_version_key) if found else None
+
+
+def refuse_newer_addon(path: Path) -> None:
+    """An older version must not rewrite a mod made by a newer one: it does
+    not know the newer files and settings, and can leave the game crashing on
+    load (a tester reopened 0.10.11 after building with 0.11.12)."""
+    from . import __version__
+    built = addon_tool_version(path)
+    if built and _version_key(built) > _version_key(__version__):
+        raise TransactionError(
+            f"Your built vehicles were made with Cursed Workshop {built}, newer than this one ({__version__}). "
+            "Download the latest version and use it instead: an older one could break them in the game. "
+            f"Tus vehículos se hicieron con Cursed Workshop {built}, más nuevo que este ({__version__}). "
+            "Descargá la última versión y usá esa: una más vieja podría romperlos en el juego.")
+
+
 def _owned_addon(path: Path, addon_mod: str) -> dict[str, str]:
+    refuse_newer_addon(path)
     try:
         marker = json.loads((path / OWNERSHIP_FILE).read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:

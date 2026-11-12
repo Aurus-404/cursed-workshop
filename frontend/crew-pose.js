@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import {saveCrewPlacement} from './crew-placement.js';
+import {shown} from './number-field.js';
 
 const AXES=['X','Y','Z'];
 const turn=degrees=>new THREE.Quaternion().setFromEuler(new THREE.Euler(...degrees.map(THREE.MathUtils.degToRad),'ZYX'));
@@ -37,9 +38,9 @@ export function crewPoseEditor({control,state,$,figure,module,remember,applied,c
     proxy.updateMatrixWorld(true);
     const value=current();
     for(let axis=0;axis<3;axis++){
-      $('crew-position-'+axis).value=value.position[axis];
-      $('crew-rotation-'+axis).value=value.rotation[axis];
-      $('crew-pivot-'+axis).value=(value.pivot||[0,0,0])[axis];}
+      $('crew-position-'+axis).value=shown(value.position[axis]);
+      $('crew-rotation-'+axis).value=shown(value.rotation[axis]);
+      $('crew-pivot-'+axis).value=shown((value.pivot||[0,0,0])[axis]);}
     buttons();
   }
   function attach(){

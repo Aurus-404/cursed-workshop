@@ -61,9 +61,11 @@ export function supportEditor({state,$,THREE,groups,job,displayPart,updateSelect
     updateSelection();selectEdit('turret');render();
   }
   async function select(unit){
-    if(!unit.eid||unit.depot||unit.kind!=='vehicle'||state.tab!=='campaign')throw Error(t('Elegí un vehículo de tu campaña para convertirlo en apoyo.'));
+    // A creative chassis converts too: the result goes to the shop.
+    const usable=unit.creative?!['human','infantry'].includes(unit.kind):unit.eid&&!unit.depot&&unit.kind==='vehicle'&&state.tab==='campaign';
+    if(!usable)throw Error(t('Elegí un vehículo de tu campaña para convertirlo en apoyo.'));
     const data=await catalog();
-    if(unit.template.startsWith('mw_')){
+    if(unit.eid&&unit.template.startsWith('mw_')){
       const source=await job('/api/edit-source',{eid:unit.eid});
       if(source.transform?.support_vehicle){state.hull={...unit,template:source.recipient};
         state.turret={...unit,template:source.donor,label:t('Carga de apoyo')};

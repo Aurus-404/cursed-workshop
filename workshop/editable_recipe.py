@@ -82,6 +82,8 @@ def reopen(metadata, recipes, model):
 
     def strip(tr):
         for key in FIELDS:tr.pop(key,None)
+        # Weapon copies belong to the finished vehicle only, never to a step.
+        tr.pop('weapon_attributes',None)
         seed = (tr.get('assembly_draft') or {}).get('seed')
         if seed:strip(seed['transform'])
         existing = tr.get('source_recipe')

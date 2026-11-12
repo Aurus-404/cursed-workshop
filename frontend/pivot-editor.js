@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import {shown} from './number-field.js';
 
 export function fittingParent(row, commanderBones={}){
   const ref=row?.parent_ref;
@@ -27,7 +28,7 @@ export function pivotEditor({scene,control,state,$,pose,target,base=()=>[0,0,0],
     object.updateWorldMatrix(true,false);
     const matrix=object.matrixWorld.clone().multiply(new THREE.Matrix4().makeTranslation(...(row.pivot||[0,0,0])));
     matrix.decompose(proxy.position,proxy.quaternion,proxy.scale);proxy.updateMatrixWorld(true);
-    for(let i=0;i<3;i++)$('pivot-'+i).value=(row.pivot||[0,0,0])[i];
+    for(let i=0;i<3;i++)$('pivot-'+i).value=shown((row.pivot||[0,0,0])[i]);
     $('pose-pivot').setAttribute('aria-pressed',String(!!state.editPivot));
     $('pose-pivot').classList.toggle('active',!!state.editPivot);
     for(const [id,mode] of [['pose-move','translate'],['pose-rotate','rotate']]){

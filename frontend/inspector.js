@@ -6,6 +6,7 @@ export const INSPECTOR_TOOLS={
   position:{hint:'Colocá la torreta o el arma y elegí con qué parte gira.',label:'Posición y montaje',fields:['design-turret-pos-field','mount-select','module-host-field'],pose:true},
   joints:{hint:'Ajustá cuánto giran y se elevan la torreta y el cañón, y a qué velocidad.',label:'Límites de torreta y cañón',fields:['design-turret-limits-field','weapon-joints']},
   mobility:{hint:'Cambiá la velocidad, el giro y la potencia del chasis.',label:'Movilidad del chasis',fields:['mobility-field'],part:'hull'},
+  weapons:{hint:'Cambiá recarga, cadencia, alcance, munición, penetración y daño de cada arma del vehículo.',label:'Atributos de armas',fields:['weapons-field']},
   crew:{hint:'Mové, ocultá o fijá a los tripulantes del vehículo.',label:'Tripulantes',fields:['design-module-crew-field','crew-pending-field','crew-static-field','crew-field','crew-visibility-field']},
   commander:{hint:'Agregá un arma que usa el comandante desde su escotilla.',label:'Arma del comandante',fields:['commander-field'],part:'commander_mg',pose:true},
   armor:{hint:'Agregá piezas de protección: del juego o una placa a medida.',label:'Blindaje extra',fields:['armor-section'],part:'extra_armor',pose:true},
@@ -51,7 +52,7 @@ export function inspectorMenus({document=globalThis.document,state,support,gun=(
   // Reparent the existing controls: the heading and the tool always share
   // the same selection, handlers and stable component identities.
   for(const id of ['turret-target','design-turret-pos','design-turret-limits','design-module-crew',
-    'gun-recipient','armor-list','smoke-list','rider-list','passenger-list','cargo-list','cmd-parent']){
+    'gun-recipient','armor-list','smoke-list','rider-list','passenger-list','cargo-list','cmd-parent','weapons-select']){
     const select=$(id),field=document.createElement('div');field.className='field working-target-field';
     moveSelector(select,field);context.append(field);selectors[id]=field;
   }
@@ -64,7 +65,7 @@ export function inspectorMenus({document=globalThis.document,state,support,gun=(
     const editing=!!navigation.tool,busy=state.busy||state.inspectorPending>0;
     const contextKey=({operation:gun()?'gun-recipient':'turret-target',position:gun()?'gun-recipient':'design-turret-pos',
       joints:'design-turret-limits',crew:'design-module-crew',armor:'armor-list',smoke:'smoke-list',rider:'rider-list',
-      passengers:'passenger-list',cargo:'cargo-list',commander:'cmd-parent'})[navigation.tool];
+      passengers:'passenger-list',cargo:'cargo-list',commander:'cmd-parent',weapons:'weapons-select'})[navigation.tool];
     const choices=contextKey&&$(contextKey).options;
     const usable=editing&&contextKey&&!!state.hull&&(!choices||choices.length>0);
     // Change gun reads top to bottom: operation, the recipient gun, then the

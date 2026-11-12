@@ -443,17 +443,33 @@ def _roster_entry(index, template):
     return path, node, provenance
 
 
+def _sound_macro_body(call, macro):
+    """A sound macro's body with its positional parameters filled in, as the
+    game does: ("animation_sound" args "open_left") makes %0 "open_left"
+    (Ima ballin: 63 trucks and cars use it). Only plain positional values are
+    substituted; anything else still needs an adapter, never a guess."""
+    if not any("%" in atom.value for item in macro.walk() for atom in item.atoms):
+        return macro
+    values = call.atoms[1:]
+    if values and not values[0].quoted and values[0].value.casefold() == "args":
+        values = values[1:]
+    body = "".join(part.render() for part in macro.items[macro.items.index(macro.atoms[1]) + 1:])
+    used = re.findall(r"%(\w+)", body)
+    if call.children or not used or any(not name.isdigit() or int(name) >= len(values) for name in used):
+        raise RegistrationError(f"Parameterized sound macro needs adapter: {call.head}")
+    expanded = block("{body " + re.sub(r"%(\d+)", lambda match: values[int(match.group(1))].raw, body) + "}")
+    return expanded
+
+
 def _expand_sound(node, defines, stack=()):
-    """Expand no-parameter sound macros only; never evaluate Lua/game scripts."""
+    """Expand sound macros, filling positional parameters; never evaluate Lua/game scripts."""
     output = []
     for child in node.children:
         macro = defines.get(child.head.casefold()) if child.opener == "(" else None
         if macro and child.head.casefold().endswith("_sound"):
             if child.head.casefold() in stack:
                 raise RegistrationError("Cyclic sound macro")
-            if any("%" in atom.value for item in macro.walk() for atom in item.atoms):
-                raise RegistrationError(f"Parameterized sound macro needs adapter: {child.head}")
-            output.extend(_expand_sound(macro, defines, (*stack, child.head.casefold())))
+            output.extend(_expand_sound(_sound_macro_body(child, macro), defines, (*stack, child.head.casefold())))
         else:
             output.append(child.clone())
     return output

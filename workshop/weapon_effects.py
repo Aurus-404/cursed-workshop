@@ -229,6 +229,10 @@ def _capture(resources, template):
     return result
 
 
+_NUMERIC = re.compile(r'[-+]?[0-9.]')
+_BROKEN_DELAY = re.compile(r'(\{delay\s+\S+\s+)cw_[0-9a-f]{10}_(?=[-+]?[0-9.])')
+
+
 def transplant(contracts, places, mapping=None, sequences=None, namespace='', *, owned=None):
     """Filter by selected places and remap all local effect identities together."""
     mapping, sequences = mapping or {}, sequences or {}
@@ -259,7 +263,8 @@ def transplant(contracts, places, mapping=None, sequences=None, namespace='', *,
                 if head == 'set' and args: variables.add(args[0])
                 if head == 'tags' and len(args) > 1: tags.update(args[1].split()); names.update(tags)
                 if head == 'on' and args[:1] != ['fire'] and args: names.add(args[0])
-                if head == 'delay' and len(args) > 1: names.add(args[1])
+                # {delay 4 3 ...}: a second number, not a name (167 in the game).
+                if head == 'delay' and len(args) > 1 and not _NUMERIC.match(args[1]): names.add(args[1])
         prefix = 'cw_' + hashlib.sha256((namespace + '/' + row['place']).encode()).hexdigest()[:10] + '_'
         rename = {n: prefix+n for n in names} if namespace else {}
         for node in nodes:
@@ -318,6 +323,9 @@ def install(record, contracts, resources=None):
     for row in contracts:
         setup.extend(row['setup'])
         for text in row['events']:
+            # Vehicles built before this fix prefixed a delay's second number
+            # (cw_<hash>_0.5); the game cannot read that and crashes loading.
+            text = _BROKEN_DELAY.sub(r'\1', text)
             event = block(text)
             key = [a for a in event.args if a.casefold() != 'overload']
             for old in list(record.find_all('on')):

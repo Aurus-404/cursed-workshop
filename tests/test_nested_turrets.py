@@ -237,6 +237,25 @@ class NestedTurretTests(unittest.TestCase):
         views = [block(text) for text in imported[0]['setup'] if block(text).head == 'add_view']
         self.assertEqual({v.args[2] for v in views}, {'shooter00','shooter01'})
 
+    def test_a_delay_number_is_not_renamed_as_a_delay_name(self):
+        # {delay 2.5 0.5 ...}: the second value is a number. A tester's game
+        # crashed loading the mod after it became cw_<hash>_0.5.
+        from workshop.weapon_effects import transplant
+        effects = [{'place': 'gun', 'shooters': [], 'setup': [],
+                    'events': ['{on fire "gun" {delay 2.5 0.5 {view stop "smoke"}} {delay 1 "puff" {view stop "smoke"}} {kill_delay "puff"}}']}]
+        event = transplant(effects, {'gun': 'gun'}, {}, namespace='x')[0]['events'][0]
+        self.assertIn('{delay 2.5 0.5 ', event)
+        self.assertNotIn('"puff"', event)
+        self.assertIn('_puff', event)
+
+    def test_a_vehicle_built_with_a_renamed_delay_number_is_repaired_on_install(self):
+        from workshop.weapon_effects import install
+        broken = [{'place': 'gun', 'setup': [], 'events': ['{on fire "gun" overload {delay 2.5 cw_4c2bcb41ac_0.5 {view stop "cw_4c2bcb41ac_smoke"}}}']}]
+        record = install(block('{"tank" {on spawn {inherited}}}'), broken)
+        text = record.render()
+        self.assertIn('{delay 2.5 0.5 ', text)
+        self.assertIn('"cw_4c2bcb41ac_smoke"', text)
+
     def test_a_native_single_emitter_is_dispatched_to_every_declared_barrel(self):
         path = self.root/'game/resource/set/interaction_entity/entity.set'
         path.write_text('''{entities {"native_dual tank"

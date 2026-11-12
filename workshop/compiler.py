@@ -1069,6 +1069,76 @@ def _rotating_bones(root):
             if any(child.head.casefold() in ("limits", "speed", "speed2") for child in node.children)}
 
 
+def _carriage_parents(root):
+    """On a towed gun the push and tow places are alternate places of the
+    same people: {link "driver1" "gunner"} moves the gunner to push, and
+    {link "seat1" "driver1"} seats him for towing. Returns {alternate: its
+    owner place}; empty on anything that is not a towed carriage."""
+    states = _cannon_workers(root)
+    if not (states.get('move') or states.get('trailing')):
+        return {}
+    places = {p.args[0] for pl in root.find_all('placer') for p in pl.find_all('place') if p.args}
+    graph, sources = {}, set()
+    for boarder in root.find_all('boarder'):
+        for link in boarder.find_all('link'):
+            if len(link.args) >= 2 and link.args[0] in places and link.args[1] in places and link.args[0] != link.args[1]:
+                a, b = link.args[:2]
+                graph.setdefault(a, set()).add(b)
+                graph.setdefault(b, set()).add(a)
+                sources.add(a)
+    # The people: the firing crew when the carriage names it, otherwise the
+    # places nobody moves away from ({link "driver1" "gunner"}: gunner).
+    owners = (states.get('attack') or (set(graph) - sources)) & set(graph)
+    parents, pending = {}, sorted(owners)
+    seen = set(owners)
+    while pending:
+        owner = pending.pop(0)
+        for place in sorted(graph.get(owner, ())):
+            if place not in seen:
+                seen.add(place)
+                parents[place] = owner
+                pending.append(place)
+    return parents
+
+
+def _crew_people(root, roles):
+    """How many soldiers the vehicle carries: alternate places of a towed gun
+    belong to someone already counted."""
+    parents = _carriage_parents(root)
+    return {role for role in roles if parents.get(role) not in roles}
+
+
+def _cannon_operators(root):
+    """The places a cannon's {animation} columns name: "gunner" and
+    "commander", in that order ({reload "" "flak30_loader"}: the commander
+    loads). The engine plays them on whoever sits there; with that seat gone
+    it reads a missing actor and the game crashes (2 cm Flak 30 without its
+    commander, under direct control)."""
+    required = set()
+    for controller in root.find_all('extender'):
+        if controller.args != ['cannon']:
+            continue
+        for animation in controller.find_all('animation'):
+            for clip in animation.children:
+                for column, name in zip(clip.args, ('gunner', 'commander')):
+                    if column:
+                        required.add(name)
+    return required
+
+
+def _with_alternates(root, excluded):
+    """Whoever stays behind takes his push and tow places along: left alone,
+    nobody can take them and the game cannot board the rest of the crew.
+    A cannon's own operators never stay behind (_cannon_operators)."""
+    parents = _carriage_parents(root)
+    excluded = set(excluded) - _cannon_operators(root)
+    while True:
+        more = {place for place, owner in parents.items() if owner in excluded} - excluded
+        if not more:
+            return excluded
+        excluded |= more
+
+
 def _exclude_crew(root, excluded):
     """Leave crew roles of the module behind (editor: "who rides along").
 
@@ -1078,6 +1148,7 @@ def _exclude_crew(root, excluded):
     """
     if not excluded:
         return
+    excluded = _with_alternates(root, excluded)
     weaponry = root.find("Weaponry")
     for place in (weaponry.find_all("place") if weaponry else []):
         gunner_node = next((node for node in place.children if node.head.casefold() == "gunner" and node.args), None)
@@ -1103,8 +1174,26 @@ def _exclude_crew(root, excluded):
                     parent.remove(node)
             elif head == "anm" and parent.head.casefold() == "boarder" and node.args and node.args[0] in excluded:
                 parent.remove(node)
-            elif head == "link" and len(node.args) >= 2 and node.args[1] in excluded:
+            elif head == "link" and len(node.args) >= 2 and (node.args[1] in excluded or node.args[0] in excluded):
                 parent.remove(node)
+            elif head == "workers" and any(name in excluded for name in node.args):
+                # The cannon is pushed or towed by whoever is left.
+                names, minimum = [], None
+                for index, value in enumerate(node.args):
+                    if value.casefold() == "minworkers":
+                        minimum = node.args[index + 1] if index + 1 < len(node.args) else None
+                        break
+                    names.extend(name for name in value.split() if name not in excluded)
+                if not names:
+                    parent.remove(node)
+                    continue
+                text = "{workers " + " ".join(quote(name) for name in names)
+                if minimum is not None:
+                    try:
+                        text += " minWorkers " + str(min(int(float(minimum)), len(names)))
+                    except ValueError:
+                        text += " minWorkers " + str(len(names))
+                parent.items[parent.items.index(node)] = block(text + "}")
 
 
 def _mans_main_weapon(places, role):
@@ -1702,6 +1791,7 @@ def seat_markers(resources, template):
     # gun's crew pushing it (driver1 -> gunner) or riding it (seat1 -> driver1).
     alternates = {link.args[0] for b in boarders for link in b.find_all("link")
                   if len(link.args) >= 2 and link.args[0] in effective and link.args[1] in effective}
+    required = _cannon_operators(root)
     seats = []
     for role, values in effective.items():
         # Entity sockets display their attached item, not a human actor.
@@ -1710,7 +1800,8 @@ def seat_markers(resources, template):
         seats.append({'place': role, 'group': values.get('group', 'crew').casefold() or 'crew',
                       'bone': values.get('linkbone', ''),
                       'weapon': role in weapon_roles or role in ('gunner', 'commander', 'charger'),
-                      'aims': role in aiming, 'pose': clips.get(role) or links.get(role)})
+                      'aims': role in aiming, 'required': role in required,
+                      'pose': clips.get(role) or links.get(role)})
     return seats
 
 
@@ -2683,7 +2774,7 @@ def _compile_vehicle_edit(resources, template, transform, output_dir, new_id):
     profile={'weaponry_policy':'recipient','inventory_policy':'recipient','allowed_damage_ids':sorted(allowed),
              'weapon_places':weapon_places(root)}
     metadata={'schema_version':1,'compiler':'independent-gem-assembly','id':new_id,'recipient':template,'donor':template,
-              'transform':transform,'crew_roles':sorted(crew),'crew_slots':len(crew),'source_hashes':sources,
+              'transform':transform,'crew_roles':sorted(crew),'crew_slots':len(_crew_people(root,crew)),'source_hashes':sources,
               'crew_visibility':crew_visibility,'crew_attachment':crew_attachment,'manual_crew':manual_crew,
               'recipient_mount':'@full','donor_mount':'@full','bone_mapping':{},'bone_map':{},
               'state_profile':profile,'wrecks':wrecks,'validation':{'structural':'passed','dependencies':validation,
@@ -2784,6 +2875,61 @@ def _merge_sensors(recipient_root, donor_root, recipient_model, bone_mapping, do
 
 
 def compile_assembly(resources, recipient_template, donor_template, transform, output_dir, new_id):
+    """Compile a vehicle; edited weapon attributes are applied last, to the
+    finished definition, whatever operation built it."""
+    attributes = (transform or {}).get('weapon_attributes')
+    if not attributes:
+        return _compile_assembly(resources, recipient_template, donor_template, transform, output_dir, new_id)
+    from .weapon_attributes import validate
+    try:
+        validate(attributes)
+    except ValueError as error:
+        raise CompileError(str(error)) from error
+    inner = {k: v for k, v in transform.items() if k != 'weapon_attributes'}
+    result = _compile_assembly(resources, recipient_template, donor_template, inner, output_dir, new_id)
+    return apply_weapon_attributes(resources, result, attributes)
+
+
+def apply_weapon_attributes(resources, result, attributes):
+    """Give each edited weapon place its own weapon copy in the compiled output."""
+    from .weapon_attributes import apply
+    output = Path(result['output_dir'])
+    definition = output / 'resource' / result['definition_path']
+    document = parse(definition.read_bytes())
+    root = entity_root(document)
+    metadata = result.setdefault('metadata', {})
+    diagnostics = result.setdefault('diagnostics', [])
+    try:
+        files, renamed, totals = apply(resources, root, attributes, result['id'], diagnostics)
+    except ValueError as error:
+        raise CompileError(str(error)) from error
+    raw = document.render().encode('utf-8').replace(b'\r\n', b'\n').replace(b'\n', b'\r\n')
+    definition.write_bytes(raw)
+    hashes = metadata.setdefault('file_hashes', {})
+    if definition.name in hashes:
+        hashes[definition.name] = hashlib.sha256(raw).hexdigest()
+    written = []
+    for relative, text in files.items():
+        target = output / relative
+        if target.exists():
+            raise CompileError('A weapon copy collides with an existing file: ' + relative)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(text.replace('\r\n', '\n').replace('\n', '\r\n').encode('utf-8'))
+        written.append(relative)
+    result['files'] = sorted(set(result.get('files') or []) | set(written))
+    result['weapon_files'] = sorted(written)
+    profile = metadata.setdefault('state_profile', {})
+    if renamed:
+        # The save names each place's weapon; a kept State would mount the native one.
+        profile['weapon_copy_places'] = sorted(renamed)
+    if totals:
+        profile['ammo_totals'] = totals
+    metadata.setdefault('transform', {})['weapon_attributes'] = attributes
+    (output / f"assembly_{result['id']}.json").write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding='utf-8')
+    return result
+
+
+def _compile_assembly(resources, recipient_template, donor_template, transform, output_dir, new_id):
     if not re.fullmatch(r"[a-z][a-z0-9_]{2,79}", new_id):
         raise CompileError("Entity ID must be 3-80 lower-case ASCII letters, digits or underscores")
     output_dir = Path(output_dir).resolve()
@@ -3720,7 +3866,7 @@ def compile_assembly(resources, recipient_template, donor_template, transform, o
                 "manual_crew": manual_crew, "camera_bone_mapping": camera_mapping,
                 "crew_visibility": crew_visibility, "crew_attachment": crew_attachment,
                 "recipient_mount": recipient_mount, "donor_mount": donor_mount,
-                "crew_roles": sorted(final_roles), "crew_slots": len(final_roles), "physics": physics,
+                "crew_roles": sorted(final_roles), "crew_slots": len(_crew_people(recipient_root, final_roles)), "physics": physics,
                 "wrecks": wrecks,
                 "source_hashes": sources, "bone_mapping": {name: bone_mapping.get(name, name) for name in sorted(donor_names)},
                 "bone_map": {name: name for name in sorted(donor_names)},

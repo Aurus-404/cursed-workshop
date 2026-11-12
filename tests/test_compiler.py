@@ -290,6 +290,49 @@ class CompilerTests(unittest.TestCase):
         self.assertIsNone(box.find('size'), "the module's stowage is not squeezed into the carriage's small box")
         self.assertIn('{item "ammo ap" 50}', box.render())
 
+    def test_a_towed_gun_counts_people_and_drops_a_left_crewman_with_his_places(self):
+        # 2 cm Flak 30: gunner and commander; driver1/2 push it and seat1/2 ride
+        # when towed. Five places, two soldiers. Leaving the commander behind
+        # used to keep driver2 and seat2 with nobody to take them: the game
+        # could not board the rest of the squad and direct control crashed.
+        from workshop.syntax import block
+        from workshop.compiler import _crew_people, _exclude_crew
+        root = block('''{game_entity
+          {placer {place "gunner" {group "crew"}} {place "commander" {group "crew"}}
+                  {place "driver1" {group "crew"}} {place "driver2" {group "crew"}}}
+          {placer {place "seat1" {group "crew"}} {place "seat2" {group "crew"}}}
+          {boarder {door "emit1"} {link "emit1" "driver1"} {link "emit2" "driver2"}
+                   {link "driver1" "gunner"} {link "driver2" "commander"}
+                   {link "seat1" "driver1"} {link "seat2" "driver2"}}
+          {extender "cannon" {move {workers "driver1" "driver2" minWorkers 2}} {attack {obstacle "open"}}}
+          {Weaponry {place "gun" {charger "commander"}}}}''')
+        places = {'gunner', 'commander', 'driver1', 'driver2', 'seat1', 'seat2'}
+        self.assertEqual(_crew_people(root, places), {'gunner', 'commander'})
+        _exclude_crew(root, {'commander'})
+        text = root.render()
+        for gone in ('"commander"', '"driver2"', '"seat2"'):
+            self.assertNotIn(gone, text)
+        self.assertIn('{workers "driver1" minWorkers 1}', text)
+        self.assertIn('{link "seat1" "driver1"}', text)
+        self.assertEqual(_crew_people(root, {'gunner', 'driver1', 'seat1'}), {'gunner'})
+
+    def test_a_cannon_never_leaves_behind_an_operator_its_animations_name(self):
+        # {reload "" "flak30_loader"}: the commander loads. Without him the
+        # game crashed on direct control (EXCEPTION_ACCESS_VIOLATION, actor).
+        from workshop.syntax import block
+        from workshop.compiler import _cannon_operators, _exclude_crew
+        root = block('''{game_entity
+          {placer {place "gunner" {group "crew"}} {place "commander" {group "crew"}} {place "driver1" {group "crew"}}}
+          {boarder {link "driver1" "gunner"}}
+          {extender "cannon" {animation {aim "flak30_gunner" ""} {reload "" "flak30_loader"}}
+                             {move {workers "driver1" minWorkers 1}}}
+          {Weaponry {place "gun" {charger "commander"}}}}''')
+        self.assertEqual(_cannon_operators(root), {'gunner', 'commander'})
+        _exclude_crew(root, {'commander'})
+        text = root.render()
+        self.assertIn('{place "commander"', text)
+        self.assertIn('{charger "commander"}', text)
+
     def test_carriage_missing_worker_transition_is_rejected_before_export(self):
         r = self._carriage()
         r.files['entity/hull/hull.def'] = r.files['entity/hull/hull.def'].replace(b'{link "push_position" "gunner"}', b'')

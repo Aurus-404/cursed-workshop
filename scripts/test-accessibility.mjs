@@ -12,7 +12,7 @@ const {accessibility,isTextEntry}=await import('../frontend/accessibility.js');
 for(const key of Object.keys(EN))assert.ok(ZH[key]||EXTRA_ZH[key]||SMOKE_ZH[key]||RIDER_ZH[key]||PASSENGER_ZH[key],`Missing Chinese: ${key}`);
 const html=fs.readFileSync('frontend/index.html','utf8');
 const strings=[...html.matchAll(/>([^<>]+)</g),...html.matchAll(/(?:title|placeholder|aria-label)="([^"]+)"/g)].map(m=>m[1].trim()).filter(s=>s&&!s.startsWith('import '));
-const unchanged=new Set(['3D','X','Y','Z','v','CURSED WORKSHOP','CW','Cursed Workshop','English','Español','F','L','S','XYZ','Normal']);
+const unchanged=new Set(['3D','X','Y','Z','v','CURSED WORKSHOP','CW','Cursed Workshop','English','Español','F','L','S','XYZ','Normal','Play']);
 for(const value of strings)if(/[A-Za-zÁÉÍÓÚáéíóúñ]/.test(value)&&!unchanged.has(value)){
   for(const language of ['en','zh-CN'])assert.notEqual(translate(value,language),value,`${language} static string missing: ${value}`);
 }

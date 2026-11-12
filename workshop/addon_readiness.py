@@ -12,8 +12,8 @@ import time
 
 from .locations import game_log_path
 
-ADDON_NAME = 'Cursed Workshop - Built Vehicles'
-LOCAL_MOD_HELP = ('En Extras → Mods, activá «Cursed Workshop - Built Vehicles» (mod local, carpeta modular_workshop) '
+ADDON_NAME = 'Cursed Workshop - Built Vehicles (ACTIVATE THIS)'
+LOCAL_MOD_HELP = ('En Extras → Mods, activá «Cursed Workshop - Built Vehicles (ACTIVATE THIS)» (mod local, carpeta modular_workshop) '
                   'y pulsá Aplicar. Ubicalo al final de la lista, después de todos los demás mods. '
                   'La entrada de Steam «Cursed Workshop» es la herramienta y no reemplaza este mod.')
 WAIT_MESSAGE = ('No cargues ni guardes la campaña todavía: falta comprobar que el juego cargó el mod de vehículos.')

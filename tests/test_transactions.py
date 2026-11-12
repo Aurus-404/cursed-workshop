@@ -245,6 +245,23 @@ class TransactionTests(unittest.TestCase):
             with patch('workshop.transactions._tree_hashes',side_effect=[snapshot,{'mod.info':'unverified'}]):
                 self.assertEqual(_owned_addon(root,'modular_workshop:0'),snapshot)
 
+    def test_an_older_tool_refuses_to_change_a_mod_built_by_a_newer_one(self):
+        # A tester built with 0.11.12, reopened 0.10.11 and changed the shop;
+        # the game then crashed loading the mod.
+        from workshop import __version__
+        from workshop.transactions import _owned_addon, addon_tool_version, OWNERSHIP_FILE, TransactionError
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            (root/OWNERSHIP_FILE).write_text(json.dumps({'addon_mod':'modular_workshop:0','files':{}}))
+            (root/'mod.info').write_text('{mod {desc "Vehicles. Cursed Workshop 0.1.0."}}')
+            (root/'assembly_mw_a.json').write_text(json.dumps({'tool_version':'0.2.0'}))
+            self.assertEqual(addon_tool_version(root),'0.2.0')
+            newer='.'.join(str(int(part)+(1 if i==0 else 0)) for i,part in enumerate(__version__.split('.')))
+            (root/'assembly_mw_b.json').write_text(json.dumps({'tool_version':newer}))
+            self.assertEqual(addon_tool_version(root),newer)
+            with self.assertRaisesRegex(TransactionError,'newer than this one'):
+                _owned_addon(root,'modular_workshop:0')
+
     def test_tampering_during_marker_write_is_detected_before_publication(self):
         from workshop.transactions import _write_file,OWNERSHIP_FILE
         transaction=self.prepare()

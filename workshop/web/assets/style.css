@@ -498,3 +498,12 @@ dialog{border:1px solid var(--soft-edge);border-radius:6px;padding:20px;box-shad
 .armor-tip small{display:block;margin-top:5px;color:var(--muted);font-size:calc(11.5px * var(--text-scale,1))}
 /* Background work never covers the 3D view: a small strip under the model. */
 .busy-overlay.passive{border:1px solid var(--soft-edge);border-radius:var(--radius);background:var(--panel);box-shadow:0 6px 18px #0008}
+
+.build-destination{display:grid;gap:8px;margin:14px 0 0;padding:0;border:0}.build-destination legend{padding:0;margin-bottom:6px}.build-destination-note{margin:6px 0 0;font-size:calc(11px * var(--text-scale,1));color:var(--muted)}
+
+/* Numeric fields: no spin arrows, so the number uses the whole field. */
+.axis-fields input[type=number],.number-fields input[type=number]{-moz-appearance:textfield;appearance:textfield}.axis-fields input[type=number]::-webkit-inner-spin-button,.axis-fields input[type=number]::-webkit-outer-spin-button,.number-fields input[type=number]::-webkit-inner-spin-button,.number-fields input[type=number]::-webkit-outer-spin-button{-webkit-appearance:none;margin:0}.axis-field input{padding-right:4px;font-variant-numeric:tabular-nums}
+
+/* Weapon attributes */
+#weapons-field>label{display:grid;gap:6px;margin-top:8px}#weapons-field select{width:100%}#weapons-sections{display:grid;gap:0}.weapon-grid{display:grid;gap:8px}.weapon-value{display:grid;grid-template-columns:minmax(0,1fr) 92px;align-items:center;gap:8px;font-size:calc(12px * var(--text-scale,1))}.weapon-value input{width:100%;appearance:textfield;-moz-appearance:textfield;text-align:right;font-variant-numeric:tabular-nums}.weapon-value input::-webkit-inner-spin-button,.weapon-value input::-webkit-outer-spin-button{-webkit-appearance:none;margin:0}.weapon-value input.changed{border-color:var(--accent)}.weapon-value small{grid-column:1/-1;color:var(--muted)}.weapon-subhead{margin-top:4px;font-size:calc(11px * var(--text-scale,1));color:var(--muted)}#weapons-reset{margin-top:10px}#weapons-empty:empty{display:none}
+.top-actions button.play-button:not(.icon-button):not(.text-button){background:var(--accent);color:var(--on-accent,#1b1b1b);font-weight:700;--button-edge:var(--accent);padding-inline:14px;margin-left:4px}.top-actions button.play-button:not(.icon-button):not(.text-button):not(:disabled):hover{background:var(--accent);filter:brightness(1.08)}

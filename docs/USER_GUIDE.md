@@ -27,7 +27,7 @@ Keep the backups created by the editor.
 3. Adjust the design in the 3D view. Save each weapon/turret change when the interface offers that action.
    Saving a pending design in the interface does not replace building the vehicle.
 4. Review the preview and validation results, then press Build vehicle and confirm.
-5. In the game, open Extras > Mods and enable Cursed Workshop - Built Vehicles last in the mod list.
+5. In the game, open Extras > Mods and enable Cursed Workshop - Built Vehicles (ACTIVATE THIS) last in the mod list.
    Apply the list. After further builds, reload this local mod when the editor asks.
 6. Use Check loaded mod in the editor before loading your campaign.
 

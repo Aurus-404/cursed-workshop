@@ -25,6 +25,9 @@ def reconcile_weaponry(entity, profile):
     retired = set(profile.get('retired_inventory_users') or [])
     mount = profile.get('commander_mg') or {}
     retired.update(mount.get('removed_weapon_places') or [])
+    # A place given its own weapon copy: the saved State names the native weapon
+    # and would mount it again. Only its loaded rounds are lost.
+    retired.update(profile.get('weapon_copy_places') or [])
     if mount.get('previous_slot') and mount.get('previous_slot') != mount.get('slot'):
         retired.add(mount['previous_slot'])
     for weaponry in list(entity.find_all('Weaponry')):
