@@ -55,3 +55,24 @@ def describe() -> str:
     if 'available' in figures:
         parts.append(f"free={figures['available']}/{figures['total']}MB")
     return ' '.join(parts)
+
+
+class MemoryLimitError(RuntimeError):
+    """A background read grew far past its normal size and was stopped."""
+
+
+# The armour catalog peaks near 1 GB with MACE on Windows. Under Proton a
+# tester's grew to 12 GB within seconds and Linux killed the editor without a
+# trace; stopping here keeps the editor alive and names the file being read.
+LIMIT_MB = 4096
+
+
+def guard(where: str = '') -> None:
+    figures = snapshot()
+    rss = figures.get('rss')
+    if rss is None:
+        return
+    if rss > LIMIT_MB or (figures.get('available', 1 << 30) < 1024 and rss > LIMIT_MB // 2):
+        import logging
+        logging.error('Memory guard stopped a background read at %s (%s)', where or 'unknown file', describe())
+        raise MemoryLimitError(f'The editor stopped reading to avoid running out of memory ({rss} MB), at {where or "an unknown file"}.')

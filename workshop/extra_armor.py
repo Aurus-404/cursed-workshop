@@ -289,7 +289,9 @@ def _annotate(resources, rows):
                             if p[k] < low[k]: low[k] = p[k]
                             elif p[k] > high[k]: high[k] = p[k]
         return (None if low is None else [high[k] - low[k] for k in range(3)]), parts
+    from .memory import guard
     for item in rows:
+        guard(item['model_path'])
         segment = item['definition_path'].split('/')[2].lstrip('+') if item['definition_path'].count('/') > 2 else ''
         item['nation'] = segment if segment in _NATIONS else 'other'
         # Test vehicles, ships, aircraft and trains are no tank armor (a
@@ -332,8 +334,12 @@ def catalog(resources):
             extensions.setdefault(path.rsplit('/', 1)[0], []).append(path)
     from .cancellation import checkpoint, report_progress
     files=[p for p in sorted(resources.entries) if p.endswith('.def')]
+    from .memory import guard, describe
+    import logging
     for ordinal,path in enumerate(files):
-        checkpoint()
+        checkpoint();guard(path)
+        # Brackets a crash that no guard sees (Proton kills the process).
+        if ordinal%500==0:logging.info('Armour catalog %d/%d at %s (%s)',ordinal,len(files),path,describe())
         if ordinal%20==0:report_progress(ordinal,len(files))
         try:
             for item in _definition_items(resources,path,extensions):
