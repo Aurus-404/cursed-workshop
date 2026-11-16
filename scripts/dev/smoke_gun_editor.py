@@ -102,10 +102,17 @@ def main():
         from workshop.syntax import parse,block
         path='entity/receiver/receiver.def';doc=parse(fixture.files[path]);root=doc.find('game_entity')
         seat=next(p for pl in root.find_all('placer') for p in pl.find_all('place') if p.args==['gunner'])
-        root.append(block('(define "visual_wrapper" {placer {place "gunner" {LinkBone "coax"}}})'))
+        # Exercise a macro-defined crew locator without making that locator the
+        # physical MG socket: the same fixture also swaps the MG below. Sharing
+        # the exact socket intentionally makes a gun non-detachable.
+        root.append(block('(define "visual_wrapper" {placer {place "gunner" {LinkBone "fixture_gunner"}}})'))
         root.append(block('("visual_wrapper")'))
         root.append(block('{boarder {door "emit"}{link "emit" "gunner" {forward putoff}{reverse puton}}}'))
         fixture.files[path]=doc.render().encode('utf8')
+        path='entity/receiver/receiver.mdl';model=parse(fixture.files[path])
+        elevation=next(n for n in model.walk('bone') if n.args[-1:] == ['elevation'])
+        elevation.append(block('{bone "fixture_gunner" {Position 0 2 0}}'))
+        fixture.files[path]=model.render().encode('utf8')
     if args.corrections:
         from workshop.icons import write_tga
         fixture.files['interface/scene/unit_icon/receiver_00.tga']=write_tga(1,1,bytes([60,80,50,255]))
@@ -227,7 +234,7 @@ def main():
         assert not check['ok'] and any(text in check['message'] for text in ('Conquest roster entry','roster_conquest.set')),check
         if args.crew_visibility:
             resolved=job('/api/preview',{'template':'receiver','part':'full'})
-            assert next(s for s in resolved['seats'] if s['place']=='gunner')['bone']=='coax'
+            assert next(s for s in resolved['seats'] if s['place']=='gunner')['bone']=='fixture_gunner'
             tr={'gun_swap':{'schema':1,'recipient_place':'main_slot','donor_place':'main_slot'},'crew_hidden':['gunner']}
             internal=job('/api/check',{'hull':'receiver','donor':'towed','transform':tr})
             assert not internal['ok'] and any(text in internal['message'] for text in ('Conquest roster entry','roster_conquest.set')),internal
