@@ -4,7 +4,7 @@ export function gunEditor({state,$,job,displayPart,updateSelection,selectEdit,re
   let revision=0;const catalogs={};
   const active=()=>$('operation-select').value==='gun';
   // A turret kept in the depot gives its guns; a chassis, or a catalog part, is not one.
-  const storedTurret=u=>!!u?.depot&&!u.creative&&u.part==='turret';
+  const storedTurret=u=>!!u?.depot&&!u.creative&&['turret','gun'].includes(u.part);
   const saved=()=>design?.active()?design.draft().guns:state.transform.gun_swaps||[];
   const key=()=>JSON.stringify([state.hull?.template,state.turret?.template,state.transform.gun_swap||null,saved()]);
   function controls(){
@@ -28,7 +28,7 @@ export function gunEditor({state,$,job,displayPart,updateSelection,selectEdit,re
       const weapon=verified?.label||label('turret',row.donor_place),source=(state.campaign?.units||[]).find(u=>u.eid===row.donor_eid)?.label||(state.campaign?.depot||[]).find(d=>d.id===row.donor_depot)?.label||row.donor_template||'';
       return new Option(`${i+1}. ${row.recipient_place} ← ${weapon}${source?' · '+source:''}`,String(i));}));
     $('gun-saved').value=selectedChange!==''&&saved()[Number(selectedChange)]?selectedChange:saved().length?'0':'';
-    if(active())$('operation-count').textContent=t('2 vehículos → 1 vehículo');
+    if(active())$('operation-count').textContent=t(storedTurret(state.turret)?'Vehículo + pieza del Depósito → vehículo':'2 vehículos → 1 vehículo');
     for(const [part,id] of [['hull','gun-recipient'],['turret','gun-donor']])if(!state[part]){delete catalogs[part];$(id).replaceChildren(new Option(t(part==='hull'?'Elegí primero el receptor':'Elegí primero el donante'),''));$(id).disabled=true;}
     $('assembly-step').textContent=t(active()?(!state.hull?'Elegí el vehículo receptor.':!state.turret||state.turret.designPlaceholder?'Elegí Donante y seleccioná otra unidad.':!state.transform.gun_swap?.recipient_place||!state.transform.gun_swap?.donor_place?'Elegí dos cañones compatibles para continuar.':'Ajustá el cañón desde Posición y montaje. Volvé al menú para construir.'):$('operation-select').value==='support'?'Elegí un vehículo y después Servicio y carga.':'Elegí el chasis y la torreta en la lista.');
   }
@@ -36,11 +36,12 @@ export function gunEditor({state,$,job,displayPart,updateSelection,selectEdit,re
     const unit=state[part];if(!unit)return;
     if(unit.designPlaceholder&&part==='turret'){selectEmpty();return;}
     function selectEmpty(){const select=$('gun-donor');select.replaceChildren(new Option(t('Elegí primero el donante'),''));select.disabled=true;}
-    const operation=$('operation-select').value;const data=await job(design?.active()&&part==='hull'?'/api/design-catalog':'/api/gun-catalog',design?.active()&&part==='hull'?design.body():{template:unit.template,...(part==='turret'&&storedTurret(unit)?{module:unit.mount||true}:{})});
+    const operation=$('operation-select').value;const data=await job(design?.active()&&part==='hull'?'/api/design-catalog':'/api/gun-catalog',design?.active()&&part==='hull'?design.body():{template:unit.template,...(part==='turret'&&storedTurret(unit)?{...(unit.part==='turret'?{module:unit.mount||true}:{place:unit.place})}:{})});
     if(state[part]!==unit||$('operation-select').value!==operation)return;
+    if(part==='turret')data.weapons=data.weapons.filter(w=>!w.empty&&(!unit.place||w.place===unit.place)).map(w=>w.donatable===false?{...w,available:false,reason:w.donor_reason||w.reason}:w);
     catalogs[part]=data;const select=$(part==='hull'?'gun-recipient':'gun-donor');select.replaceChildren();
     // Same-named weapons (three "MG 34" on a Nb.Fz) say where they are.
-    const name=row=>row.label||row.weapon.replaceAll('_',' '),count=new Map();
+    const name=row=>row.empty?t('Punto de montaje vacío')+' · '+row.place:row.label||row.weapon.replaceAll('_',' '),count=new Map();
     for(const row of data.weapons)count.set(name(row),(count.get(name(row))||0)+1);
     const where=row=>{const yaw=row.yaw||'',aux=/^aux_turret(\d+)$/.exec(yaw);
       return yaw==='turret'?t('Torreta principal'):aux?t('Torreta auxiliar')+' '+aux[1]:(yaw||row.place).replaceAll('_',' ');};
@@ -91,7 +92,7 @@ export function gunEditor({state,$,job,displayPart,updateSelection,selectEdit,re
       if(part==='hull'){await design.select(unit,part);await catalog('hull');controls();return;}
       design.ensure();if(unit.eid&&unit.eid===state.hull.eid)throw Error(t('Elegí otro vehículo como donante.'));
       const recipient=state.transform.gun_swap?.recipient_place||'';
-      state.turret=unit;state.transform.gun_swap={schema:1,recipient_place:recipient,donor_place:'',upright:true};
+      state.turret=unit;state.transform.gun_swap={schema:1,recipient_place:recipient,donor_place:'',upright:true,...(unit.part==='gun'?{unloaded:true}:{})};
       if(!state.transform.gun_edit)state.transform.turret={position:[0,0,0],rotation:[0,0,0]};
       await catalog('hull');await catalog('turret');await refresh();controls();return;
     }
@@ -120,7 +121,7 @@ export function gunEditor({state,$,job,displayPart,updateSelection,selectEdit,re
         if(index>=0){await editChange(index);return;}
         state.transform.turret={position:[0,0,0],rotation:[0,0,0]};
       }
-      state.transform.gun_swap??={schema:1,recipient_place:'',donor_place:'',upright:true};
+      state.transform.gun_swap??={schema:1,recipient_place:'',donor_place:'',upright:true,...(state.turret?.part==='gun'?{unloaded:true}:{})};
       state.transform.gun_swap[key]=value;await refresh();controls();
     }catch(error){if(error.name!=='AbortError')reportError(error);}};
   }
@@ -134,9 +135,9 @@ export function gunEditor({state,$,job,displayPart,updateSelection,selectEdit,re
     if(design?.active())state.transform.gun_edit={index,row:structuredClone(row)};
     saved().splice(index,1);
     if(design?.active())state.turret=(state.campaign?.units||[]).find(u=>u.eid===row.donor_eid)||(row.donor_depot
-      ?{depot:row.donor_depot,part:'turret',kind:'part',template:row.donor_template,label:(state.campaign?.depot||[]).find(d=>d.id===row.donor_depot)?.label||row.donor_template,...(row.donor_mount?{mount:row.donor_mount}:{})}
+      ?{depot:row.donor_depot,part:(state.campaign?.depot||[]).find(d=>d.id===row.donor_depot)?.part||'turret',place:(state.campaign?.depot||[]).find(d=>d.id===row.donor_depot)?.place,kind:'part',template:row.donor_template,label:(state.campaign?.depot||[]).find(d=>d.id===row.donor_depot)?.label||row.donor_template,...(row.donor_mount?{mount:row.donor_mount}:{})}
       :{eid:row.donor_eid,template:row.donor_template,...(row.donor_catalog?{creative:true,depot:'creative'}:{})});
-    state.transform.gun_swap={schema:1,recipient_place:row.recipient_place,donor_place:row.donor_place,...(row.upright?{upright:true}:{}),...(row.barrel_only?{barrel_only:true}:{}),...(row.drop_mantlet?{drop_mantlet:true}:{})};
+    state.transform.gun_swap={schema:1,recipient_place:row.recipient_place,donor_place:row.donor_place,...(row.unloaded?{unloaded:true}:{}),...(row.upright?{upright:true}:{}),...(row.barrel_only?{barrel_only:true}:{}),...(row.drop_mantlet?{drop_mantlet:true}:{})};
     state.transform.turret=structuredClone(row.pose);await catalog('hull');await catalog('turret');await refresh();controls();
   }
   async function save(){

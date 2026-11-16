@@ -36,7 +36,9 @@ await $('armor-add').onclick();assert.equal(state.transform.extra_armor.length,1
 assert.ok(state.transform.extra_armor[0].position[2]>=8,'New fitting starts above the roof, not inside it');
 assert.equal(editor.target(),undefined,'An added fitting stays put until its name is picked again');
 $('armor-list').value='0';$('armor-list').selectedIndex=0;$('armor-list').onchange();assert.ok(editor.target(),'Picking its name gives the handles back');
-await $('armor-duplicate').onclick();assert.equal(state.transform.extra_armor.length,2);
+await $('armor-duplicate').onclick();assert.equal(state.transform.extra_armor.length,1,'Duplicate stays unplaced');
+await $('armor-add').onclick();
+$('armor-list').value='1';$('armor-list').selectedIndex=1;$('armor-list').onchange();
 const first=structuredClone(state.transform.extra_armor[0]);editor.target().position.x=44;
 assert.equal(editor.capture(),true);assert.equal(state.transform.extra_armor[1].position[0],44);
 assert.deepEqual(state.transform.extra_armor[0],first);
@@ -145,4 +147,160 @@ console.log('Armor editor: unplaced preview, native catalog filters, independent
   const uv=plateGeometry({width:2000,height:1000,thickness:40},20).attributes.uv,us=[],vs=[];
   for(let i=0;i<uv.count;i++){us.push(uv.getX(i));vs.push(uv.getY(i));}
   assert.equal(Math.max(...us)-Math.min(...us),2,'The paint repeats per metre: twice across a 2 m plate');
+}
+
+
+// Local corners and openings stay in the pending piece until it is added.
+{
+  await $('armor-custom').onclick();
+  $('armor-corner').value='2';$('armor-corner').onchange();
+  $('armor-corner-x').value='800';await $('armor-corner-x').onchange();
+  assert.equal(editor.pose().plate.corners[2][0],800);
+  assert.deepEqual(editor.pose().plate.corners[0],[0,0]);
+  const count=state.transform.extra_armor.length;
+  $('armor-hole').checked=true;await $('armor-hole').onchange();
+  assert.ok(editor.pose().plate.hole);
+  await $('armor-add').onclick();
+  assert.equal(state.transform.extra_armor.length,count+1);
+  const plate=state.transform.extra_armor.at(-1).plate;
+  assert.equal(plate.corners[2][0],800);
+  assert.ok(plate.hole);
+  await editor.restore();
+  assert.deepEqual(state.transform.extra_armor.at(-1).plate,plate);
+  await $('armor-custom').onclick();
+  $('armor-shape').value='cylinder';await $('armor-shape').onchange();
+  assert.equal(editor.pose().plate.shape,'cylinder');
+  assert.equal(editor.pose().plate.hole,undefined);
+  assert.equal($('armor-corners').disabled,false);
+  assert.equal($('armor-hole').disabled,true);
+}
+
+
+// The corner gizmo lives in a proper world frame, including mirrored hosts.
+{
+  const {cornerWorldFrame,movePlateCorners}=await import('../frontend/armor-editor.js');
+  const plate={width:1000,height:500,thickness:40};
+  for(const scale of [[1,1,1],[1,-1,1],[-1,1,1],[-1,-1,1]]){
+    const host=new THREE.Group(),piece=new THREE.Group();host.add(piece);
+    host.scale.set(...scale);host.rotation.set(.2,.4,.1);piece.rotation.set(.1,.6,.3);
+    const selection=new Set([2,3]),frame=cornerWorldFrame(piece,plate,selection);
+    const arrow=new THREE.Vector3(1,0,0).applyQuaternion(frame.quaternion);
+    const expected=new THREE.Vector3(0,1,0).transformDirection(piece.matrixWorld);
+    assert.ok(arrow.distanceTo(expected)<1e-7,'Positive X follows the displayed arrow on reflected hosts');
+    const delta=piece.worldToLocal(frame.position.clone().add(arrow)).sub(piece.worldToLocal(frame.position.clone()));
+    assert.ok(delta.y>0,'Dragging toward the positive arrow increases local X');
+    assert.ok(Math.abs(delta.z)<1e-7);
+    const changed=movePlateCorners(plate,selection,[50,-20]);
+    assert.deepEqual(changed.corners,[[0,0],[1000,0],[1050,480],[50,480]]);
+  }
+  await $('armor-custom').onclick();
+  $('armor-shape').value='circle';await $('armor-shape').onchange();
+  assert.equal(editor.pose().plate.shape,'circle');
+  assert.equal($('armor-plate-height').disabled,true);
+}
+
+
+// Exercise Shift-click through the same pointer handler used by the editor.
+{
+  const handlers=[],canvas={style:{},ownerDocument:{pointerLockElement:null},
+    addEventListener(type,fn,options){handlers.push({type,fn,options});},removeEventListener(){},
+    getBoundingClientRect(){return {left:0,top:0,width:1000,height:1000};}};
+  const camera=new THREE.PerspectiveCamera(50,1,.1,1000);
+  camera.up.set(0,0,1);camera.position.set(100,0,20);camera.lookAt(0,0,15);camera.updateMatrixWorld(true);
+  editor=armorEditor({state,$,groups,scene,camera,canvas,orbit:{enabled:true},job,
+    loading:async(label,run)=>run(),remember(){},selectEdit(part){state.edit=part;},
+    refreshCheck:async()=>editor.receiveCheck({armor_hosts:hosts}),reportError(error){throw error;},applyShow(){}});
+  editor.receiveCheck({armor_hosts:hosts});await $('armor-custom').onclick();$('armor-corners').onclick();
+  const markers=editor.target().children.find(n=>n.children.length===4);
+  assert.ok(markers,'All four corners have selectable markers');
+  const pointer=handlers.find(h=>h.type==='pointerdown'&&h.options?.capture).fn;
+  function click(index,shiftKey){
+    scene.updateMatrixWorld(true);
+    const point=markers.children[index].getWorldPosition(new THREE.Vector3()).project(camera);
+    pointer({clientX:(point.x+1)*500,clientY:(1-point.y)*500,shiftKey,
+      stopImmediatePropagation(){},preventDefault(){}});
+  }
+  click(2,false);click(3,true);
+  const updated=editor.target().children.find(n=>n.children.length===4);
+  assert.equal(updated.children.filter(n=>n.material.color.getHex()===0xffcf60).length,2);
+  const initial=structuredClone(editor.pose().plate);
+  $('armor-corner-x').value='50';await $('armor-corner-x').onchange();
+  assert.equal(editor.pose().plate.corners[3][0],50);
+  assert.equal(editor.pose().plate.corners[2][0],initial.width+50);
+  editor.deactivate();
+}
+
+
+// Procedural armor needs only the current model's attachment points.
+{
+  const localState={hull:{template:'receiver'},turret:{template:'receiver'},transform:{},edit:'hull',wire:false};
+  const localScene=new THREE.Scene(),localGroups={hull:new THREE.Group(),turret:new THREE.Group()};
+  localScene.add(localGroups.hull,localGroups.turret);
+  let localEditor;
+  localEditor=armorEditor({state:localState,$,groups:localGroups,scene:localScene,
+    job:async(path,body)=>{assert.notEqual(path,'/api/armor-catalog','Resizable armor must not wait for the whole native catalog');return job(path,body);},
+    loading:async(label,run)=>run(),remember(){},selectEdit(part){localState.edit=part;},
+    refreshCheck:async()=>localEditor.receiveCheck({armor_hosts:hosts}),reportError(error){throw error;},applyShow(){}});
+  localEditor.receiveCheck({armor_hosts:hosts});
+  await $('armor-custom').onclick();
+  assert.ok(localEditor.pose().plate);
+  await $('armor-add').onclick();
+  assert.equal(localState.transform.extra_armor.length,1);
+  await localEditor.restore();
+}
+
+
+{
+  await $('armor-custom').onclick();
+  for(const [shape,count] of [['triangle',3],['circle',64],['cylinder',64]]){
+    $('armor-shape').value=shape;await $('armor-shape').onchange();
+    assert.equal($('armor-corners').disabled,false);
+    assert.equal($('armor-corner').options.length,count);
+    const x=Number($('armor-corner-x').value);
+    $('armor-corner-x').value=String(x+.1);await $('armor-corner-x').onchange();
+    assert.equal(localPointCount(),count);
+  }
+  function localPointCount(){return $('armor-corner').options.length;}
+}
+
+
+{
+  const {stretchPlate}=await import('../frontend/armor-editor.js');
+  const cylinder={shape:'cylinder',width:1000,height:500,thickness:40,corners:[[0,0],[1000,0],[1000,1000],[0,1000]]};
+  const longer=stretchPlate(cylinder,[1,1,2]);
+  assert.deepEqual(longer.corners,cylinder.corners);
+  assert.equal(longer.height,1000);
+  const wider=stretchPlate(cylinder,[2,1,1]);
+  assert.equal(wider.width,2000);
+  assert.equal(wider.thickness,40);
+  assert.deepEqual(wider.corners,[[0,0],[2000,0],[2000,2000],[0,2000]]);
+}
+
+
+// Finish selection persists through placement and restore, independently of native textures.
+{
+  const paintState={hull:{template:'receiver'},turret:{template:'receiver'},transform:{},edit:'hull',wire:false};
+  const paintScene=new THREE.Scene(),paintGroups={hull:new THREE.Group(),turret:new THREE.Group()};
+  paintScene.add(paintGroups.hull,paintGroups.turret);
+  let paintEditor;
+  paintEditor=armorEditor({state:paintState,$,groups:paintGroups,scene:paintScene,
+    job:async()=>({paints:[{id:'steel',label:'Worn steel'},{id:'pink',label:'Pink'}],
+      texture:{width:1,height:1,rgba:[255,180,200,255]},tile:20}),
+    loading:async(label,run)=>run(),remember(){},selectEdit(part){paintState.edit=part;},
+    refreshCheck:async()=>paintEditor.receiveCheck({armor_hosts:hosts}),reportError(error){throw error;},applyShow(){}});
+  paintEditor.receiveCheck({armor_hosts:hosts});
+  await $('armor-custom').onclick();
+  assert.equal($('armor-paint').options.length,2);
+  $('armor-paint').value='pink';await $('armor-paint').onchange();
+  assert.equal(paintEditor.pose().plate.paint,'pink');
+  const mesh=paintEditor.target().children[0],chosen=mesh.material;
+  const {applyModelTextures}=await import('../frontend/model-geometry.js');
+  applyModelTextures(paintGroups,false,()=>{throw Error('Custom finish must stay visible');},false);
+  assert.equal(mesh.material,chosen);
+  assert.ok(mesh.material.map);
+  await $('armor-add').onclick();
+  assert.equal(paintState.transform.extra_armor[0].plate.paint,'pink');
+  await paintEditor.restore();
+  $('armor-list').value='0';$('armor-list').selectedIndex=0;$('armor-list').onchange();
+  assert.equal($('armor-paint').value,'pink');
 }

@@ -19,7 +19,7 @@ export function operationProgress({render,busy,notify=()=>{},now=()=>performance
       const started=now();let completed=0,label=stages[0]?.label||'Cargando…',timer;
       const update=()=>{
         lastElapsedMs=Math.max(0,now()-started);
-        render({label,completed,total:stages.length,elapsedMs:lastElapsedMs,active,cancellable:active&&cancellable&&!controller.signal.aborted});
+        render({label,completed,total:stages.length,elapsedMs:lastElapsedMs,active,cancelling:active&&controller.signal.aborted,cancellable:active&&cancellable&&!controller.signal.aborted});
       };
       try{
         busy(true,label);update();timer=schedule(update,250);

@@ -11,12 +11,29 @@ def pivot_of(pose):
     return value
 
 
+def mirror_of(pose):
+    value=(pose or {}).get('mirror',[False,False,False])
+    if not isinstance(value,list) or len(value)!=3 or any(type(v) is not bool for v in value):
+        raise ValueError('El reflejo debe indicar tres ejes válidos.')
+    return [-1 if v else 1 for v in value]
+
+
+def copy_mirror(source, target):
+    if 'mirror' in source:
+        mirror_of(source)
+        target['mirror']=list(source['mirror'])
+    return target
+
+
 def pose_matrix(pose):
     pose=pose or {};pivot=pivot_of(pose)
     # Preserve the existing position/rotation validation, including old recipes.
     euler_matrix(pose.get('rotation',[0,0,0]),pose.get('position',[0,0,0]))
+    linear=euler_matrix(pose.get('rotation',[0,0,0]))
+    for column,sign in enumerate(mirror_of(pose)):
+        for row in range(3):linear[row][column]*=sign
     return multiply(multiply(translation([v+p for v,p in zip(pose.get('position',[0,0,0]),pivot)]),
-        euler_matrix(pose.get('rotation',[0,0,0]))),translation([-v for v in pivot]))
+        linear),translation([-v for v in pivot]))
 
 
 def rebase_joint(document,name,offset):
@@ -49,7 +66,7 @@ def level_pose(pose):
     """The part of a gun pose its weapon joint follows: position, pivot and the
     turn about the vertical axis. Tilt and roll stay with the gun's model."""
     pose=pose or {};rotation=pose.get('rotation',[0,0,0])
-    return {**pose,'rotation':[0,0,rotation[2] if len(rotation)==3 else 0]}
+    return {**pose,'rotation':[0,0,rotation[2] if len(rotation)==3 else 0],'mirror':[False,False,False]}
 
 
 def level_joint(document,name,correction):

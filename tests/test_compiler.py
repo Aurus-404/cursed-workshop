@@ -36,6 +36,46 @@ class FakeResources:
 
 
 class CompilerTests(unittest.TestCase):
+    def test_passenger_macros_for_actual_operators_count_crew_without_counting_riders(self):
+        from workshop.compiler import _crew_expansion,_crew_roles
+        r=FakeResources()
+        r.files['properties/tank_crew.ext']=b'(define "seat_human" {placer {place "%place" {group "passenger"}{LinkBone "%bone"}}}{boarder {link "door" "%place" {anm "%place"}}})'
+        root=parse('{game_entity ("seat_human" place(driver) bone(driver)) ("seat_human" place(commander) bone(commander)) ("seat_human" place(seat1) bone(seat1)) {Weaponry {place "mgun" {weapon "mg"}{gunner "commander"}{charger "commander"}}}}').find('game_entity')
+        _crew_expansion(r,root)
+        self.assertEqual(_crew_roles(root),{'driver','commander'})
+        self.assertTrue(all(p.find('group').args==['passenger'] for pl in root.find_all('placer') for p in pl.find_all('place')))
+        self.assertIn('seat_human',root.render(),'ordinary passengers retain their original macro')
+
+    def test_five_free_turrets_keep_independent_workers_after_native_names_are_exhausted(self):
+        from tests.test_gun_assembly import Resources
+        from workshop.resources import ResourceIndex
+        r=Resources()
+        for name in ('receiver','donor'):
+            path='entity/'+name+'/'+name+'.def'
+            r.files[path]=r.files[path].replace(b'{mass 19000}',b'{placer {place "driver" {group "crew"}}{place "gunner" {group "crew"}{LinkBone "breech"}}{place "charger" {group "crew"}{LinkBone "coax"}}{place "commander" {group "crew"}{LinkBone "observer"}}}{mass 19000}')
+            path='entity/'+name+'/'+name+'.mdl'
+            r.files[path]=r.files[path].replace(b'{bone revolute "elevation"',b'{bone "observer"}{bone revolute "elevation"')
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);game=root/'game'
+            for path,raw in r.files.items():
+                target=game/'resource'/path;target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes(raw)
+            index=ResourceIndex(game).build();views=[];view=index;current='receiver'
+            try:
+                for number in range(5):
+                    result=compile_assembly(view,current,'donor',{'recipient_mount':'@free','donor_mount':'azimuth'},root/str(number),'mw_many_'+str(number))
+                    roles=result['metadata']['crew_roles']
+                    self.assertEqual(len(roles),4+3*(number+1))
+                    definition=parse((Path(result['output_dir'])/'resource'/result['definition_path']).read_bytes()).find('game_entity')
+                    places=[p.args[0] for pl in definition.find_all('placer') for p in pl.find_all('place')]
+                    self.assertEqual(set(places),set(roles))
+                    for w in definition.find('Weaponry').find_all('place'):
+                        for field in ('gunner','charger'):
+                            self.assertTrue(set(w.find(field).args[0].split())<=set(places))
+                    view=view.with_overlay(result['output_dir']);views.append(view);current=result['id']
+            finally:
+                for v in reversed(views):v.close()
+                index.close()
+
     def test_main_module_keeps_unreferenced_native_crew_but_not_other_station_operators(self):
         for mount in ('turret','auxgun'):
             with self.subTest(mount=mount),tempfile.TemporaryDirectory() as out:
@@ -1140,13 +1180,15 @@ class CompilerTests(unittest.TestCase):
             self.assertEqual(result['metadata']['crew_roles'],['driver','gunner','gunner2'])
             self.assertNotIn('gunner_mw',definition.render())
 
-    def test_role_allocator_reserves_donor_workers_and_never_invents_names(self):
+    def test_role_allocator_reserves_donor_workers_and_extends_numbered_families(self):
         resources=FakeResources()
         # gunner2 is already used by another donor worker: take a real free commander.
         self.assertEqual(_allocate_crew_roles(resources,{'gunner','gunner2'},{'gunner','driver'}),{'gunner':'commander'})
-        # Never use a passenger, driver or an unverified gunner_mw as a fallback.
-        with self.assertRaisesRegex(CompileError,'No unused native crew role'):
-            _allocate_crew_roles(resources,{'gunner'},{'gunner','gunner2','commander','charger'})
+        # Exhausting native examples extends the same explicit seat namespace.
+        self.assertEqual(_allocate_crew_roles(resources,{'gunner'},{'gunner','gunner2','commander','charger'}),{'gunner':'gunner3'})
+        taken={'driver',*(f'gunner{i}' if i>1 else 'gunner' for i in range(1,20)),
+               'commander','charger'}
+        self.assertEqual(_allocate_crew_roles(resources,{'gunner'},taken),{'gunner':'gunner20'})
 
     def test_role_rename_updates_cannon_workers_but_preserves_animation_resources(self):
         root=parse('{game_entity {placer {place "gunner" {group "crew"}}}'

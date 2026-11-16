@@ -175,9 +175,14 @@ def build_report(destination: Path, game: Path, workspace: Path, diagnostic: str
                 add(f"vehicles/{recipe.name}", _read(recipe, 8 * 1024 * 1024))
             except OSError:
                 continue
-            for suffix in (".def", ".mdl", ".ext"):
+            # Destruction definitions can be loaded while entering Conquest or
+            # returning to the menu, even when the intact vehicle loads fine.
+            # Keep their own model and local behavior files in the same report.
+            for file in sorted((vehicles / identifier).glob('*')):
+                if file.suffix.casefold() not in ('.def','.mdl','.ext'):continue
+                if not file.name.startswith(identifier):continue
                 try:
-                    add(f"vehicles/{identifier}{suffix}", _read(vehicles / identifier / f"{identifier}{suffix}", 4 * 1024 * 1024))
+                    add(f"vehicles/{file.name}", _read(file, 4 * 1024 * 1024))
                 except OSError:
                     continue
         if save is not None:

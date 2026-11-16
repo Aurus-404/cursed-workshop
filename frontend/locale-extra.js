@@ -1,0 +1,52 @@
+// Labels supplied by the backend in English still need a Spanish display name.
+// Resource identifiers, filenames and player-created names are never translated.
+export const FINISH_NAMES={
+  'Worn steel':['Acero desgastado','磨损钢材'],
+  'British':['Británico','英国'],
+  'British green/black camouflage':['Camuflaje británico verde y negro','英国绿黑迷彩'],
+  'Finnish wood':['Madera finlandesa','芬兰木材'],
+  'Finnish car paint':['Pintura finlandesa de automóvil','芬兰汽车涂装'],
+  'Finnish tank paint':['Pintura finlandesa de tanque','芬兰坦克涂装'],
+  'German gray extra plates':['Placas adicionales alemanas grises','德国灰色附加装甲板'],
+  'German bolted flak armor':['Blindaje antiaéreo alemán atornillado','德国螺栓式防空装甲'],
+  'German desert zimmerit':['Zimmerit alemán de desierto','德国沙漠防磁涂层'],
+  'German bolted tank armor':['Blindaje alemán de tanque atornillado','德国螺栓式坦克装甲'],
+  'German desert extra plates':['Placas adicionales alemanas de desierto','德国沙漠附加装甲板'],
+  'USA green armor':['Blindaje estadounidense verde','美国绿色装甲'],
+  'USA Sherman armor':['Blindaje estadounidense Sherman','美国谢尔曼装甲'],
+  'Soviet green armor':['Blindaje soviético verde','苏联绿色装甲'],
+  'Soviet gray armor':['Blindaje soviético gris','苏联灰色装甲'],
+  'French brown kaki':['Caqui francés marrón','法国棕色卡其'],
+  'French green kaki':['Caqui francés verde','法国绿色卡其'],
+  'Panzergrau':['Gris Panzer','装甲灰'],
+  'US green / Sherman Olive drab':['Verde estadounidense / oliva Sherman','美国绿／谢尔曼橄榄褐'],
+  '4BO Russian green':['Verde ruso 4BO','苏联 4BO 绿'],
+  'Pink':['Rosa','粉色'],
+};
+const COPY={
+  'Caché del editor':['Editor cache','编辑器缓存'],
+  'Limpiar caché':['Clear cache','清理缓存'],
+  'Limpiando caché':['Clearing cache','正在清理缓存'],
+  'Solo elimina datos regenerables del editor. No limpia la caché del juego ni cambia tus vehículos.':['Only removes regenerable editor data. It does not clear the game cache or change your vehicles.','仅删除可重新生成的编辑器数据，不清理游戏缓存，也不修改载具。'],
+  'Caché en disco: {size} · {count} archivos':['Disk cache: {size} · {count} files','磁盘缓存：{size} · {count} 个文件'],
+  'Calculando tamaño de la caché…':['Calculating cache size…','正在计算缓存大小…'],
+  'No se pudo calcular el tamaño de la caché.':['Could not calculate cache size.','无法计算缓存大小。'],
+  '¿Limpiar la caché del editor? Se borrarán texturas convertidas, catálogos e índices regenerables. Se conservan vehículos, partidas, copias de seguridad y ajustes. La próxima carga puede tardar más.':['Clear the editor cache? Converted textures, catalogs and regenerable indexes will be deleted. Vehicles, saves, backups and settings are preserved. The next load may take longer.','要清理编辑器缓存吗？将删除转换后的纹理、目录及可重新生成的索引。载具、存档、备份和设置均会保留。下次加载可能需要更长时间。'],
+  'Caché limpiada: {size} · {count} archivos eliminados.':['Cache cleared: {size} · {count} files removed.','缓存已清理：{size} · 已删除 {count} 个文件。'],
+  'Algunos archivos en uso o protegidos se conservaron.':['Some in-use or protected files were retained.','部分正在使用或受保护的文件已保留。'],
+  'No se pudo completar la limpieza. Podés reintentar.':['Cleanup could not be completed. You can try again.','未能完成清理。可以重试。'],
+  'Confirmá la limpieza de la caché.':['Confirm clearing the cache.','请确认清理缓存。'],
+  'MG de comandante':['Commander MG','指挥官机枪'],
+  'No se pudo crear el icono.':['Could not create the icon.','无法创建图标。'],
+  'Armas de pasajeros':['Passenger weapons','乘员武器'],
+  'No se pudo iniciar la interfaz.':['Could not start the interface.','无法启动界面。'],
+  'No se pudo descargar el reporte.':['Could not download the report.','无法下载报告。'],
+  'Esta combinación no se puede construir:':['This combination cannot be built:','无法组装此组合：'],
+  'La campaña requiere mods que no se encontraron:':['The campaign requires mods that were not found:','找不到此战役所需模组：'],
+  'El juego desactiva estos mods por la versión, y el taller también los ignora:':['The game disables these mods because of their version, and the workshop also ignores them:','游戏因版本不兼容停用了以下模组，工坊也会忽略它们：'],
+  'Torreta de':['Turret of','炮塔来源：'],
+  'Chasis de':['Chassis of','底盘来源：'],
+};
+export const LOCALE_ES=Object.fromEntries(Object.entries(FINISH_NAMES).map(([key,value])=>[key,value[0]]));
+export const LOCALE_EN={...Object.fromEntries(Object.keys(FINISH_NAMES).map(key=>[key,key])),...Object.fromEntries(Object.entries(COPY).map(([key,value])=>[key,value[0]]))};
+export const LOCALE_ZH={...Object.fromEntries(Object.entries(FINISH_NAMES).map(([key,value])=>[key,value[1]])),...Object.fromEntries(Object.entries(COPY).map(([key,value])=>[key,value[1]]))};

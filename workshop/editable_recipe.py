@@ -10,7 +10,7 @@ import re
 import tempfile
 from pathlib import Path
 
-FIELDS = ('commander_mg', 'smoke_launchers', 'extra_armor')
+FIELDS = ('commander_mg', 'smoke_launchers', 'extra_armor', 'sight')
 
 
 def fitting_parents(transform, commander):
@@ -42,11 +42,16 @@ def reopen(metadata, recipes, model):
         return transform, metadata.get('commander_mg'), metadata.get('smoke_launchers')
     bones = set(model['bones'])
     smoke, seen, armor, armor_seen, commander, commander_contract = [], set(), [], set(), None, None
+    sight = None
     inherited = False
     current, visited = metadata, set()
     while current:
         own = current is metadata
         tr = current.get('transform') or {}
+        sight_contract=current.get('sight') or {}
+        if sight is None and sight_contract.get('bone') in bones and tr.get('sight'):
+            sight=copy.deepcopy(tr['sight'])
+            inherited |= not own
         contract = current.get('commander_mg') or {}
         names = set((contract.get('bones') or {}).values())
         if commander is None and names and names <= bones and tr.get('commander_mg'):
@@ -59,7 +64,7 @@ def reopen(metadata, recipes, model):
                 continue
             seen.add(root)
             smoke.append({k:copy.deepcopy(v) for k,v in mount.items()
-                          if k in ('tubes', 'parent', 'position', 'rotation', 'pivot')})
+                          if k in ('tubes', 'parent', 'position', 'rotation', 'pivot', 'mirror')})
             inherited |= not own
         for mount in current.get('extra_armor') or []:
             names = mount.get('bones') or []
@@ -67,7 +72,7 @@ def reopen(metadata, recipes, model):
                 continue
             armor_seen.add(names[0])
             row = {k:copy.deepcopy(v) for k,v in mount.items()
-                   if k in ('asset', 'parent', 'position', 'rotation', 'pivot', 'plate')}
+                   if k in ('asset', 'parent', 'position', 'rotation', 'pivot', 'mirror', 'plate')}
             serial = re.fullmatch(r'mw_armor_(\d+)_root', names[0])
             if serial:row['serial'] = int(serial[1])
             armor.append(row)
@@ -118,6 +123,7 @@ def reopen(metadata, recipes, model):
     if commander:transform['commander_mg'] = commander
     if smoke:transform['smoke_launchers'] = smoke
     if armor:transform['extra_armor'] = armor
+    if sight:transform['sight'] = sight
     # Recreated commander mounts allocate names from the rebuilt skeleton,
     # which may differ from the installed vehicle. Keep native socket identity.
     sockets = {name: native for native,name in (commander_contract or {}).get('bones', {}).items()}

@@ -55,8 +55,9 @@ assert.deepEqual(state.transform.commander_mg,recipe);
 const previousCatalogReads=catalogReads;state.artRevision=1;await editor.restore();
 assert.equal(catalogReads,previousCatalogReads+1,'reindexing must refresh the DLC weapon choices');
 assert.match($('cmd-dlc-note').textContent,/DLC/);
-$('cmd-parent').value='reflected';assert.throws(()=>$('cmd-parent').onchange(),/refleja/);
-assert.deepEqual(state.transform.commander_mg,recipe,'invalid reparent must leave recipe unchanged');
+$('cmd-parent').value='reflected';$('cmd-parent').onchange();
+assert.equal(state.transform.commander_mg.parent,'reflected');
+assert.ok(state.transform.commander_mg.mirror.some(Boolean),'reflection is preserved in the saved pose');
 // An earlier async preview must never resurrect removed geometry.
 defer=true;$('cmd-item').value='base_rifle';$('cmd-item').onchange();
 await new Promise(resolve=>setTimeout(resolve,220));assert.equal(pending.length,1);

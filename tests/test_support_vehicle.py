@@ -34,6 +34,21 @@ def spec():
 
 
 class SupportVehicleTests(unittest.TestCase):
+    def test_mirrored_cargo_keeps_its_visible_mesh_faces_and_recipe(self):
+        from workshop.geometry import read_mesh,linear_determinant
+        for axis in range(3):
+            with self.subTest(axis=axis),tempfile.TemporaryDirectory() as temp:
+                value=spec();value['cargo'][0]['mirror']=[i==axis for i in range(3)]
+                value['cargo'][0]['pivot']=[2,3,4]
+                result=compile_assembly(resources(),'receiver','receiver',{'support_vehicle':value},temp,'mw_cargo_mirror')
+                model=parse_model((Path(temp)/'resource'/result['model_path']).read_bytes())
+                wrapper=model['bones']['mw_cargo_0']
+                self.assertLess(linear_determinant(wrapper['world']),0)
+                visual=next(b for name,b in model['bones'].items() if name.startswith('mw_cargo_0_') and b['assets'])
+                mesh=read_mesh((Path(temp)/'resource'/Path(result['model_path']).parent/visual['assets'][0]).read_bytes())
+                self.assertEqual(mesh['indices'],[0,2,1])
+                self.assertEqual(result['metadata']['transform']['support_vehicle'],value)
+
     def test_separate_free_mount_saves_restore_support_weapon_capabilities(self):
         # A native gun and coax share a joint/operator; two saved mounts do not.
         fixture = resources()

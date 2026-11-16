@@ -20,6 +20,9 @@ export function previewMesh(mesh, material) {
 
 export function applyModelTextures(groups, enabled, materialFor, wire) {
   for(const [part,group] of Object.entries(groups))group.traverse(child=>{
+    if(child.userData?.customArmor){
+      child.material=child.userData.flat;child.material.wireframe=wire;return;
+    }
     const mesh=child.userData?.mesh;if(!mesh)return;
     if(enabled&&mesh.uv?.length&&mesh.submeshes?.some(s=>s.mtl)){
       child.geometry.clearGroups();

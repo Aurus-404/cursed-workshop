@@ -28,6 +28,27 @@ def row(parent='azimuth'):
 
 
 class ExtraArmorTests(unittest.TestCase):
+    def test_readers_release_resources_without_waiting_for_cyclic_gc(self):
+        import gc
+        import weakref
+        enabled = gc.isenabled()
+        gc.disable()
+        try:
+            r = resources()
+            reference = weakref.ref(r)
+            root = block('{game_entity}')
+            _volumes(r, root)
+            _default_material(r, root)
+            del r
+            self.assertIsNone(reference(), 'catalog readers retain the entire resource snapshot')
+            model = parse_model('{skeleton {bone "root" {bone "child"}}}')
+            bone = weakref.ref(model['bones']['child']['node'])
+            del model
+            self.assertIsNone(bone(), 'model readers retain discarded bones')
+        finally:
+            if enabled:
+                gc.enable()
+
     def test_a_mantlet_fitting_is_its_elevation_shell_fixed_without_the_barrel(self):
         r=resources();folder='entity/armor/'
         r.files[folder+'armor.mdl']=(b'{skeleton {bone "base" {bone revolute "gun_rot" {parameters "id=gun;"}{VolumeView "plate.ply"}'
@@ -161,7 +182,9 @@ class ExtraArmorTests(unittest.TestCase):
         for invalid in (None,{},[{'asset':'missing'}],[{**row(),'position':[True,0,0]}],
                         [{**row(),'position':[0,float('nan'),0]}]):
             with self.subTest(invalid=invalid),self.assertRaises(ArmorError):configuration(resources(),invalid)
-        with self.assertRaises(ArmorError):self.compile({'commander_only':True,'extra_armor':[row('breech')]})
+        with self.assertRaises(ArmorError):self.compile({'commander_only':True,'extra_armor':[row('missing_bone')]})
+        _,_,model,_=self.compile({'commander_only':True,'extra_armor':[row('breech')]})
+        self.assertEqual(model['bones']['mw_armor_0_root']['parent'],'breech')
 
     def test_native_positional_macro_and_sand_material_contract(self):
         r=resources();r.files['properties/vehicle.ext']=b'(define "shield_track" {volume %0 {thickness %1}{tags "shield"}{CastSteel 0.5}})'

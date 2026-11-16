@@ -44,8 +44,20 @@ export function setValue(spec,path,value,native){
   return Object.keys(result).length?result:undefined;
 }
 
+export function reconcileWeapons(spec,previous,current){
+  if(!spec?.places)return spec;
+  const result=structuredClone(spec);
+  const before=new Map(previous.map(w=>[w.place,w.weapon]));
+  const after=new Map(current.map(w=>[w.place,w.weapon]));
+  for(const place of Object.keys(result.places)){
+    if(before.has(place)&&before.get(place)!==after.get(place))delete result.places[place];
+  }
+  if(!Object.keys(result.places).length)delete result.places;
+  return Object.keys(result).length?result:undefined;
+}
+
 export function weaponAttributesEditor({state,$,remember,document=globalThis.document}){
-  const open=new Set();let selected='',shownFor=null;
+  const open=new Set();let selected='',shownFor=null,previousWeapons=null,previousHull=null,previousTransform=null;
   const weapons=()=>state.check?.weapons||[];
   const spec=()=>state.transform.weapon_attributes;
   const current=()=>weapons().find(w=>w.place===selected)||weapons()[0];
@@ -74,6 +86,13 @@ export function weaponAttributesEditor({state,$,remember,document=globalThis.doc
   }
   function render(force=false){
     const field=$('weapons-field'),list=weapons();
+    if(state.check?.weapons&&state.check.status!=='pending'&&previousWeapons!==list){
+      if(previousWeapons&&previousHull===state.hull&&previousTransform===state.transform){
+        const next=reconcileWeapons(spec(),previousWeapons,list);
+        if(next)state.transform.weapon_attributes=next;else delete state.transform.weapon_attributes;
+      }
+      previousWeapons=list;previousHull=state.hull;previousTransform=state.transform;
+    }
     field.classList.toggle('hidden',!state.hull);
     const loading=state.check?.status==='pending';
     $('weapons-empty').textContent=loading?t('Esperá la comprobación del vehículo.'):list.length?'':t('Este vehículo no tiene armas editables.');

@@ -10,14 +10,23 @@ export function fittingParent(row, commanderBones={}){
 export function poseMatrix(pose,base=[0,0,0]){
   const pivot=new THREE.Vector3(...(pose.pivot||[0,0,0]));
   const q=new THREE.Quaternion().setFromEuler(new THREE.Euler(...pose.rotation.map(THREE.MathUtils.degToRad),'ZYX'));
-  const position=new THREE.Vector3(...pose.position).add(new THREE.Vector3(...base)).add(pivot).sub(pivot.clone().applyQuaternion(q));
-  return new THREE.Matrix4().compose(position,q,new THREE.Vector3(1,1,1));
+  const scale=new THREE.Vector3(...(pose.mirror||[false,false,false]).map(v=>v?-1:1));
+  const position=new THREE.Vector3(...pose.position).add(new THREE.Vector3(...base)).add(pivot).sub(pivot.clone().multiply(scale).applyQuaternion(q));
+  return new THREE.Matrix4().compose(position,q,scale);
 }
 export function applyPose(object,pose,base){poseMatrix(pose,base).decompose(object.position,object.quaternion,object.scale);object.updateMatrixWorld(true);}
+export function poseFromMatrix(matrix,previous={}){
+  const p=new THREE.Vector3(),q=new THREE.Quaternion(),s=new THREE.Vector3();matrix.decompose(p,q,s);
+  if(s.toArray().some(v=>Math.abs(Math.abs(v)-1)>.002))throw Error('El punto de fijación cambia la escala de la pieza.');
+  const mirror=s.toArray().map(v=>v<0),pivot=new THREE.Vector3(...(previous.pivot||[0,0,0]));
+  return {...previous,mirror,position:p.sub(pivot).add(pivot.clone().multiply(s).applyQuaternion(q)).toArray(),
+    rotation:new THREE.Euler().setFromQuaternion(q,'ZYX').toArray().slice(0,3).map(THREE.MathUtils.radToDeg)};
+}
 export function changePivot(pose,value){
   const old=new THREE.Vector3(...(pose.pivot||[0,0,0])),next=new THREE.Vector3(...value);
   const q=new THREE.Quaternion().setFromEuler(new THREE.Euler(...pose.rotation.map(THREE.MathUtils.degToRad),'ZYX'));
-  pose.position=new THREE.Vector3(...pose.position).add(old).sub(old.clone().applyQuaternion(q)).sub(next).add(next.clone().applyQuaternion(q)).toArray();
+  const scale=new THREE.Vector3(...(pose.mirror||[false,false,false]).map(v=>v?-1:1));
+  pose.position=new THREE.Vector3(...pose.position).add(old).sub(old.clone().multiply(scale).applyQuaternion(q)).sub(next).add(next.clone().multiply(scale).applyQuaternion(q)).toArray();
   pose.pivot=[...value];
 }
 
@@ -46,9 +55,11 @@ export function pivotEditor({scene,control,state,$,pose,target,base=()=>[0,0,0],
       if(state.editPivot){changePivot(row,object.worldToLocal(proxy.getWorldPosition(new THREE.Vector3())).toArray());}
       else{
         const p=row.pivot||[0,0,0],matrix=object.parent.matrixWorld.clone().invert().multiply(proxy.matrixWorld).multiply(new THREE.Matrix4().makeTranslation(...p.map(v=>-v)));
+        const signs=(row.mirror||[false,false,false]).map(v=>v?-1:1);
+        matrix.multiply(new THREE.Matrix4().makeScale(...signs));
         const position=new THREE.Vector3(),q=new THREE.Quaternion(),scale=new THREE.Vector3();matrix.decompose(position,q,scale);
         row.rotation=new THREE.Euler().setFromQuaternion(q,'ZYX').toArray().slice(0,3).map(THREE.MathUtils.radToDeg);
-        const pivot=new THREE.Vector3(...p);row.position=position.sub(new THREE.Vector3(...base())).sub(pivot).add(pivot.applyQuaternion(q)).toArray();
+        const pivot=new THREE.Vector3(...p);row.position=position.sub(new THREE.Vector3(...base())).sub(pivot).add(pivot.clone().multiply(new THREE.Vector3(...signs)).applyQuaternion(q)).toArray();
       }
       apply();
     }finally{capturing=false;}sync();return true;

@@ -2,7 +2,7 @@ import {t} from './i18n.js';
 
 export function isTextEntry(target){return !!target&&(target.isContentEditable||['INPUT','TEXTAREA','SELECT'].includes(target.tagName));}
 
-export function accessibility({document=globalThis.document,window=globalThis.window,busy=()=>false}={}){
+export function accessibility({document=globalThis.document,window=globalThis.window,busy=()=>false,shortcuts=true}={}){
   const $=id=>document.getElementById(id);
   const help={
     'help-button':'Abrí la ayuda para consultar los controles y atajos.',
@@ -52,6 +52,7 @@ export function accessibility({document=globalThis.document,window=globalThis.wi
       if(node.nodeType!==1||node===bubble)continue;
       const text=help[node.id]||node.getAttribute('title');
       if(text){node.dataset.help=t(text);node.removeAttribute('title');}
+      if(node.matches('input[type=number]')&&!['qol-fine_factor','qol-move_step'].includes(node.id))node.step='1';
       if(node.matches('input[type=number]')&&!node.dataset.help)node.dataset.help=node.dataset.transform?t((node.dataset.transform==='position'?'Posición':'Orientación')+' '+['X','Y','Z'][Number(node.dataset.axis)]):t('Define el arco permitido, en grados; no simula colisiones.');
       if(node.matches('[data-filter]'))node.dataset.help=t('Filtra la lista sin modificar la partida.');
       if(node.matches('[data-show]'))node.dataset.help=t('Opciones de visualización; no cambian los recursos del vehículo.');
@@ -75,8 +76,8 @@ export function accessibility({document=globalThis.document,window=globalThis.wi
   document.addEventListener('keydown',event=>{
     if(event.key==='Escape'){hide();$('view-panel').classList.add('hidden');$('view-button').setAttribute('aria-expanded','false');}
     if(document.querySelector('dialog[open]')||busy())return;
-    if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='f'){event.preventDefault();$('unit-search').focus();$('unit-search').select();}
-    if(event.key==='?'&&!isTextEntry(event.target)){event.preventDefault();$('help-dialog').showModal();}
+    if(shortcuts&&(event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='f'){event.preventDefault();$('unit-search').focus();$('unit-search').select();}
+    if(shortcuts&&event.key==='?'&&!isTextEntry(event.target)){event.preventDefault();$('help-dialog').showModal();}
     if(event.target?.matches?.('.unit-card')&&['ArrowDown','ArrowUp','ArrowLeft','ArrowRight','Home','End'].includes(event.key)){
       event.preventDefault();const rows=[...$('unit-list').querySelectorAll('.unit-card')],index=rows.indexOf(event.target);
       const nextRow=rows.findIndex(row=>row.offsetTop>rows[0].offsetTop),columns=nextRow>0?nextRow:Math.max(1,rows.length);

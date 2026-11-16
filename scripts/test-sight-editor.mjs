@@ -1,0 +1,22 @@
+import assert from 'node:assert/strict';
+import * as THREE from 'three';
+import {sightEditor} from '../frontend/sight-editor.js';
+globalThis.Option=class{constructor(text,value){this.text=text;this.value=value;}};
+const nodes=new Map(),$=id=>{if(!nodes.has(id))nodes.set(id,{value:'',disabled:false,textContent:'',replaceChildren(...values){this.options=values;}});return nodes.get(id);};
+const state={transform:{}},scene=new THREE.Scene();let active=true,history=0,checks=0,selection;
+scene.position.set(10,20,30);
+const editor=sightEditor({state,$,scene,remember(){history++;},selectEdit(v){selection=v;},refreshCheck(){checks++;},reportError(e){throw e;},active:()=>active});
+const hosts=[{name:'body',matrix:new THREE.Matrix4().toArray()},{name:'turret',matrix:new THREE.Matrix4().makeTranslation(2,8,20).toArray()}];
+for(const h of hosts){const a=h.matrix;h.matrix=[0,1,2,3].map(r=>[0,1,2,3].map(c=>a[c*4+r]));}
+editor.receiveCheck({sight_hosts:hosts,sight_default:{parent:'body',position:[4,5,6],rotation:[0,0,90]}});
+assert.equal(editor.pose(),null);$('sight-enable').onclick();assert.equal(selection,'sight');
+scene.updateMatrixWorld(true);const before=editor.target().matrixWorld.clone();
+$('sight-parent').value='turret';$('sight-parent').onchange();scene.updateMatrixWorld(true);
+before.elements.forEach((v,i)=>assert.ok(Math.abs(v-editor.target().matrixWorld.elements[i])<1e-7));
+$('sight-preview').onclick();const camera=editor.view(1.5);assert.equal(camera.aspect,1.5);
+assert.ok(camera.position.distanceTo(new THREE.Vector3(14,25,36))<1e-7);
+const direction=new THREE.Vector3();camera.getWorldDirection(direction);assert.ok(direction.distanceTo(new THREE.Vector3(0,1,0))<1e-7);
+assert.ok(editor.target().children.every(child=>!child.visible),'locator stays out of aiming preview');
+editor.deactivate();assert.equal(editor.view(1),null);active=false;editor.sync();assert.equal(editor.target().parent.visible,false);
+$('sight-reset').onclick();assert.equal(editor.pose(),null);assert.equal(history,3);assert.equal(checks,3);
+console.log('Sight editor: native host selection, no-jump reparenting, invisible locator, viewpoint, preview exit and original restore passed.');

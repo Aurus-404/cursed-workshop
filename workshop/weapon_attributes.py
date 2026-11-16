@@ -233,7 +233,7 @@ def _places(root):
 def _magazine(top):
     filling = top.get('filling')
     if filling is None or len(filling.args) < 2:
-        return None
+        return 1
     try:
         value = float(filling.args[1])
     except ValueError:
@@ -258,8 +258,8 @@ def describe(resources, root):
             v = evaluate(_operands(top['recoverytime'])[1])
             if v:
                 fields['fire_rate'] = 60 / v
-        if (v := _magazine(top)) is not None:
-            fields['magazine'] = v
+        fields.setdefault('fire_rate',60.0/max(fields.get('reload_time',1),0.01))
+        fields['magazine'] = _magazine(top) or 1
         if (v := _range(top)) is not None:
             fields['range'] = v
         timeout = top.get('firingtimeout')
@@ -422,7 +422,7 @@ def copy_name(new_id, place):
     return new_id + '_' + re.sub(r'[^A-Za-z0-9_]', '_', place).lower()
 
 
-def _copy_text(resources, name, row):
+def _copy_text(resources, name, row, magazine_filling=None):
     """The weapon copy: {from "name" ...only the changed values...}."""
     info = effective(resources, name)
     top, shells = info['top'], info['shells']
@@ -433,9 +433,14 @@ def _copy_text(resources, name, row):
         body.append(block('{recoveryTime %s}' % _number_text(60 / row['fire_rate'])))
     if 'magazine' in row:
         filling = top.get('filling')
-        if filling is None or not filling.args:
+        family=filling.args[0] if filling is not None and filling.args else magazine_filling
+        if not family:
             raise WeaponAttributeError(f'{name} has no magazine to resize.')
-        body.append(block('{filling %s %d}' % (quote(filling.args[0]), round(row['magazine']))))
+        body.append(block('{filling %s %d}' % (quote(family), round(row['magazine']))))
+        if 'fire_rate' not in row and 'recoverytime' not in top:
+            recharge=top.get('rechargetime')
+            interval=evaluate(_operands(recharge)[1]) if recharge is not None and len(_operands(recharge))>1 else 1
+            body.append(block('{recoveryTime %s}' % _number_text(interval or 1)))
     old_range = _range(top)
     new_range = row.get('range', old_range)
     if 'range' in row:
@@ -490,8 +495,6 @@ def _copy_text(resources, name, row):
             if field in values:
                 inner.append(_scaled_node(key, own.get(key.casefold()) or top.get(key.casefold()), values[field]))
         rows = _table(own.get('projectiledamagetable'))
-        if rows and any(later[0] <= earlier[0] for earlier, later in zip(rows, rows[1:])):
-            rows = None  # not a distance table the game can read in order: left native
         if 'penetration' in values:
             if not rows or len(rows) != len(values['penetration']):
                 raise WeaponAttributeError(f'{name}: the penetration table changed; open the weapon again.')
@@ -529,7 +532,13 @@ def apply(resources, root, spec, new_id, diagnostics=None):
                 diagnostics.append({'code': 'weapon_attributes_skipped', 'level': 'warning',
                                     'message': f'The vehicle has no weapon place {place} any more; its weapon attributes were left out.'})
             continue
-        source, text = _copy_text(resources, weapon.args[0], row)
+        filling=None
+        if 'filling' in weapon.args:
+            at=weapon.args.index('filling')
+            if at+1<len(weapon.args):
+                tokens=weapon.args[at+1].split()
+                filling=' '.join(tokens[:2]) if tokens and tokens[0].casefold()=='ammo' else (tokens[0] if tokens else None)
+        source, text = _copy_text(resources, weapon.args[0], row, filling)
         name = copy_name(new_id, place)
         files['resource/' + posixpath.dirname(source) + '/' + name] = text
         # The copy shows the original's name, not desc/weapon/<copy>.
@@ -537,6 +546,13 @@ def apply(resources, root, spec, new_id, diagnostics=None):
         if shown.get('default'):
             labels.append((name, shown['default'], shown.get('es') or shown['default']))
         weapon.atoms[1].set(name)
+        if 'magazine' in row and 'filling' in weapon.args:
+            at=weapon.args.index('filling')
+            if at+2<len(weapon.args):
+                try:loaded=float(weapon.args[at+2])
+                except ValueError:loaded=None
+                if loaded is not None and loaded>row['magazine']:
+                    weapon.atoms[at+3].set(str(round(row['magazine'])))
         renamed.append(place)
     if labels:
         from .registration import _pot

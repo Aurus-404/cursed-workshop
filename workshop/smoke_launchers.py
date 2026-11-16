@@ -209,7 +209,7 @@ def apply(resources, root, model, value, assets, diagnostics):
         prefix='cw_smoke_'+str(serial)+'_';serial+=1
         # Native standalone meshes use a reflected basis. Preserve that visible
         # side also on unusual hosts whose complete frame has positive parity.
-        flipped=linear_determinant(final['bones'][row['parent']]['world'])>0
+        flipped=linear_determinant(multiply(final['bones'][row['parent']]['world'],pose_matrix(row)))>0
         mesh_name='cw_smoke_'+str(row['tubes'])+('_flipped' if flipped else '')+'.ply'
         node=block('{bone '+quote(prefix+'root')+' {VolumeView '+quote(mesh_name)+'}}')
         _set_matrix(node,pose_matrix(row))

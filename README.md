@@ -36,7 +36,7 @@ campaign save you choose.
   at your viewing angle.
 - **Update vehicles**: rebuild the vehicles you already made with the latest fixes.
 - **Diagnostics**: one button makes a report `.zip` for bug reports.
-- Interface in **English, Spanish and Simplified Chinese**.
+- Interface in **English, Spanish, Simplified Chinese and Russian**.
 
 ## Download
 

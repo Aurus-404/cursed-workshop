@@ -177,6 +177,10 @@ class ErrorReportTests(unittest.TestCase):
         (folder / "mw_abc.def").write_text('{game_entity {Weaponry {place "gun"}}}', encoding="utf-8")
         (folder / "mw_abc.mdl").write_text('{skeleton}', encoding="utf-8")
         (folder / "mw_abc.ext").write_text('{volume "body"}', encoding="utf-8")
+        (folder / "mw_abc_x.def").write_text('{game_entity {extension "mw_abc_x.mdl"}}',encoding='utf-8')
+        (folder / "mw_abc_x.mdl").write_text('{skeleton {bone "wreck"}}',encoding='utf-8')
+        (folder / "mw_abc_xx.def").write_text('{game_entity {extension "mw_abc_xx.mdl"}}',encoding='utf-8')
+        (folder / "mw_abc_xx.mdl").write_text('{skeleton {bone "debris"}}',encoding='utf-8')
         (addon / "assembly_mw_gone.json").write_text("{}", encoding="utf-8")  # definition missing
         result = build_report(self.root / "reports", self.game, self.workspace, "diag",
                               home=self.home, now=datetime(2026, 10, 21, 9, 0, 0), addon=addon)
@@ -184,6 +188,9 @@ class ErrorReportTests(unittest.TestCase):
             self.assertIn('{place "gun"}', archive.read("vehicles/mw_abc.def").decode("utf-8"))
             self.assertEqual(archive.read("vehicles/mw_abc.mdl"), b"{skeleton}")
             self.assertEqual(archive.read("vehicles/mw_abc.ext"), b'{volume "body"}')
+            for tag in ('x','xx'):
+                self.assertIn(f'vehicles/mw_abc_{tag}.def',archive.namelist())
+                self.assertIn(f'vehicles/mw_abc_{tag}.mdl',archive.namelist())
             self.assertIn("%USERPROFILE%", archive.read("vehicles/assembly_mw_abc.json").decode("utf-8"))
             self.assertNotIn("vehicles/mw_gone.def", archive.namelist())
 

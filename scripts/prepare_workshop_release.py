@@ -26,6 +26,15 @@ BLOCKED_SUFFIXES = {".sav", ".pak", ".rar", ".log", ".dmp", ".map", ".mdl", ".pl
 BLOCKED_NAMES = {"settings.json", "depot.json", "options.set", "keys.set", "game_progress.set", ".env"}
 
 
+def bundled_paint(relative):
+    """Only the editor's named, bundled paint tiles may be shipped as DDS."""
+    import runpy
+    relative = Path(relative)
+    paints = runpy.run_path(str(ROOT / 'workshop/armor_paints.py'))['PAINTS']
+    return (relative.parent.as_posix() == '_internal/workshop/web/assets/armor-paints'
+            and relative.suffix == '.dds' and relative.stem in paints)
+
+
 def digest(path):
     with Path(path).open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
@@ -46,7 +55,8 @@ def audit_item(item):
         relative = path.relative_to(item).as_posix()
         if not path.resolve().is_relative_to(item):
             raise ValueError("Content leaves the item directory")
-        if path.suffix.lower() in BLOCKED_SUFFIXES or path.name.lower() in BLOCKED_NAMES:
+        allowed_paint = relative.startswith('CursedWorkshop/') and bundled_paint(relative.removeprefix('CursedWorkshop/')) if path.suffix.lower()=='.dds' else False
+        if (path.suffix.lower() in BLOCKED_SUFFIXES and not allowed_paint) or path.name.lower() in BLOCKED_NAMES:
             raise ValueError(f"Development, save or game content in package: {relative}")
         if any(part.lower() in {".git", "outputs", "operations", "node_modules", "__pycache__"} for part in path.relative_to(item).parts):
             raise ValueError(f"Development/workspace folder in package: {relative}")
@@ -79,7 +89,8 @@ def validate_distribution(dist, root=ROOT):
     for path in dist.rglob("*"):
         if path.is_symlink() or path.is_junction():
             raise ValueError("Linked build files cannot be published")
-        if path.is_file() and (path.name.lower() in BLOCKED_NAMES or path.suffix.lower() in BLOCKED_SUFFIXES - {".map"}):
+        allowed_paint = bundled_paint(path.relative_to(dist)) if path.suffix.lower()=='.dds' else False
+        if path.is_file() and (path.name.lower() in BLOCKED_NAMES or (path.suffix.lower() in BLOCKED_SUFFIXES - {".map"} and not allowed_paint)):
             raise ValueError(f"Unexpected data in build: {path.name}")
 
 

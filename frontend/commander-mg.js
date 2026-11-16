@@ -1,4 +1,4 @@
-import {applyPose} from './pivot-editor.js';
+import {applyPose,poseFromMatrix} from './pivot-editor.js';
 import * as THREE from 'three';
 import {t} from './i18n.js';
 import {previewMesh} from './model-geometry.js';
@@ -84,10 +84,9 @@ export function commanderEditor({state,groups,scene,api,quickJob,remember,select
     if(field==='parent'){
       // Reparent without teleporting the player's carefully placed support.
       const next=hosts.find(h=>h.name===$(id).value);if(!next)return;sync();group.updateWorldMatrix(true,false);
-      const local=matrix(next.matrix).invert().multiply(group.matrixWorld),position=new THREE.Vector3(),rotation=new THREE.Quaternion(),scale=new THREE.Vector3();
-      local.decompose(position,rotation,scale);
-      if(scale.toArray().some(v=>Math.abs(v-1)>.002)){controls();reportError(new Error(t('Ese padre cambia la escala o refleja la montura. Elegí otro hueso.')));return;}
-      const pivot=new THREE.Vector3(...(spec.pivot||[0,0,0]));spec.position=position.sub(pivot).add(pivot.clone().applyQuaternion(rotation)).toArray();spec.rotation=new THREE.Euler().setFromQuaternion(rotation,'ZYX').toArray().slice(0,3).map(THREE.MathUtils.radToDeg);
+      scene.updateWorldMatrix(true,false);
+      const local=matrix(next.matrix).invert().multiply(scene.matrixWorld.clone().invert()).multiply(group.matrixWorld);
+      try{Object.assign(spec,poseFromMatrix(local,spec));}catch(error){controls();reportError(error);return;}
     }
     spec[field]=$(id).value;sync();if(field!=='parent')return preview().then(refreshCheck);selectEdit('commander_mg');refreshCheck();};
   for(const type of ['yaw','pitch'])for(let i=0;i<2;i++)$(`cmd-${type}-${i}`).onchange=()=>{const spec=state.transform.commander_mg;if(!spec)return;remember();spec[type][i]=Number($(`cmd-${type}-${i}`).value);drawArcs();refreshCheck();};

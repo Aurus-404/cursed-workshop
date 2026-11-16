@@ -52,6 +52,7 @@ assert.ok($('inspector-build').classList.contains('hidden'));assert.ok($('build-
 assert.ok($('edit-hull').disabled&&$('operation-select').disabled&&$('pick-edit').disabled);
 assert.equal($('cmd-parent').parentElement.parentElement,$('working-target-slot'),'commander context appears above the tool');
 assert.equal($('armor-list').parentElement.parentElement,$('working-target-slot'),'armor uses the existing placed-part selector at the top');
+assert.equal($('pose-actions').parentElement.id,'pose-actions-home');
 assert.equal($('design-turret-pos').parentElement.parentElement,$('working-target-slot'),'position has a visible native-module context');
 assert.equal($('commander-field').parentElement.id,'inspector-panel-commander');
 assert.equal($('smoke-section').parentElement.id,'inspector-panel-smoke');
@@ -61,6 +62,9 @@ state.inspectorPending=0;menus.render();$('inspector-finish').onclick();
 assert.equal(cleared,1);assert.equal(attached,null);assert.deepEqual(state.transform,recipe);
 assert.equal(visibleTools().length,0);assert.equal($('build-button').disabled,false);
 assert.ok(buttons[Object.keys(INSPECTOR_TOOLS).indexOf('commander')].focused,'keyboard focus returns to the tool entry');
+buttons[Object.keys(INSPECTOR_TOOLS).indexOf('armor')].onclick();
+assert.equal($('pose-actions').parentElement.id,'armor-pose-slot');
+$('inspector-finish').onclick();
 buttons[Object.keys(INSPECTOR_TOOLS).indexOf('smoke')].onclick();assert.deepEqual(visibleTools().map(([key])=>key),['smoke']);
 $('inspector-finish').onclick();assert.equal(menus.navigation.section,'turret');
 buttons[Object.keys(INSPECTOR_TOOLS).indexOf('joints')].onclick();assert.ok($('inspector-transforms').classList.contains('hidden'),'joint tool cannot move the entire turret');

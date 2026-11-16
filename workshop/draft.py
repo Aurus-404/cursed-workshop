@@ -132,13 +132,13 @@ def compile_draft(resources,recipient,donor,transform,output,identifier):
     hull_pose=copy.deepcopy(transform.get('hull') or {})
     from .pivots import pivot_of
     pivot_of(hull_pose)
-    move_hull=any(hull_pose.get('position',[]))+any(hull_pose.get('rotation',[]))
+    move_hull=any(hull_pose.get('position',[]))+any(hull_pose.get('rotation',[]))+any(hull_pose.get('mirror',[]))
     with tempfile.TemporaryDirectory(prefix='cw_vehicle_design_') as temporary:
         temp=Path(temporary)
         try:
             seed=draft.get('seed')
             if seed:
-                core={k:v for k,v in seed['transform'].items() if k not in ('commander_mg','extra_armor','smoke_launchers','rider_mgs','passenger_seats','crew_hidden','weapon_attributes')}
+                core={k:v for k,v in seed['transform'].items() if k not in ('commander_mg','extra_armor','smoke_launchers','rider_mgs','passenger_seats','crew_hidden','weapon_attributes','sight')}
                 initial=compile_assembly(view,seed['recipient'],seed['donor'],core,temp/'seed','mw_draft_seed')
                 seed_interaction=initial['metadata'].get('interaction_donor')
                 seed_camera={k:copy.deepcopy(initial['metadata'][k]) for k in

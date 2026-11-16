@@ -3,7 +3,7 @@ import {t} from './i18n.js';
 const zero=()=>({position:[0,0,0],rotation:[0,0,0]});
 const mountOf=row=>row?.recipient_mount||'turret';
 // Fittings the editor draws itself: where they sit, and a plate's size, change nothing in the drawn vehicle.
-export const DRAWN_FITTINGS=['extra_armor','smoke_launchers','towing','charge','rider_mgs','passenger_seats','commander_mg'];
+export const DRAWN_FITTINGS=['extra_armor','smoke_launchers','towing','charge','rider_mgs','passenger_seats','commander_mg','sight'];
 // Of those, the ones nothing else hangs from: moving them cannot change whether the vehicle builds.
 export const LOOSE_FITTINGS=['extra_armor','smoke_launchers','towing','charge'];
 const unplaced=value=>Array.isArray(value)?value.map(unplaced):value&&typeof value==='object'?

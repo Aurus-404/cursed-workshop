@@ -10,6 +10,22 @@ from tests.test_gun_assembly import Resources
 
 
 class PivotTests(unittest.TestCase):
+    def test_mirrors_are_local_signed_axes_around_the_custom_pivot(self):
+        from workshop.geometry import linear_determinant
+        for axis in range(3):
+            flags=[False,False,False];flags[axis]=True
+            pose={'position':[4,5,6],'rotation':[20,30,40],'pivot':[7,8,9],'mirror':flags}
+            matrix=pose_matrix(pose)
+            self.assertAlmostEqual(linear_determinant(matrix),-1)
+            for a,b in zip(point(matrix,pose['pivot']),[11,13,15]):self.assertAlmostEqual(a,b)
+            no_mirror=pose_matrix({**pose,'mirror':[False,False,False]})
+            offset=[0,0,0];offset[axis]=2
+            positive=[p+v for p,v in zip(pose['pivot'],offset)]
+            negative=[p-v for p,v in zip(pose['pivot'],offset)]
+            for a,b in zip(point(matrix,positive),point(no_mirror,negative)):self.assertAlmostEqual(a,b)
+        for value in ([1,0,0],[True],None):
+            with self.assertRaises(ValueError):pose_matrix({'mirror':value})
+
     def test_pose_keeps_pivot_stationary_under_rotation(self):
         pose={'position':[2,3,4],'rotation':[20,30,40],'pivot':[7,8,9]}
         self.assertEqual([round(x,7) for x in point(pose_matrix(pose),pose['pivot'])],[9,11,13])

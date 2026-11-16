@@ -15,8 +15,12 @@ export async function loadUISettings(){
   if(saved.system_language)uiStorage.setItem('cw.systemLang',saved.system_language);
   // Server is authoritative; missing values use defaults, not another origin's cache.
   uiStorage.setItem('cw.appearance',JSON.stringify({theme:saved.theme,size:saved.size,motion:saved.motion,help:saved.help}));
+  uiStorage.setItem('cw.lowMemory',saved.low_memory===true?'on':'off');
+  uiStorage.setItem('cw.textureQuality',saved.texture_quality||'medium');
+  uiStorage.setItem('cw.transformSpace',saved.transform_space||'world');
   uiStorage.setItem('cw.completionSound',saved.sound===false?'off':'on');
   uiStorage.setItem('cw.favorites',JSON.stringify(saved.favorites||{}));
+  uiStorage.setItem('cw.editorOptions',JSON.stringify(saved.editor_options||{}));
 }
 export function saveUISettings(patch){
   // Keep rapid changes ordered, and let the next user action recover after an error.

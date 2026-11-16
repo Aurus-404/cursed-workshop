@@ -227,12 +227,15 @@ def configuration(index, rows):
                       'yaw': yaw, 'pitch': pitch, 'seat': _vector(row.get('seat', [0, 0, 0]), 3, 200)}
         if 'pivot' in row:
             normalized['pivot'] = pivot_of(row)
+        from .pivots import copy_mirror
+        copy_mirror(row,normalized)
         for name in ('gun_pose','operator_pose','mount_pose'):
             value=row.get(name) or {}
             if not isinstance(value,dict):_error('El ajuste de la MG debe ser una posición y rotación.')
             normalized[name]={'position':_vector(value.get('position',[0,0,0]),3,10000),
                               'rotation':_vector(value.get('rotation',[0,0,0]),3,360)}
             if 'pivot' in value:normalized[name]['pivot']=pivot_of(value)
+            copy_mirror(value,normalized[name])
             pose_matrix(normalized[name])
         result.append((support, pose, weapon, normalized))
     return result
@@ -353,7 +356,7 @@ def apply(index, root, model, rows, assets, diagnostics):
         next(n for n in copied.walk('bone') if n.args[-1]==mapping[support['link']]).append(gun_socket)
         # Hardware can move separately without moving the aiming joints or
         # operator. Express the same mount-local visual offset on every LOD.
-        if any(row['mount_pose']['position']) or any(row['mount_pose']['rotation']):
+        if any(row['mount_pose']['position']) or any(row['mount_pose']['rotation']) or any(row['mount_pose'].get('mirror',[])):
             offset=pose_matrix(row['mount_pose']);base_frame=inverse(native['bones'][support['root']]['world'])
             for original in support['bones']:
                 node=next(n for n in copied.walk('bone') if n.args[-1]==mapping[original])

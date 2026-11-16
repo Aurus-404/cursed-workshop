@@ -90,7 +90,7 @@ def apply_towing(root, model, value, diagnostics):
     root.append(block('{props "tractor" "tractor_' + spec['tier'] + '"}'))
     diagnostics.append({'code': 'towing_hitch', 'level': 'info',
                         'message': f"Tows {spec['tier']} trailers from the hook at {spec['parent']}; towing in battle requires acceptance."})
-    return {key: spec[key] for key in ('tier', 'parent', 'position', 'rotation') if key in spec}
+    return {key: spec[key] for key in ('tier', 'parent', 'position', 'rotation', 'mirror', 'pivot') if key in spec}
 
 
 def _crew_roles(root):
@@ -200,4 +200,4 @@ def apply_charge(resources, root, model, value, diagnostics):
                           + ' {gunner ' + quote(operator) + '} {charger ' + quote(operator) + '} {basic}}'))
     diagnostics.append({'code': 'demolition_charge', 'level': 'info',
                         'message': f"{spec['charge']} demolition charge fired by {operator}; detonation in battle requires acceptance."})
-    return {key: spec[key] for key in ('charge', 'parent', 'position', 'rotation') if key in spec}
+    return {key: spec[key] for key in ('charge', 'parent', 'position', 'rotation', 'mirror', 'pivot') if key in spec}

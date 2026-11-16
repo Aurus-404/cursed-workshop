@@ -9,7 +9,7 @@ Weight stays native: it also stands for the physical mass the engine uses.
 """
 import math
 
-from .syntax import Atom, Node
+from .syntax import Atom, Node, Trivia, block
 
 # Parameter: (lowest, highest). Bounds keep the game's formulas finite.
 EDITABLE = {
@@ -76,16 +76,63 @@ def validate(spec):
             raise ValueError(f'La movilidad «{name}» tiene que estar entre {low:g} y {high:g}.')
 
 
-def apply(root, spec, diagnostics=None):
+def normalize_gears(root, resources, document, diagnostics=None):
+    """Keep the requested top speeds while removing unreachable lower gears.
+
+    Native macros can put a fixed lower ratio before reverse/speed. At high
+    speeds that terminal ratio can fall below (or equal) the fixed ratio.
+    A local macro overrides only the affected gearbox fields, after the native
+    mobility call. The native call stays editable and global resources stay intact.
+    """
+    from .compiler import _include_defines
+    from .registration import _expand_macros
+    from .weapon_attributes import evaluate
+    chassis=root.find('Chassis')
+    if chassis is None:return
+    marker='cw_mobility_gears'
+    for owner in (root, document):
+        for node in list(owner.find_all('define')):
+            if node.args[:1]==[marker]:owner.remove(node)
+    for node in list(chassis.children):
+        if node.opener=='(' and node.head==marker:chassis.remove(node)
+    definitions=_include_defines(resources,root)
+    definitions.update({n.args[0].casefold():n for owner in (document,root)
+                        for n in owner.find_all('define') if n.args})
+    expanded=_expand_macros(chassis,definitions)
+    effective={}
+    for locomotion in expanded.find_all('Locomotion'):
+        for node in locomotion.children:
+            if node.head.casefold() in ('gears','reargears'):effective[node.head.casefold()]=node
+    repairs=[]
+    for field,node in effective.items():
+        values=[evaluate(v) for v in node.items[1:] if isinstance(v,(Atom,Node))]
+        if not values or any(v is None or not math.isfinite(v) or v<=0 for v in values):
+            raise ValueError('The chassis gear ratios must be finite positive numbers.')
+        if all(b>a for a,b in zip(values,values[1:])):continue
+        top=values[-1]
+        valid=[]
+        for ratio in sorted(values[:-1]):
+            if ratio<top*(1-1e-6) and (not valid or ratio>valid[-1]*(1+1e-6)):valid.append(ratio)
+        valid.append(top)
+        repairs.append(block('{'+node.head+' '+' '.join(format(v,'.12g') for v in valid)+'}'))
+    if not repairs:return
+    definition=block('(define "'+marker+'" {Locomotion})')
+    for node in repairs:definition.find('Locomotion').append(node)
+    document.items[0:0]=[definition,Trivia('\n')]
+    chassis.append(block('("'+marker+'")'))
+    if diagnostics is not None:
+        diagnostics.append({'code':'mobility_gears_normalized','level':'warning',
+            'message':'Removed unreachable lower gear ratios; requested forward and reverse top speeds are preserved.'})
+
+
+def apply(root, spec, diagnostics=None, *, resources=None, document=None):
     """Write the chosen values into the vehicle's own mobility call. Returns the
     parameters the vehicle has no native value for (left out, never invented)."""
     validate(spec)
-    if not spec:
-        return []
     call = mobility_call(root)
     arguments = _arguments(call) if call is not None else {}
     skipped = []
-    for name, value in sorted(spec.items()):
+    for name, value in sorted((spec or {}).items()):
         node = arguments.get(name)
         if node is None or _number(node) is None:
             skipped.append(name)
@@ -94,4 +141,6 @@ def apply(root, spec, diagnostics=None):
     if skipped and diagnostics is not None:
         diagnostics.append({'code': 'mobility_skipped', 'level': 'warning', 'parameters': skipped,
                             'message': 'This chassis has no native value for: ' + ', '.join(skipped) + '; left unchanged.'})
+    if resources is not None and document is not None:
+        normalize_gears(root,resources,document,diagnostics)
     return skipped

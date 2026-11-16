@@ -1,4 +1,5 @@
 import json
+import math
 import tempfile
 import unittest
 from pathlib import Path
@@ -17,6 +18,137 @@ def plate(**changes):
 
 
 class CustomArmorTests(unittest.TestCase):
+    def test_retired_bolted_finishes_stay_readable_but_are_not_offered(self):
+        from workshop.armor_paints import catalog, RETIRED
+        offered={p['id'] for p in catalog()}
+        self.assertTrue(RETIRED.isdisjoint(offered))
+        for name in RETIRED:
+            fitting=plate(paint=name)
+            result,_,_,recipe,files=self.compile({'extra_armor':[fitting]})
+            self.assertEqual(recipe['metadata']['transform']['extra_armor'][0]['plate']['paint'],name)
+            self.assertIn(custom_armor.paint_name(fitting['plate'])+'.dds',files)
+            shown=custom_armor.preview(name)
+            self.assertEqual(shown['selected_paint']['id'],name)
+            self.assertTrue(RETIRED.isdisjoint(p['id'] for p in shown['paints']))
+    def test_every_bundled_finish_exports_and_reopens_with_its_own_material(self):
+        from workshop.armor_paints import PAINTS, texture_bytes
+        fits=[plate(paint=name) for name in PAINTS if name!='steel']
+        result,root,model,recipe,files=self.compile({'extra_armor':fits})
+        for fitting in fits:
+            value=custom_armor.plate(fitting)
+            name=value['paint']
+            material=custom_armor.paint_name(value)
+            self.assertEqual(files[material+'.dds'],texture_bytes(name))
+            self.assertIn(material+'.dds',files[material+'.mtl'].decode())
+            mesh=read_mesh(files.get(custom_armor.mesh_name(value)) or files[custom_armor.mesh_name(value,True)])
+            self.assertTrue(all(0<=u<=1 for u in mesh['uv']))
+            self.assertEqual(custom_armor.preview(name)['texture_url'],'/assets/armor-paints/'+name+'.png')
+        saved=recipe['metadata']['transform']
+        self.assertEqual([p['plate']['paint'] for p in saved['extra_armor']],list(PAINTS)[1:])
+        again=self.compile(saved)[0]
+        self.assertEqual(result['metadata']['file_hashes'],again['metadata']['file_hashes'])
+        with self.assertRaises(ArmorError):
+            configuration(resources(),[plate(paint='missing_texture')])
+
+    def test_selected_texture_covers_resized_shapes_and_wraps_cylinders(self):
+        variants=[{}, {'shape':'triangle'}, {'shape':'circle'}, {'shape':'cylinder'},
+                  {'corners':[[0,0],[2000,0],[1800,700],[100,700]]},
+                  {'hole':{'x':1000,'y':350,'diameter':100}}]
+        for changes in variants:
+            value=custom_armor.plate(plate(width=2000,height=700,paint='british',**changes))
+            mesh=read_mesh(custom_armor.mesh_bytes(value))
+            self.assertGreaterEqual(min(mesh['uv']),0)
+            self.assertLessEqual(max(mesh['uv']),1)
+            self.assertAlmostEqual(min(mesh['uv'][1::2]),0)
+            self.assertAlmostEqual(max(mesh['uv'][1::2]),1)
+
+    def test_registration_failure_keeps_attachment_points_available_for_editing(self):
+        from unittest.mock import patch
+        from types import SimpleNamespace
+        from workshop.app import AppState
+        from workshop.registration import RegistrationError
+        with tempfile.TemporaryDirectory() as temp:
+            state=AppState(Path(temp))
+            state.index=resources()
+            state.index.dlc_availability=lambda:SimpleNamespace(key=lambda:'fixture')
+            transform={'recipient_mount':'azimuth','donor_mount':'azimuth','commander_only':True}
+            with patch('workshop.registration.register_variant',side_effect=RegistrationError('No Conquest entry')), patch.object(state,'suggested_shop_cost',return_value=None), patch.object(state,'passenger_listing',return_value=[]), patch.object(state,'weapon_listing',return_value=[]):
+                checked=state.check({'hull':'receiver','donor':'receiver','transform':transform})
+                self.assertFalse(checked['ok'])
+                self.assertTrue(checked['armor_hosts'])
+                self.assertIn('No Conquest entry',checked['message'])
+                transform['extra_armor']=[plate()]
+                fitted=state.check({'hull':'receiver','donor':'receiver','transform':transform})
+                self.assertFalse(fitted['ok'])
+                self.assertTrue(fitted['armor_hosts'])
+
+    def test_shapes_and_openings_export_matching_meshes_and_collision_cells(self):
+        from workshop.armor_view import read_volume_mesh
+        variants = [
+            {'corners': [[0, 0], [1000, 0], [800, 500], [100, 500]]},
+            {'shape': 'triangle'},
+            {'hole': {'x': 500, 'y': 250, 'diameter': 150}},
+            {'shape': 'cylinder'},
+            {'shape': 'circle'},
+        ]
+        for shape in ('triangle','circle','cylinder'):
+            source=custom_armor.plate(plate(shape=shape))
+            corners=[[x+5,y-3] for x,y in custom_armor.outline(source)]
+            variants.append({'shape':shape,'corners':corners})
+        for changes in variants:
+            with self.subTest(changes=changes):
+                fitting = plate(**changes)
+                result, root, model, recipe, files = self.compile({'extra_armor': [fitting]})
+                value = custom_armor.plate(fitting)
+                volumes = [v for key, v in model['volumes'].items() if key.startswith('mw_armor_')]
+                self.assertEqual(len(volumes), 1)
+                for volume in volumes:
+                    path = volume['node'].find('polyhedron').args[0]
+                    points, indices, _ = read_volume_mesh(files[path])
+                    expected, triangles = custom_armor.surface_mesh(value)
+                    self.assertEqual(len(indices), len(triangles)*3)
+                    for actual, wanted in zip(points, expected):
+                        for a, b in zip(actual, wanted):
+                            self.assertAlmostEqual(a, b, places=4)
+                    self.assertTrue(all(math.isfinite(n) for p in points for n in p))
+                again = self.compile(recipe['metadata']['transform'])[0]
+                self.assertEqual(result['metadata']['file_hashes'], again['metadata']['file_hashes'])
+
+    def test_invalid_corners_openings_and_cylinder_walls_are_rejected(self):
+        invalid = [
+            {'corners': [[0,0],[0,500],[1000,0],[1000,500]]},
+            {'corners': [[0,0],[1000,0],[500,0],[0,500]]},
+            {'hole': {'x': 0, 'y': 0, 'diameter': 100}},
+            {'hole': {'x': 500, 'y': 250, 'diameter': 1000}},
+            {'shape': 'cylinder', 'thickness': 500},
+            {'shape': 'cylinder', 'hole': {'x': 500, 'y': 250, 'diameter': 100}},
+        ]
+        for changes in invalid:
+            with self.subTest(changes=changes), self.assertRaises(ArmorError):
+                configuration(resources(), [plate(**changes)])
+
+    def test_cylinder_has_no_internal_sector_walls_and_preserves_its_open_center(self):
+        value = custom_armor.plate(plate(shape='cylinder'))
+        vertices, triangles = custom_armor.surface_mesh(value)
+        self.assertEqual(len(triangles), 512)
+        for triangle in triangles:
+            a,b,c = [vertices[i] for i in triangle]
+            u,v = [b[i]-a[i] for i in range(3)], [c[i]-a[i] for i in range(3)]
+            normal = [u[1]*v[2]-u[2]*v[1],u[2]*v[0]-u[0]*v[2],u[0]*v[1]-u[1]*v[0]]
+            if abs(normal[2]) > 1e-8:
+                continue
+            center = [sum(p[i] for p in (a,b,c))/3 for i in range(2)]
+            alignment = abs(sum(normal[i]*center[i] for i in range(2))) / math.hypot(*normal[:2]) / math.hypot(*center)
+            self.assertGreater(alignment, .99, 'a radial dividing wall remains inside the cylinder')
+
+    def test_circular_plate_is_round_and_has_the_requested_diameter_and_thickness(self):
+        value = custom_armor.plate(plate(shape='circle'))
+        vertices, _ = custom_armor.surface_mesh(value)
+        self.assertEqual(value['width'], value['height'])
+        for x,y,z in vertices:
+            self.assertAlmostEqual(abs(x), .4)
+            self.assertAlmostEqual(math.hypot(y,z), 10)
+
     def compile(self, transform):
         transform = {'recipient_mount': 'azimuth', 'donor_mount': 'azimuth', 'commander_only': True, **transform}
         with tempfile.TemporaryDirectory() as tmp:

@@ -10,12 +10,14 @@ export function saveCrewPlacement(figure, module) {
   module.updateWorldMatrix(true,true);
   const local=module.worldToLocal(figure.getWorldPosition(new THREE.Vector3()));
   const rotation=[figure.rotation.x,figure.rotation.y,figure.rotation.z].map(v=>Number(THREE.MathUtils.radToDeg(v).toFixed(3)));
-  return {position:local.toArray().map(v=>Number(v.toFixed(3))),space:'module',...(rotation.some(v=>v)?{rotation}:{})};
+  const mirror=figure.scale.toArray().map(v=>v<0);
+  return {position:local.toArray().map(v=>Number(v.toFixed(3))),space:'module',...(rotation.some(v=>v)?{rotation}:{}),...(mirror.some(Boolean)?{mirror}:{})};
 }
 
 export function placeCrewFigure(figure,module,manual,fixed,box,hull=null,floor=null) {
   figure.position.set(...figure.userData.origin);
   figure.rotation.set(...(manual?.rotation||[0,0,0]).map(THREE.MathUtils.degToRad),'ZYX');
+  figure.scale.set(...(manual?.mirror||[false,false,false]).map(v=>v?-1:1));
   if(manual?.position) {
     // Before schema space was added, positions were final-model coordinates.
     const position=new THREE.Vector3(...manual.position);

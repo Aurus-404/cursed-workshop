@@ -135,6 +135,9 @@ def configuration(resources, spec):
                     or abs(v) > bound for v in vector)):
                 _fail()
             pose[key] = vector
+        from .pivots import copy_mirror
+        if 'pivot' in row:pose['pivot']=list(row['pivot'])
+        copy_mirror(row,pose)
         normalized.append({'asset': row['asset'], **pose})
     mount = spec.get('remove_mount', '')
     if not isinstance(mount, str) or len(mount) > 160:
@@ -358,6 +361,7 @@ def add_cargo(resources, model, spec, assets):
         frame = multiply(pose_matrix(row), center)
         wrapper = block('{bone '+quote('mw_cargo_'+str(i))+'}')
         _set_matrix(wrapper, multiply(inverse(host['world']), frame))
+        assets.preserve_mesh_faces('cargo'+str(i),frame)
         mapping = {n: 'mw_cargo_'+str(i)+'_'+str(j) for j, n in enumerate(source['bones'])}
         for bone in source['skeleton'].find_all('bone'):
             cloned = bone.clone()

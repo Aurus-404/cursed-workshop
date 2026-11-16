@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
 import {TransformControls} from 'three/addons/controls/TransformControls.js';
-import {poseMatrix,applyPose,changePivot,pivotEditor} from '../frontend/pivot-editor.js';
+import {poseMatrix,applyPose,changePivot,pivotEditor,poseFromMatrix} from '../frontend/pivot-editor.js';
 const equal=(a,b)=>a.elements.forEach((v,i)=>assert.ok(Math.abs(v-b.elements[i])<1e-7,`${i}: ${v} != ${b.elements[i]}`));
 for(const rotation of [[0,0,0],[20,-30,65]]){
  const pose={position:[4,5,6],rotation},before=poseMatrix(pose);changePivot(pose,[12,3,-2]);equal(before,poseMatrix(pose));
@@ -34,3 +34,11 @@ editor.proxy.rotateZ(.4);editor.capture();editor.sync();assert.ok(editor.proxy.p
 // through the design frame before applying a canonical host inverse.
 const designFrame=new THREE.Group();designFrame.position.set(100,20,0);scene.add(designFrame);designFrame.updateWorldMatrix(true,false);
 const canonical=designFrame.worldToLocal(new THREE.Vector3(100,20,5));assert.deepEqual(canonical.toArray(),[0,0,5]);
+
+for(const mirror of [[true,false,false],[false,true,false],[false,false,true],[true,true,false]]){
+ const pose={position:[4,-2,7],rotation:[20,35,-60],pivot:[3,5,-2],mirror};
+ const matrix=poseMatrix(pose);changePivot(pose,[-5,8,3]);equal(matrix,poseMatrix(pose));
+ equal(matrix,poseMatrix(poseFromMatrix(matrix,pose)));
+ Object.assign(row,pose);applyPose(object,row);editor.sync();editor.capture();equal(object.matrix,poseMatrix(pose));
+}
+console.log('Mirrored poses preserve all axes, custom pivots, reparent matrix round trips and gizmo capture.');

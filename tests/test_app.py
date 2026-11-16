@@ -31,6 +31,59 @@ def snapshot(path, mods=()):
 
 
 class ApplicationTests(unittest.TestCase):
+    def test_disk_cache_cleanup_requires_confirmation_and_keeps_live_design(self):
+        self.state.save_settings();settings=self.state.config_path.read_bytes()
+        path=self.state.workspace/'texture_cache'/'texture.png'
+        path.parent.mkdir();path.write_bytes(b'cache')
+        snapshot=object();self.state.snapshot=snapshot
+        for body in ({}, {'confirm':False}, {'confirm':1}, [], {'confirm':'true'}):
+            with self.assertRaises(ValueError):self.state.clear_cache(body)
+            self.assertTrue(path.exists())
+        self.assertEqual(self.state.cache_info()['bytes'],5)
+        with patch.object(self.state,'stop_catalog_warmup') as stop:
+            result=self.state.clear_cache({'confirm':True})
+        stop.assert_called_once()
+        self.assertEqual(result['removed_files'],1)
+        self.assertIs(self.state.snapshot,snapshot)
+        self.assertEqual(self.state.config_path.read_bytes(),settings)
+
+    def test_russian_interface_preference_survives_restart(self):
+        self.state.ui_preferences({'language': 'ru'})
+        other = AppState(self.state.workspace)
+        try:
+            self.assertEqual(other.ui_preferences()['language'], 'ru')
+            self.assertNotIn('system_language', other.ui_preferences())
+        finally:
+            other.pool.shutdown(wait=True)
+
+    def test_windows_language_detection_supports_all_interface_languages(self):
+        import ctypes
+        for language_id, expected in ((0x0419, 'ru'), (0x0819, 'ru'), (0x0804, 'zh-CN'),
+                                      (0x2c0a, 'es'), (0x0409, 'en'), (0x0407, 'en')):
+            windows = SimpleNamespace(kernel32=SimpleNamespace(GetUserDefaultUILanguage=lambda: language_id))
+            with self.subTest(language_id=language_id), patch.object(ctypes, 'windll', windows, create=True):
+                self.assertEqual(AppState.system_language(), expected)
+
+    def test_editor_controls_are_validated_and_saved_as_interface_preferences(self):
+        options={'autosave':True,'snap':False,'move_step':2,'angle_step':45,'fine_factor':.1,'bindings':{'rotate':'R','snap_hold':'Control'}}
+        self.state.ui_preferences({'editor_options':options})
+        self.assertEqual(self.state.ui_preferences()['editor_options'],options)
+        with self.assertRaises(ValueError):self.state.ui_preferences({'editor_options':{'angle_step':0}})
+        self.assertEqual(self.state.ui_preferences()['editor_options'],options)
+
+    def test_low_memory_stops_and_skips_catalog_warmup(self):
+        import threading
+        from unittest.mock import patch
+        active = self.state.catalog_warmup = threading.Event()
+        self.state.ui_preferences({'low_memory': True})
+        self.assertTrue(active.is_set())
+        with patch('workshop.app.threading.Thread') as worker:
+            self.state.warm_catalogs()
+            worker.assert_not_called()
+            self.state.ui_preferences({'low_memory': False})
+            self.state.warm_catalogs()
+            worker.return_value.start.assert_called_once()
+
     def test_repair_requires_open_campaign_before_accessing_or_creating_files(self):
         with patch.object(self.state,'closed',side_effect=AssertionError('Guard must run first')):
             with self.assertRaisesRegex(ValueError,'Seleccioná primero una campaña'):
@@ -292,7 +345,7 @@ class ApplicationTests(unittest.TestCase):
         original=copy.deepcopy(self.state.settings)
         with patch.object(self.state,'closed',side_effect=AssertionError('No game action')):
             self.assertEqual({k:v for k,v in self.state.ui_preferences().items() if k!='system_language'},{})
-            self.assertIn(self.state.ui_preferences().get('system_language'),(None,'es','en','zh-CN'))
+            self.assertIn(self.state.ui_preferences().get('system_language'),(None,'es','en','zh-CN','ru'))
             self.state.ui_preferences({'theme':'paper','language':'zh-CN','help':False})
             self.state.ui_preferences({'sound':False,'size':'large'})
         other=AppState(self.state.workspace)
@@ -468,6 +521,17 @@ class ApplicationTests(unittest.TestCase):
         compiler, registrar, planner, transaction = [item.start() for item in (
             self.compile_patch, self.register_patch, self.plan_patch, self.transaction_patch)]
         return profile, compiler, registrar, planner, transaction
+
+    def test_two_depot_components_create_a_new_vehicle_and_consume_both(self):
+        profile,compiler,registrar,planner,transaction=self._generate_with_fixture_compiler()
+        source=str(self.root/'source.sav')
+        stock=Depot(self.state.workspace).apply(source,[{'part':'hull','template':'empty_hull'},
+            {'part':'turret','template':'empty_turret'}],[])
+        with patch('workshop.campaign.plan_new',return_value={'fixture_new':True}) as add,patch('workshop.campaign.plan_refit') as refit:
+            result=self.state.generate({'recipient_depot':stock[0]['id'],'donor_depot':stock[1]['id']})
+        add.assert_called_once();refit.assert_not_called();planner.assert_not_called()
+        self.assertEqual(set(result['depot_change']['take']),{r['id'] for r in stock})
+        self.assertEqual(result['depot_change']['add'],[])
 
     def test_depot_turret_refits_one_vehicle_and_records_leftovers(self):
         profile, compiler, registrar, planner, transaction = self._generate_with_fixture_compiler()
@@ -986,6 +1050,23 @@ class ApplicationTests(unittest.TestCase):
 
 
 class LocalHTTPTests(unittest.TestCase):
+    def test_cache_endpoints_are_authenticated_and_cleanup_runs_as_a_job(self):
+        path=self.state.workspace/'texture_cache'/'texture.png'
+        path.parent.mkdir();path.write_bytes(b'cached')
+        self.assertEqual(self.request('GET','/api/cache')[0],403)
+        self.assertEqual(self.request('POST','/api/clear-cache',body=b'{"confirm":true}')[0],403)
+        self.assertTrue(path.exists())
+        headers={'X-Workshop-Token':self.state.token,'Content-Type':'application/json'}
+        status,raw,_=self.request('GET','/api/cache',headers)
+        self.assertEqual(status,200);self.assertEqual(json.loads(raw)['bytes'],6)
+        def job(label,operation,**kwargs):
+            return {'job_id':'fixture','result':operation()}
+        with patch.object(self.state,'job',side_effect=job) as worker:
+            status,raw,_=self.request('POST','/api/clear-cache',headers,b'{"confirm":true}')
+        self.assertEqual(status,202)
+        self.assertEqual(json.loads(raw)['result']['removed_files'],1)
+        worker.assert_called_once();self.assertFalse(path.exists())
+
     def test_report_download_is_authenticated_and_confined_to_saved_reports(self):
         from urllib.parse import quote
         folder=self.state.workspace/'reports';folder.mkdir()
@@ -1191,6 +1272,23 @@ class DiagnosticErrorTests(unittest.TestCase):
 
 
 class TextureTests(unittest.TestCase):
+    def test_texture_quality_selects_mip_budget_and_keeps_disk_caches_separate(self):
+        with tempfile.TemporaryDirectory() as temp:
+            state=AppState(Path(temp))
+            state.index=SimpleNamespace(exists=lambda path:True,resolve=lambda path:SimpleNamespace(as_dict=lambda:{'size':100,'crc':12}))
+            with patch('workshop.textures.diffuse_path',return_value='vehicle.dds'), patch('workshop.textures.material_png',side_effect=lambda index,mtl,limit:str(limit).encode()) as render:
+                self.assertEqual(state.texture('vehicle.mtl'),b'512')
+                state.ui_preferences({'texture_quality':'original'})
+                self.assertEqual(state.texture('vehicle.mtl'),str(2**31-1).encode())
+                self.assertEqual(state.texture('vehicle.mtl',quality='low'),b'256')
+                self.assertEqual(state.texture('vehicle.mtl',quality='high'),b'2048')
+                self.assertEqual(state.texture('vehicle.mtl',quality='medium'),b'512')
+                self.assertEqual(render.call_count,4)
+            with self.assertRaises(ValueError):
+                state.texture('vehicle.mtl',quality='invalid')
+            with self.assertRaises(ValueError):
+                state.ui_preferences({'texture_quality':'invalid'})
+
     def test_a_material_without_texture_is_drawn_plain_not_reported_as_an_error(self):
         # Glass and bare parts have no diffuse map: the 3D view draws them plain.
         with tempfile.TemporaryDirectory() as temp:

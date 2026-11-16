@@ -94,12 +94,15 @@ export function searchableSelect(select){
     const query=fold(search.value).split(/\s+/).filter(Boolean);
     const stars=starrable(),starred=stars?favorites(select.id):new Set(),filtering=stars&&onlyStarred;
     filterButton(starred);
-    const matches=[...select.options].filter(o=>!o.disabled||o.value===VALUE.get.call(select))
+    const matches=[...select.options].filter(o=>!o.hidden)
       .filter(o=>!filtering||starred.has(o.value))
       .filter(o=>{const hay=fold(o.text+' '+o.value);return query.every(q=>hay.includes(q));});
+    matches.sort((a,b)=>Number(a.disabled)-Number(b.disabled));
     rows=matches.slice(0,LIMIT);
     list.replaceChildren(...rows.map((o,i)=>{const li=document.createElement('li');li.id=`${list.id}-${i}`;
       const name=document.createElement('span');name.className='ss-text';name.textContent=o.text;li.append(name);
+      li.setAttribute('aria-disabled',String(!!o.disabled));
+      if(o.disabled){li.classList.add('ss-unavailable');if(o.title){const reason=document.createElement('small');reason.className='ss-reason';reason.textContent=t(o.title);li.append(reason);li.dataset.help=t(o.title);}}
       if(stars&&o.value!==''){const mark=document.createElement('span');mark.className='ss-star';mark.setAttribute('aria-hidden','true');
         mark.onclick=event=>{event.stopPropagation();star(i);};li.append(mark);markStar(li,o);}
       li.setAttribute('role','option');li.setAttribute('aria-selected',String(o.selected));if(o.selected)li.classList.add('selected');
@@ -144,7 +147,7 @@ export function searchableSelect(select){
     if(focus)button.focus();
   }
   function choose(index){
-    const option=rows[index];if(!option||button.disabled)return;
+    const option=rows[index];if(!option||option.disabled||button.disabled)return;
     const changed=!option.selected;
     VALUE.set.call(select,option.value);refresh();
     for(const [i,li] of [...list.children].entries()){const on=rows[i]===option;li.classList.toggle('selected',on);li.setAttribute('aria-selected',String(on));}

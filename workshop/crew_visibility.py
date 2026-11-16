@@ -31,7 +31,7 @@ def seat_declarations(resources, root):
     The last explicit LinkBone, including an empty one, is authoritative as in
     the native closed-cannon macro. Indirect seats need a final local override.
     """
-    from .compiler import _include_defines, _macro_arguments
+    from .compiler import _include_defines, _macro_arguments, _shared_include
     from .geometry import resolve_path
     definitions = _include_defines(resources, root)
     for path in ('properties/tank_crew.ext', 'properties/car_crew.ext', 'properties/cannon_crew.ext'):
@@ -67,7 +67,7 @@ def seat_declarations(resources, root):
                 path = resolve_path(base, node.args[0])
                 if path in includes:
                     raise CrewVisibilityError('No se pudieron resolver las declaraciones de tripulación.')
-                try: included = parse(resources.read(path))
+                try: included = _shared_include(resources,path)
                 except (KeyError, OSError): continue
                 collect(included, path, depth+1, calls, (*includes, path), True)
             elif node.opener == '(' and relevant(node.head):

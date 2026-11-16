@@ -30,4 +30,8 @@ assert.equal(JSON.parse(restarted.uiStorage.getItem('cw.appearance')).theme,'ear
 fail=true;await assert.rejects(restarted.saveUISettings({help:true}),/fixture write failure/);
 await restarted.saveUISettings({sound:true});
 assert.equal(saved.help,false);assert.equal(saved.sound,true);
+await restarted.saveUISettings({language:'ru'});
+const russianRestart=await import('../frontend/ui-settings.js?russian-restart');
+await russianRestart.loadUISettings();
+assert.equal(russianRestart.uiStorage.getItem('cw.lang'),'ru');
 console.log('UI preferences: cross-origin restart, disabled storage, ordered writes and failure recovery passed.');

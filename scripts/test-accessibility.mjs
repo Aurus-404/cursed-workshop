@@ -1,18 +1,13 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 globalThis.localStorage={getItem:()=> 'es'};
-const {EN,translate,englishText}=await import('../frontend/i18n.js');
-const {ZH}=await import('../frontend/zh-cn.js');
-const {EXTRA_ZH}=await import('../frontend/ui-copy.js');
-const {SMOKE_ZH}=await import('../frontend/smoke-copy.js');
-const {RIDER_ZH}=await import('../frontend/rider-copy.js');
-const {PASSENGER_ZH}=await import('../frontend/passenger-copy.js');
+const {EN,CHINESE,translate,englishText}=await import('../frontend/i18n.js');
 const {THEMES,preferences,readPreferences}=await import('../frontend/preferences.js');
 const {accessibility,isTextEntry}=await import('../frontend/accessibility.js');
-for(const key of Object.keys(EN))assert.ok(ZH[key]||EXTRA_ZH[key]||SMOKE_ZH[key]||RIDER_ZH[key]||PASSENGER_ZH[key],`Missing Chinese: ${key}`);
+for(const key of Object.keys(EN))assert.ok(CHINESE[key],`Missing Chinese: ${key}`);
 const html=fs.readFileSync('frontend/index.html','utf8');
 const strings=[...html.matchAll(/>([^<>]+)</g),...html.matchAll(/(?:title|placeholder|aria-label)="([^"]+)"/g)].map(m=>m[1].trim()).filter(s=>s&&!s.startsWith('import '));
-const unchanged=new Set(['3D','X','Y','Z','v','CURSED WORKSHOP','CW','Cursed Workshop','English','Español','F','L','S','XYZ','Normal','Play']);
+const unchanged=new Set(['3D','X','Y','Z','v','CURSED WORKSHOP','CW','Cursed Workshop','English','Español','F','L','S','XYZ','Normal','Play','Global','Local']);
 for(const value of strings)if(/[A-Za-zÁÉÍÓÚáéíóúñ]/.test(value)&&!unchanged.has(value)){
   for(const language of ['en','zh-CN'])assert.notEqual(translate(value,language),value,`${language} static string missing: ${value}`);
 }

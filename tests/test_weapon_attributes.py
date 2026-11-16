@@ -46,6 +46,45 @@ VEHICLE = '''{game_entity
 
 
 class WeaponAttributeTests(unittest.TestCase):
+    def test_native_penetration_order_round_trips_through_description_and_build(self):
+        from workshop.weapon_attributes import describe, apply, effective, _table
+        for distances in ([10, 30, 100, 155, 150, 165], [10, 30, 100, 70, 85], [10, 30, 100]):
+            with self.subTest(distances=distances):
+                stuff = Stuff()
+                table = ' '.join('{%s %s}' % (distance, 100-i) for i, distance in enumerate(distances))
+                stuff.files['set/stuff/gun/mygun'] = '{from "basegun" {parameters "ap" {projectileDamageTable '+table+'}}}'
+                root = entity_root(parse(VEHICLE))
+                shell = describe(stuff, root)[0]['shells'][0]
+                values = [value+1 for _, value in shell['penetration']]
+                files, _, _ = apply(stuff, root, {'places': {'gun': {'shells': {'ap': {'penetration': values}}}}}, 'mw_order')
+                for path, text in files.items():
+                    if path.startswith('resource/set/stuff/'):
+                        stuff.files[path.removeprefix('resource/')] = text
+                        stuff.entries[path.removeprefix('resource/')] = Entry(path.removeprefix('resource/'))
+                copied = effective(stuff, 'mw_order_gun')
+                self.assertEqual(_table(copied['shells']['ap']['projectiledamagetable']), list(map(list, zip(distances, values))))
+
+    def test_single_shot_can_gain_a_magazine_and_explicit_fire_interval(self):
+        from workshop.weapon_attributes import apply, effective
+        for capacity in (1,5,100):
+            with self.subTest(capacity=capacity):
+                stuff=Stuff();root=entity_root(parse(VEHICLE))
+                # Some native definitions declare ammunition only on the place.
+                stuff.files['set/stuff/gun/basegun']=stuff.files['set/stuff/gun/basegun'].replace('{filling "shell_75"}','')
+                files,renamed,_=apply(stuff,root,{'places':{'gun':{'magazine':capacity,'fire_rate':120,'reload_time':7}}},'mw_magazine')
+                text=next(text for path,text in files.items() if path.startswith('resource/set/stuff/'))
+                self.assertIn('{filling "shell_75" '+str(capacity)+'}',text)
+                self.assertIn('{recoveryTime 0.5}',text)
+                self.assertIn('{rechargeTime 7}',text)
+                self.assertEqual(renamed,['gun'])
+
+    def test_shrinking_a_magazine_clamps_initial_rounds_without_creating_ammo(self):
+        from workshop.weapon_attributes import apply
+        root=entity_root(parse(VEHICLE.replace('"mg" filled','"mg" filling "mgun_x ball" 50')))
+        apply(Stuff(),root,{'places':{'mgun':{'magazine':5}}},'mw_small_mag')
+        weapon=root.find('Weaponry').find_all('place')[1].find('weapon')
+        self.assertEqual(weapon.args[-1],'5')
+
     def setUp(self):
         self.stuff = Stuff()
         self.root = entity_root(parse(VEHICLE))
@@ -54,7 +93,7 @@ class WeaponAttributeTests(unittest.TestCase):
         from workshop.weapon_attributes import describe
         gun, mg = describe(self.stuff, self.root)  # the vision device is no weapon
         self.assertEqual((gun['place'], gun['weapon']), ('gun', 'mygun'))
-        self.assertEqual(gun['fields'], {'reload_time': 7, 'range': 200, 'burst_pause': 0.35, 'dispersion': 1.0})
+        self.assertEqual(gun['fields'], {'reload_time': 7, 'range': 200, 'burst_pause': 0.35, 'dispersion': 1.0, 'magazine': 1, 'fire_rate': 60.0/7})
         ap, he = gun['shells']
         self.assertEqual((ap['key'], ap['velocity'], ap['infantry_damage']), ('ap', 750, 2500))
         self.assertEqual(ap['penetration'], [[10, 100], [100, 80], [200, 60], [215, 0]])

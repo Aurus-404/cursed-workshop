@@ -40,6 +40,11 @@ def _places(root):
     return [p for w in root.find_all('Weaponry') for p in w.find_all('place') if p.args]
 
 
+def _commander_optic(place):
+    kind=place.find('type')
+    return bool(kind and kind.args and kind.args[0].casefold()=='commander')
+
+
 def _elevation_interface(model, link):
     """Put a verified, coincident pitch/yaw socket into yaw -> pitch order.
 
@@ -91,12 +96,12 @@ def _barrel(model, barrel, owned):
 
 
 def _contract(root, model, place, resources=None):
+    if _commander_optic(place):
+        raise GunError('GunAssembly: El visor no es un cañón.')
     link=weapon_link(place,model)
     if not link:raise GunError('GunAssembly: El arma no tiene un enlace de modelo inequívoco.')
     weapon=place.find('weapon')
     if not weapon or not weapon.args:raise GunError('GunAssembly: Las armas de inventario se colocan con la montura del comandante.')
-    kind=place.find('type')
-    if kind and kind.args and kind.args[0]=='commander':raise GunError('GunAssembly: El visor no es un cañón.')
     _elevation_interface(model,link)
     chain=[];name=link
     while name in model['bones']:
@@ -116,6 +121,11 @@ def _contract(root, model, place, resources=None):
     for other in _places(root):
         if other is place:continue
         other_link=weapon_link(other,model)
+        if other_link is None and _commander_optic(other):
+            # Commander optics are native control/vision slots, not physical
+            # gun assemblies. Some models use an inherited or virtual locator.
+            # A real, resolved optic branch is still retained below as before.
+            continue
         if other_link is None and other.find('weapon') and resources is not None:
             refs={}
             _fillings(resources,other.find('weapon'),refs)
@@ -148,7 +158,8 @@ def _contract(root, model, place, resources=None):
                 targets=reference_bones(place,model,head,reference.args[0])
                 if not targets or not set(targets)<=owned:
                     raise GunError('GunAssembly: Una referencia requerida queda fuera del conjunto desmontable.\n'+head+': '+reference.args[0])
-    if not any(model['bones'][n]['assets'] for n in owned):
+    empty=place.find('cw_empty_socket') is not None
+    if not empty and not any(model['bones'][n]['assets'] for n in owned):
         raise GunError('GunAssembly: El conjunto desmontable no tiene geometría visible.')
     # The barrel: the visible piece nearest the gun's own socket on the way up
     # to the elevation pivot (the recoiling tube). Above it, up to the pivot,
@@ -156,12 +167,25 @@ def _contract(root, model, place, resources=None):
     # cradle "gun1_rot". Without a visible piece there, the branch under the pivot.
     below=chain[:chain.index(pivot)]
     barrel=next((n for n in below if model['bones'][n]['assets']),below[-1] if below else None)
-    spec={'place':place.args[0],'weapon':weapon.args[0],'link':link,'pivot':pivot,
+    spec={'place':place.args[0],'weapon':weapon.args[0],'empty':empty,'link':link,'pivot':pivot,
           'bones':sorted(owned),'shared':sorted(shared),'yaw':pivots[1] if len(pivots)>1 else None,
           'barrel':_barrel(model,barrel,owned)}
     if pivot in model.get('normalized_interfaces',{}):
         spec['normalized_interface']={'elevation':pivot,'yaw':model['normalized_interfaces'][pivot]}
     return spec
+
+
+def _resolved_references(place,model,names,references):
+    result={}
+    for head,name in references.items():
+        explicit=place.find(head)
+        if explicit and explicit.args:name=explicit.args[0]
+        targets=reference_bones(place,model,head,name)
+        if not targets or not set(targets)<=set(names):
+            raise GunError('GunAssembly: Una referencia requerida queda fuera del conjunto desmontable.\n'+head+': '+str(name))
+        family=barrel_bones(place,model,prefix=name) if head=='shooter' else []
+        result[head]=family[0][:-2] if family else targets[0]
+    return result
 
 
 def discover(resources, template, module=None):
@@ -182,7 +206,14 @@ def discover(resources, template, module=None):
         if within is not None and weapon_link(place,model) not in within:continue
         try:
             spec=_contract(root,model,place,resources)
-            rows.append({**spec,'available':True,'reason':''})
+            row={**spec,'available':True,'reason':'','donatable':not spec.get('empty')}
+            if row['donatable']:
+                try:
+                    references={};_fillings(resources,place.find('weapon'),references)
+                    _resolved_references(place,model,spec['bones'],references)
+                except (GunError,ValueError,OSError,KeyError) as error:
+                    row.update(donatable=False,donor_reason=str(error))
+            rows.append(row)
         except GunError as error:
             rows.append({'place':place.args[0],'weapon':place.find('weapon').args[0],
                          'available':False,'reason':str(error)})
@@ -343,18 +374,36 @@ def _mounted_ammo(resources,root):
     return families
 
 
-def _ammunition(resources,item,sources):
-    from .registration import _stuff_definition
-    tokens=item.removeprefix('ammo ').casefold().split()
-    files=[(posixpath.basename(key)[:-5].split('.'),entry.path) for key,entry in resources.entries.items()
-           if key.startswith('set/stuff/') and key.endswith('.ammo')]
-    matches=[path for names,path in files if names==tokens]
+def _ammo_definition(resources,item,from_path=None):
+    """Native stuff IDs use spaces between family/type; filenames use dots.
+
+    Resolve inheritance beside its source first, then require an unambiguous
+    global definition, using the same contract as inventory ammunition.
+    """
+    from .registration import _stuff_names
+    identifier=item.removeprefix('ammo ')
+    stem='.'.join(identifier.split())
+    if from_path:
+        for reference in dict.fromkeys((identifier,stem)):
+            try:return resources.resolve_reference(reference,from_path,('.ammo',''))
+            except FileNotFoundError:pass
+    names=_stuff_names(resources)
+    matches=names.get(stem.casefold()+'.ammo',[])
     if not matches:
         # An item without its shell type ({item "bulletrus_305" 50}, MB-2-12)
         # is the family's only ammunition (bulletrus_305.he.ammo).
-        matches=[path for names,path in files if names[:len(tokens)]==tokens]
+        prefix=stem.casefold()+'.'
+        matches=[path for name,paths in names.items() if name.startswith(prefix) and name.endswith('.ammo') for path in paths]
+    if not matches:return None
     if len(matches)!=1:
         raise GunError('GunAssembly: La munición no tiene una definición efectiva inequívoca.\n'+item)
+    return matches[0]
+
+
+def _ammunition(resources,item,sources):
+    from .registration import _stuff_definition
+    definition=_ammo_definition(resources,item)
+    if definition is None:raise GunError('GunAssembly: La munición no tiene una definición efectiva inequívoca.\n'+item)
     seen=set()
     def visit(path):
         if path in seen:raise GunError('GunAssembly: La herencia del arma contiene un ciclo.')
@@ -364,13 +413,13 @@ def _ammunition(resources,item,sources):
             parent=node.args[0];pattern=parent.startswith('pattern ')
             if pattern:parent_path=_stuff_definition(resources,parent[8:],path,True)
             else:
-                try:parent_path=resources.resolve_reference(parent,path,('.ammo',''))
-                except FileNotFoundError:parent_path=_stuff_definition(resources,parent,path)
+                parent_path=_ammo_definition(resources,parent,path)
+                if parent_path is None:parent_path=_stuff_definition(resources,parent,path)
             entity=visit(parent_path)
         else:node=next((n for n in doc.children if n.opener=='{'),None)
         own=node.find('entity') if node else None
         return own.args[0] if own and own.args else entity
-    return {'item':item,'definition':matches[0],'projectile_entity':visit(matches[0])}
+    return {'item':item,'definition':definition,'projectile_entity':visit(definition)}
 
 
 def _place_sequence_name(name, place, taken):
@@ -449,12 +498,16 @@ def _fillings(resources, weapon, references=None):
     explicit=weapon.args[2] if len(weapon.args)>=3 and weapon.args[1]=='filling' else None
     if not explicit and not effective:raise GunError('GunAssembly: El arma no tiene un filling resuelto.')
     family=_ammo_key(explicit) if explicit else effective
-    # Native automatic weapons declare e.g. filling "mgun_rus" while vehicle
-    # inventory uses "ammo mgun_rus dt". "ammo " is a container prefix, not
-    # another caliber. The selected inventory item's definition is resolved
-    # separately by _ammunition before anything can compile.
-    families=(effective,'ammo '+effective) if effective else ()
-    if effective and explicit and not any(explicit==name or explicit.startswith(name+' ') for name in families):
+    # Either declaration can use the optional inventory container prefix.
+    # Compare normalized families on both sides, at a token boundary, while
+    # preserving the original spelling used for inventory and emitted resources.
+    # _ammunition separately validates the concrete inventory item definition.
+    expected=effective.removeprefix('ammo ') if effective else None
+    declared=explicit.removeprefix('ammo ') if explicit else None
+    # A literal family named "ammo" must still accept "ammo shell_type";
+    # in that declaration the first token is the family, not a container.
+    literal_match=bool(effective and explicit and (explicit==effective or explicit.startswith(effective+' ')))
+    if expected and declared and not (literal_match or declared==expected or declared.startswith(expected+' ')):
         raise GunError('GunAssembly: El filling explícito no coincide con la definición efectiva del arma.')
     return family,hashes
 
@@ -508,7 +561,11 @@ def compile_gun(resources, recipient, donor, transform, output, identifier, *, r
     if any(hull.get('position',[0,0,0])) or any(hull.get('rotation',[0,0,0])) or ((transform.get('crew_seats') or transform.get('crew_exclude') or transform.get('crew_fixed')) and not transform.get('_design_crew')):
         raise GunError('GunAssembly: Conservá la posición y los tripulantes del receptor; ajustá solamente el cañón elegido.')
     ri,rd,rr,rm,rp,rs=selected(resources,recipient,spec.get('recipient_place'))
+    native_optics={(p.args[0],head.casefold(),n.args[0]) for p in _places(rr) if _commander_optic(p)
+                   for head in ('LinkBone','foresight','shooter') for n in p.find_all(head)
+                   if n.args and not reference_bones(p,rm,head,n.args[0])}
     di,dd,dr,dm,dp,ds=selected(resources,donor,spec.get('donor_place'))
+    if ds.get('empty'):raise GunError('Elegí un cañón disponible, no un punto de montaje vacío.')
     _crew_expansion(resources,rr)
     _validate_carriage_crew(rr)
     # A carried weapon (tripod MG, AT rifle) gets its crew from shared includes
@@ -548,14 +605,7 @@ def compile_gun(resources, recipient, donor, transform, output, identifier, *, r
         for path in (info['definition_path'],info['model_path'],*info.get('extension_paths',[])):
             sources[path]=hashlib.sha256(resources.read(path)).hexdigest()
     rnames,dnames=set(rs['bones']),set(ds['bones'])
-    for head,name in effective_refs.items():
-        explicit=dp.find(head)
-        if explicit and explicit.args:name=explicit.args[0]
-        targets=reference_bones(dp,dm,head,name)
-        if not targets or not set(targets)<=dnames:
-            raise GunError('GunAssembly: Una referencia requerida queda fuera del conjunto desmontable.\n'+head+': '+str(name))
-        family=barrel_bones(dp,dm,prefix=name) if head=='shooter' else []
-        name=family[0][:-2] if family else targets[0]
+    for head,name in _resolved_references(dp,dm,dnames,effective_refs).items():
         # Materialize inherited stuff references before reserving names. The
         # family allocator then owns the final prefix just like an explicit one.
         for old in list(dp.find_all(head)):dp.remove(old)
@@ -701,6 +751,9 @@ def compile_gun(resources, recipient, donor, transform, output, identifier, *, r
     donor_slot=dp.args[0]
     new_place=_expand_macros(dp,{k.casefold():v for k,v in _include_defines(resources,dr).items()})
     new_place.atoms[1].set(rp.args[0])
+    if spec.get('unloaded'):
+        previous=new_place.find('weapon');new_place.remove(previous)
+        new_place.append(block('{weapon '+quote(ds['weapon'])+'}'))
     # Selection belongs to the recipient slot, not the donor's old role. A
     # towed primary often omits basic, which a selectable secondary requires.
     recipient_slot=_expand_macros(rp,{k.casefold():v for k,v in _include_defines(resources,rr).items()})
@@ -760,14 +813,14 @@ def compile_gun(resources, recipient, donor, transform, output, identifier, *, r
             for item in list(box.find_all('item')):
                 if item.args and _same_ammo(_ammo_key(item.args[0]),old_ammo) and not _ammo_in(old_ammo,kept_ammo):box.remove(item)
     ammo_items=[];ammo_contract=[]
-    for invd in dr.find_all('extender'):
+    for invd in [] if spec.get('unloaded') else dr.find_all('extender'):
         if invd.args!=['inventory']:continue
         for box in invd.find_all('box'):
             for item in box.find_all('item'):
                 if item.args and _same_ammo(_ammo_key(item.args[0]),ammo):
                     ammo_contract.append(_ammunition(resources,item.args[0],sources))
                     ammo_items.append(item.render());boxnode.append(item.clone())
-    if not ammo_items:raise GunError('GunAssembly: El donante no tiene munición de inventario compatible con su filling.')
+    if not ammo_items and not spec.get('unloaded') and not rs.get('empty'):raise GunError('GunAssembly: El donante no tiene munición de inventario compatible con su filling.')
     pivot=pivot_of(offset)
     # Tilting or rolling a gun (a cannon laid on its side) must not turn its
     # elevation into a traverse: the joint follows only the horizontal turn and
@@ -917,6 +970,8 @@ def compile_gun(resources, recipient, donor, transform, output, identifier, *, r
         for head in ('LinkBone','foresight','shooter'):
             for node in place.find_all(head):
                 if node.args and not reference_bones(place,final,head,node.args[0]):
+                    if _commander_optic(place) and (place.args[0],head.casefold(),node.args[0]) in native_optics:
+                        continue  # Preserve an unchanged native virtual optical locator.
                     raise GunError('GunAssembly: Una referencia de arma no existe en el modelo final.\n'+head+': '+node.args[0])
     for placer in rr.find_all('placer'):
         for seat in placer.find_all('place'):
@@ -999,7 +1054,7 @@ def gun_changes(transform):
             values=pose.get(key,[0,0,0])
             if not isinstance(values,list) or len(values)!=3 or any(type(v) not in (int,float) or not math.isfinite(v) or abs(v)>bound for v in values):
                 raise GunError('La posición u orientación del cambio de arma no es válida.')
-        euler_matrix(pose.get('rotation',[0,0,0]),pose.get('position',[0,0,0]))
+        pose_matrix(pose)
     if not rows:raise GunError('Guardá al menos un cambio de arma.')
     return rows
 

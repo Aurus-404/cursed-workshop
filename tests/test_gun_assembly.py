@@ -61,6 +61,101 @@ class Resources:
 
 
 class GunAssemblyTests(unittest.TestCase):
+    def test_native_filling_container_prefix_is_symmetric_and_keeps_item_spelling(self):
+        from workshop.gun_assembly import _fillings
+        for effective in ('long_round','ammo long_round'):
+            for explicit in ('long_round ap','ammo long_round ap'):
+                with self.subTest(effective=effective,explicit=explicit):
+                    r=Resources()
+                    r.files['set/stuff/gun/donor_weapon']=('{from "pattern gun" {filling "'+effective+'"}}').encode()
+                    r.files['entity/donor/donor.def']=r.files['entity/donor/donor.def'].replace(
+                        b'filling "long_round ap"',('filling "'+explicit+'"').encode())
+                    family,_=_fillings(r,block('{weapon "donor_weapon" filling "'+explicit+'" 1}'))
+                    self.assertEqual(family,explicit.removesuffix(' ap'))
+                    result,root,_=self.compile(r)
+                    self.assertTrue(result['compiled'])
+                    self.assertIn('filling "'+explicit+'"',root.render())
+                    for wrong in ('other_round ap','ammo other_round ap','long_round_extra ap','ammo long_round_extra ap'):
+                        with self.assertRaises(GunError):
+                            _fillings(r,block('{weapon "donor_weapon" filling "'+wrong+'" 1}'))
+
+    def test_literal_ammo_family_is_not_mistaken_for_a_container_prefix(self):
+        from workshop.gun_assembly import _fillings
+        r=Resources();r.files['set/stuff/gun/donor_weapon']=b'{weapon_gun {filling "ammo"}}'
+        self.assertEqual(_fillings(r,block('{weapon "donor_weapon" filling "ammo ap" 1}'))[0],'ammo ap')
+
+    def test_read_only_property_libraries_tolerate_native_stray_terminators(self):
+        r=Resources();path='entity/receiver/receiver.def'
+        r.files[path]=r.files[path].replace(b'{game_entity',b'{game_entity (include "/properties/native.ext")')
+        library=b'(define "native_macro" {props "native"}) )\n{Weaponry {place "main_slot" {gunner "gunner"}}}'
+        r.files['properties/native.ext']=library
+        rows=discover(r,'receiver')['weapons']
+        self.assertTrue(next(w for w in rows if w['place']=='main_slot')['available'])
+        _,root,_=self.compile(r)
+        self.assertIn('/properties/native.ext',root.render())
+        self.assertEqual(r.files['properties/native.ext'],library)
+
+    def test_ammo_inheritance_uses_native_space_separated_item_names(self):
+        from workshop.gun_assembly import _ammunition
+        r=Resources()
+        r.files['set/stuff/shell/long_round.he.ammo']=b'{from "base_round he"}'
+        r.files['set/stuff/other/base_round.he.ammo']=b'{ammo {entity "inherited_projectile"}}'
+        sources={};ammo=_ammunition(r,'ammo long_round he',sources)
+        self.assertEqual(ammo['projectile_entity'],'inherited_projectile')
+        self.assertIn('set/stuff/other/base_round.he.ammo',sources)
+        r.files['set/stuff/duplicate/base_round.he.ammo']=b'{ammo {entity "ambiguous"}}'
+        with self.assertRaisesRegex(GunError,'inequívoca'):_ammunition(r,'ammo long_round he',{})
+        r.files['set/stuff/shell/base_round.he.ammo']=b'{ammo {entity "local_projectile"}}'
+        self.assertEqual(_ammunition(r,'long_round he',{})['projectile_entity'],'local_projectile')
+
+    def test_virtual_commander_optics_do_not_block_physical_guns(self):
+        for kind in ('commander','Commander'):
+            r=Resources();path='entity/receiver/receiver.def'
+            root=parse(r.files[path]).find('game_entity')
+            root.find('Weaponry').append(block('{place "optic_slot" {type "'+kind+'"}{weapon "optic_control"}{foresight "virtual_optic"}{gunner "commander"}}'))
+            r.files[path]=root.render().encode()
+            rows={row['place']:row for row in discover(r,'receiver')['weapons']}
+            self.assertTrue(rows['main_slot']['available'],rows['main_slot']['reason'])
+            self.assertTrue(rows['coax_slot']['available'],rows['coax_slot']['reason'])
+            self.assertFalse(rows['optic_slot']['available'])
+            self.assertIn('visor',rows['optic_slot']['reason'])
+            result,compiled,model=self.compile(r)
+            optic=next(p for p in compiled.find('Weaponry').find_all('place') if p.args==['optic_slot'])
+            self.assertEqual(optic.find('weapon').args,['optic_control'])
+            self.assertEqual(optic.find('foresight').args,['virtual_optic'])
+
+    def test_unresolved_physical_weapon_still_blocks_ambiguous_detachment(self):
+        r=Resources();path='entity/receiver/receiver.def'
+        root=parse(r.files[path]).find('game_entity')
+        root.find('Weaponry').append(block('{place "unknown_gun" {weapon "mg"}{foresight "absent"}}'))
+        r.files[path]=root.render().encode()
+        row=next(row for row in discover(r,'receiver')['weapons'] if row['place']=='main_slot')
+        self.assertFalse(row['available'])
+        self.assertIn('unknown_gun',row['reason'])
+
+    def test_implicit_aim_reference_outside_gun_stays_usable_only_as_receiver(self):
+        resources=Resources()
+        resources.files['set/stuff/gun/donor_weapon']=b'{from "pattern gun" {filling "long_round"}{foresight "body"}}'
+        row=next(w for w in discover(resources,'donor')['weapons'] if w['place']=='main_slot')
+        self.assertTrue(row['available'])
+        self.assertFalse(row['donatable'])
+        self.assertIn('foresight',row['donor_reason'])
+
+    def test_unloaded_depot_gun_needs_no_reserve_ammo_and_grants_none(self):
+        resources=Resources()
+        path='entity/donor/donor.def'
+        root=parse(resources.files[path]).find('game_entity')
+        box=root.find('extender').find('box')
+        for child in list(box.children):box.remove(child)
+        resources.files[path]=root.render().encode()
+        with tempfile.TemporaryDirectory() as folder:
+            result=compile_assembly(resources,'receiver','donor',{'gun_swap':{
+                'schema':1,'recipient_place':'main_slot','donor_place':'main_slot','unloaded':True}},folder,'mw_unloaded')
+            final=parse(Path(result['output_dir'],'resource',result['definition_path']).read_bytes()).find('game_entity')
+            weapon=final.find('Weaponry').find_all('place')[0].find('weapon')
+            self.assertEqual(weapon.args,['donor_weapon'])
+            self.assertFalse(any(n.head=='item' and n.args and n.args[0].startswith('long_round') for n in final.walk()))
+
     def test_socket_locator_on_a_fixed_weapon_does_not_disable_other_gun_swaps(self):
         r=Resources()
         path='entity/receiver/receiver.def'

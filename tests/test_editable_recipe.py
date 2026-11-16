@@ -13,6 +13,17 @@ from workshop.draft import weapon_identity
 
 
 class EditableRecipeTests(unittest.TestCase):
+    def test_inherited_sight_is_editable_and_stripped_from_the_replayed_source(self):
+        sight={'parent':'body','position':[1,2,3],'rotation':[0,0,0]}
+        parent={'recipient':'hull','donor':'hull','transform':{'commander_only':True,'sight':sight},'sight':{**sight,'bone':'cw_sight_0'}}
+        metadata={'recipient':'mw_parent','donor':'mw_parent','transform':{'commander_only':True}}
+        model=parse_model('{skeleton {bone "body" {bone "cw_sight_0"}}}')
+        restored,_,_=reopen(metadata,{'mw_parent':parent},model)
+        self.assertEqual(restored['sight'],sight)
+        self.assertNotIn('sight',restored['source_recipe']['transform'])
+        self.assertIn('sight',restored['source_recipe']['deferred_fittings'])
+        self.assertNotIn('sight',metadata['transform'])
+
     def test_old_replayed_source_defers_armor_without_losing_surviving_rows(self):
         row={'asset':'fixture#plate','parent':'body','position':[1,2,3],'rotation':[0,0,0]}
         parent={'recipient':'hull','donor':'hull','transform':{'extra_armor':[row]},

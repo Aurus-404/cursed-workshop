@@ -41,7 +41,11 @@ def _default_material(resources, root):
                 values = set(n.args) & known
                 if values: result = next(iter(values)) if len(values) == 1 else ''
         return result
-    return visit(root) or None
+    try:
+        return visit(root) or None
+    finally:
+        # Recursive closures otherwise retain the resource snapshot until cyclic GC.
+        del visit
 
 
 def parents(model):
@@ -90,13 +94,16 @@ def _volumes(resources, root):
                 body = re.sub(r'%(\w+)', lambda m: values.get(m.group(1).casefold(), ''), body)
                 yield from expand(parse(body), depth+1, (*stack, n.head))
     layers = []
-    if exists('properties/vehicle.ext'):
-        base_key = (includes, tuple(n.render() for n in root.find_all('define')))
-        base_cache = resources.__dict__.setdefault('_armor_base_volumes', {})
-        if base_key not in base_cache:
-            base_cache[base_key] = list(expand(parse(resources.read('properties/vehicle.ext'))))
-        layers.extend(base_cache[base_key])
-    layers.extend(expand(root))
+    try:
+        if exists('properties/vehicle.ext'):
+            base_key = (includes, tuple(n.render() for n in root.find_all('define')))
+            base_cache = resources.__dict__.setdefault('_armor_base_volumes', {})
+            if base_key not in base_cache:
+                base_cache[base_key] = list(expand(parse(resources.read('properties/vehicle.ext'))))
+            layers.extend(base_cache[base_key])
+        layers.extend(expand(root))
+    finally:
+        del relevant, expand
     result = {}
     for n in layers:
         if not n.args: continue
@@ -407,6 +414,8 @@ def configuration(resources, value):
             normalized['serial'] = row['serial']
         pivot_of(row)
         if 'pivot' in row:normalized['pivot'] = list(row['pivot'])
+        from .pivots import copy_mirror
+        copy_mirror(row,normalized)
         for key, bound in (('position', 10000), ('rotation', 360)):
             vector = row.get(key, [0, 0, 0])
             if not isinstance(vector, list) or len(vector) != 3 or any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or abs(v) > bound for v in vector):
@@ -449,9 +458,9 @@ def fitting(resources, item):
     return model, names, multiply(center, origin), meshes
 
 
-def preview(resources, identifier):
+def preview(resources, identifier, paint='steel'):
     from . import custom_armor
-    if identifier == custom_armor.ASSET:return custom_armor.preview()
+    if identifier == custom_armor.ASSET:return custom_armor.preview(paint)
     item = resolve_fitting(resources,identifier)
     if item is None: raise ArmorError('Elegí una pieza de blindaje nativa disponible.')
     model, _, _, meshes = fitting(resources, item)
@@ -599,7 +608,9 @@ def apply(resources, root, model, value, assets, diagnostics):
     from .geometry import linear_determinant
     rows = configuration(resources, value)
     final = parse_model(model['document'].render());model.update(final)
-    hosts = {p['name'] for p in parents(final)}
+    # Final aiming joints can be declared after accessories are attached.
+    # A selected socket remains valid while its actual bone exists.
+    hosts = set(final['bones'])
     result = []
     reserved = set(final['bones']) | set(final['volumes'])
     claimed = {row['serial'] for row,_ in rows if 'serial' in row}
@@ -624,7 +635,7 @@ def apply(resources, root, model, value, assets, diagnostics):
             host = final['bones'][row['parent']]
             try:
                 bones, made = custom_armor.attach(root, final, host['node'], prefix, pose_matrix(row), item['plate'], assets.files,
-                                                  linear_determinant(host['world']) > 0, _set_matrix)
+                                                  linear_determinant(multiply(host['world'],pose_matrix(row))) > 0, _set_matrix)
             except ValueError as error:
                 raise ArmorError(str(error)) from error
             result.append({**row, 'bones': bones, 'volumes': made, 'materials': item['materials'], 'thickness': item['thickness'],

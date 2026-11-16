@@ -1403,6 +1403,18 @@ def register_variant(index: ResourceIndex, compilation_result: dict, output_dir:
         raise RegistrationError("Compilation provenance must identify recipient and donor")
     recipient = re.sub(r"\([^()]*\)$", "", recipient)
     donor = re.sub(r"\([^()]*\)$", "", donor)
+    # Component sources are intentionally not registered as playable units.
+    # Use their native ancestry for roster/sounds/camera authority while the
+    # compiler's real component IDs remain in the saved recipe/state profile.
+    recipes = _assembly_recipes(index, output)
+    if recipes.get(recipient,{}).get('component_source'):
+        recipient = _native_template(recipes,recipient,'recipient')
+    if recipes.get(donor,{}).get('component_source'):
+        donor = _native_template(recipes,donor,'donor')
+    metadata = dict(metadata)
+    for field,role in (('interaction_donor','recipient'),('gun_camera_donor','donor')):
+        if recipes.get(metadata.get(field),{}).get('component_source'):
+            metadata[field] = _native_template(recipes,metadata[field],role)
     # Resolve and validate every source before modifying staging.
     recipient_entity = index.resolve_entity(recipient)
     donor_entity = index.resolve_entity(donor)
@@ -1566,6 +1578,15 @@ def register_variant(index: ResourceIndex, compilation_result: dict, output_dir:
         warnings.append("Aiming profile stays with chassis because no verified donor bone mapping was supplied.")
     model_path = output/'resource'/compilation_result.get('model_path',
         f'entity/-vehicle/workshop/{new_id}/{new_id}.mdl')
+    if not model_path.is_file() and compilation_result.get('output_dir'):
+        model_path = Path(compilation_result['output_dir'])/'resource'/compilation_result.get('model_path',
+            f'entity/-vehicle/workshop/{new_id}/{new_id}.mdl')
+    if metadata.get('sight'):
+        from .sights import camera_override
+        materialize, _, _ = _camera_profiles(index, vehicle_scope)
+        camera = materialize(camera)
+        camera_override(camera, metadata['sight'])
+        camera_provenance['custom_sight'] = metadata['sight']
     if model_path.is_file():
         from .geometry import parse_model
         model = parse_model(model_path.read_bytes())

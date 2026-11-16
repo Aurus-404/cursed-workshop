@@ -1,3 +1,4 @@
+import {setOrbitLock} from './orbit-locks.js';
 // "Ángulos de las armas" view: every gun joint's traverse disc and elevation
 // slice at once, each with a handle that turns the real 3D parts within the
 // joint's limits. View only: it never touches the design, limits or undo.
@@ -248,7 +249,7 @@ export function weaponArcs({state,groups,camera,viewport,orbit,rigs,describe=()=
     const handles=built.flatMap(rig=>rig.joints.map(j=>j.handle));if(!handles.length)return;
     const found=hit(event).intersectObjects(handles,false)[0];if(!found)return;
     event.preventDefault();event.stopImmediatePropagation();
-    drag={joint:found.object.userData.joint,orbit:orbit.enabled};found.object.userData.hover=true;orbit.enabled=false;
+    drag={joint:found.object.userData.joint,orbit:orbit.enabled};found.object.userData.hover=true;setOrbitLock(orbit,'weapon-arc',true);
     viewport.setPointerCapture?.(event.pointerId);viewport.style.cursor='grabbing';
   },true);
   viewport.addEventListener('pointermove',event=>{
@@ -274,7 +275,7 @@ export function weaponArcs({state,groups,camera,viewport,orbit,rigs,describe=()=
     const angle=angleAt(event,drag.joint);if(angle===null)return;
     angles.set(angleKey(drag.joint.rig,drag.joint.key),clampAngle(angle,drag.joint.limits()));apply();
   },true);
-  const release=event=>{if(!drag)return;event.stopImmediatePropagation();orbit.enabled=drag.orbit;drag.joint.handle.userData.hover=false;drag=null;viewport.style.cursor='';
+  const release=event=>{if(!drag)return;event.stopImmediatePropagation();setOrbitLock(orbit,'weapon-arc',false);drag.joint.handle.userData.hover=false;drag=null;viewport.style.cursor='';
     viewport.releasePointerCapture?.(event.pointerId);};
   viewport.addEventListener('pointerup',release,true);viewport.addEventListener('pointercancel',release,true);
 

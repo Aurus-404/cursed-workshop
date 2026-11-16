@@ -12,7 +12,7 @@ Call to Arms - Gates of Hell: Ostfront. It is a separate Windows application.
    `CursedWorkshop.exe --browser` to use your default browser.
 5. Open Settings and choose your installed game folder if automatic detection does not find it.
    The correct folder contains `resource` and `binaries`. Select additional mod folders if needed.
-6. Choose English, Spanish or Simplified Chinese from the language selector.
+6. Choose English, Spanish, Simplified Chinese or Russian from the language selector.
 
 The old Steam Workshop item is not needed. The application reads resources from your own game and mods;
 it does not download them. Install and enable the same DLC/mods that your campaign needs.

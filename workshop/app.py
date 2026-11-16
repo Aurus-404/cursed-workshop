@@ -246,27 +246,32 @@ class AppState:
 
     @staticmethod
     def system_language():
-        """Windows display language mapped to the interface languages: Spanish and
-        Chinese as such, anything else English. Used only until the player picks one."""
+        """Windows display language mapped to the supported interface languages.
+        Used only until the player picks one."""
         try:
             import ctypes
             primary=ctypes.windll.kernel32.GetUserDefaultUILanguage() & 0x3ff
         except (AttributeError, OSError):
             return None
-        return 'es' if primary==0x0a else 'zh-CN' if primary==0x04 else 'en'
+        return 'es' if primary==0x0a else 'zh-CN' if primary==0x04 else 'ru' if primary==0x19 else 'en'
 
     def ui_preferences(self, body=None):
         # Same workspace settings as game configuration; independent of HTTP port.
-        choices={'language':('es','en','zh-CN'),
+        choices={'language':('es','en','zh-CN','ru'),
+                 'transform_space':('world','local'),
+                 'texture_quality':('low','medium','high','original'),
                  'theme':('graphite','paper','olive','earth','contrast','classic'),
                  'size':('normal','large')}
-        booleans={'motion','help','sound','maximized'}
+        booleans={'motion','help','sound','maximized','low_memory'}
         def favorites(value):
             # Starred options per list: {list id: [option values]}.
             return (isinstance(value,dict) and len(value)<=FAVORITE_LISTS and all(
                 isinstance(k,str) and 0<len(k)<=80 and isinstance(v,list) and len(v)<=FAVORITES_PER_LIST
                 and all(isinstance(x,str) and 0<len(x)<=400 for x in v) for k,v in value.items()))
         def valid(key,value):
+            if key=='editor_options':
+                from .editor_draft import valid_options
+                return valid_options(value)
             if key=='favorites':return favorites(value)
             return (isinstance(value,str) and value in choices[key]) if key in choices else key in booleans and type(value) is bool
         with self.lock:
@@ -282,6 +287,8 @@ class AppState:
                     self.settings=previous
                     raise
                 current=self.settings['ui_preferences']
+                if body.get('low_memory'):
+                    self.stop_catalog_warmup()
             result=dict(current)
         if body is None and 'language' not in result:
             system=self.system_language()
@@ -734,6 +741,45 @@ class AppState:
         self.mark_addon_published()
         return result
 
+    def dismantle_preview(self,body):
+        from .dismantling import inventory
+        snapshot=self._storage_snapshot(body)
+        unit=next((u for u in snapshot.units if u['eid']==body.get('eid') and u['kind']=='vehicle' and u.get('owned')),None)
+        if not unit:raise ValueError('Elegí un vehículo propio para desmantelar.')
+        if self.index is None:self.index_resources()
+        template=re.sub(r'\([^()]*\)$','',unit['template'])
+        return inventory(self.index,template,self.index.label_for(template))
+
+    def dismantle_vehicle(self,body):
+        from .dismantling import compile_parts
+        from .campaign import plan_removal
+        from .registration import register_crew_reserves
+        with self.storage_lock:
+            snapshot=self._storage_snapshot(body)
+            self.dismantle_preview(body)
+            unit=next(u for u in snapshot.units if u['eid']==body['eid'])
+            template=re.sub(r'\([^()]*\)$','',unit['template'])
+            self.make_room(snapshot.source_path)
+            identifier=datetime.now().strftime('%Y%m%d_%H%M%S')+'_dismantle_'+secrets.token_hex(3)
+            operation=self.workspace/'operations'/identifier
+            parts,results=compile_parts(self.index,template,self.index.label_for(template),operation/'components')
+            plan=plan_removal(snapshot,unit['eid'],addon_mod=ADDON_MOD)
+            for row in parts['parts']:row['source']=unit['eid']
+            def stage(staging):
+                for result in results:
+                    source=Path(result['output_dir'])
+                    for path in source.rglob('*'):
+                        if path.is_file():
+                            target=staging/path.relative_to(source);target.parent.mkdir(parents=True,exist_ok=True)
+                            shutil.copy2(long_path(path),long_path(target))
+                register_crew_reserves(self.index,staging,plan.get('reserve_squads') or [])
+            depot=Depot(self.workspace)
+            self._storage_publish(operation,snapshot,plan,
+                lambda transaction:depot.stage(snapshot.source_path,identifier,transaction,parts['parts']),stage=stage)
+            depot.recover(snapshot.source_path)
+            campaign=self._storage_finish(snapshot.source_path,'dismantled',{'vehicle':template,'parts':len(parts['parts'])})
+            return {'parts':parts['parts'],'backup':str(operation),'campaign':campaign}
+
     def remove_vehicle(self,body):
         """Compatibility endpoint: removing now always preserves the whole unit."""
         return self.store_vehicle(body)
@@ -824,7 +870,8 @@ class AppState:
         """The opened campaign with readable labels and its workshop depot."""
         data=dict(getattr(self,'campaign_view',None) or {})
         if data:
-            data['depot']=Depot(self.workspace).items(data['source_path'])
+            from .depot import attributes as depot_attributes
+            data['depot']=[depot_attributes(self.index,item,self.addon_root()) for item in Depot(self.workspace).items(data['source_path'])]
             from .vehicle_storage import VehicleStorage,StorageError
             try:
                 storage=VehicleStorage(self.workspace)
@@ -897,9 +944,13 @@ class AppState:
             return result
         return self.shared_asset(('crew',key),load)
 
-    def texture(self,mtl,portrait_token=None):
+    def texture(self,mtl,portrait_token=None,quality=None):
         """Diffuse map of a material as PNG for the 3D view, cached on disk by source identity."""
         from .textures import diffuse_path, material_png
+        quality=quality or self.ui_preferences().get('texture_quality','medium')
+        limits={'low':256,'medium':512,'high':2048,'original':2**31-1}
+        if quality not in limits:raise ValueError('Invalid texture quality.')
+        limit=limits[quality]
         if portrait_token:
             context=self.portrait_previews.get(portrait_token)
             if context is None:context=next((c for c in getattr(self,'design_previews',{}).values() if c['token']==portrait_token),None)
@@ -914,11 +965,11 @@ class AppState:
         source=diffuse_path(index,mtl)
         if source is None: return None  # glass, bare parts: drawn untextured, not an error
         entry=index.resolve(source).as_dict()
-        key=hashlib.sha256(json.dumps([source,entry.get('size'),entry.get('crc'),entry.get('modified_ns'),entry.get('source_root')]).encode()).hexdigest()[:24]
+        key=hashlib.sha256(json.dumps([source,entry.get('size'),entry.get('crc'),entry.get('modified_ns'),entry.get('source_root'),limit]).encode()).hexdigest()[:24]
         cache=self.workspace/'texture_cache'/(key+'.png')
         def load():
             if cache.is_file(): return cache.read_bytes()
-            data=material_png(index,mtl)
+            data=material_png(index,mtl,limit=limit)
             cache.parent.mkdir(parents=True,exist_ok=True)
             with tempfile.NamedTemporaryFile(dir=cache.parent,delete=False) as stream:
                 temporary=Path(stream.name)
@@ -990,8 +1041,31 @@ class AppState:
         spot=free_mount_spec(body.get('recipient_mount'))[1]
         return {'anchor':free_anchor(self.index,hull_model,hull['model_path'],donor_model,donor['model_path'],mount,spot)}
 
+    def component_source_ids(self):
+        cache=getattr(self,'_component_sources',None)
+        if cache is not None and cache[0] is self.index:return cache[1]
+        result=set()
+        for path in self.addon_root().glob('assembly_mw_parts_*.json'):
+            try:
+                data=json.loads(path.read_text(encoding='utf8'))
+                if data.get('metadata',{}).get('component_source'):result.add(data['id'])
+            except (KeyError,OSError,ValueError):continue
+        self._component_sources=(self.index,result)
+        return result
+
     def catalog_folder(self):
         return self.workspace/'cache'/'catalogs'
+
+    def cache_info(self):
+        from .cache_maintenance import maintain
+        return maintain(self.workspace)
+
+    def clear_cache(self, body):
+        if not isinstance(body,dict) or body.get('confirm') is not True:
+            raise ValueError('Confirmá la limpieza de la caché.')
+        from .cache_maintenance import maintain
+        self.stop_catalog_warmup()
+        return maintain(self.workspace,clear=True)
 
     def warm_catalogs(self):
         """Load or read the whole-game catalogs in the background as soon as the
@@ -1000,6 +1074,8 @@ class AppState:
         from .catalog_cache import CATALOGS, load, awaited
         self.stop_catalog_warmup()
         with self.lock:
+            if self.ui_preferences().get('low_memory'):
+                return
             index=self.index;cancel=self.catalog_warmup=threading.Event()
         state=self
         class Yielding:
@@ -1119,10 +1195,10 @@ class AppState:
         cache=self.__dict__.setdefault('checks',{})
         if key not in cache:
             with tempfile.TemporaryDirectory(prefix='mw_check_') as temp:
+                value={}
                 try:
                     result=copy.deepcopy(self.design_context({'hull':body['hull'],'transform':transform})['result']) if transform.get('assembly_draft') else compile_assembly(self.index,body['hull'],body['donor'],transform,Path(temp)/'compile','mw_check')
                     result['campaign_plan']={}
-                    register_variant(self.index,result,Path(temp)/ADDON_ID,'mw_check','check')
                     from .geometry import parse_model, free_mount_options, free_mount_parent, free_spot_parent, point, inverse, multiply, identity
                     model=parse_model((Path(result['output_dir'])/'resource'/result['model_path']).read_bytes())
                     parents={free_mount_parent(model)}
@@ -1140,7 +1216,11 @@ class AppState:
                     commander_problem=''
                     if not transform.get('commander_mg'):
                         commander_problem=operator_weapon_problem(final_root)
+                    from .sights import initial as initial_sight
+                    sight_default=initial_sight(self.index,result['metadata'],model)
                     value={'ok':True,'crew':result.get('metadata',{}).get('crew_roles') or [], 'hosts':hosts,
+                           'sight_default':sight_default,
+                           'sight_hosts':[{'name':name,'matrix':multiply(display_frame,bone['world'])} for name,bone in model['bones'].items() if not name.startswith('cw_sight_')],
                            'commander_problem':commander_problem,
                            'commander_bones':(result.get('metadata',{}).get('commander_mg') or {}).get('bones',{}),
                            'commander_warning':operator_loader_warning(final_root),
@@ -1151,11 +1231,12 @@ class AppState:
                            'commander_position':point(display_frame,point(locator['world'],[0,0,2]) if locator else model['anchor']),
                            'shop_suggested_cost':self.suggested_shop_cost(result.get('metadata') or {}),
                            'weapons':self.weapon_listing(final_root)}
+                    register_variant(self.index,result,Path(temp)/ADDON_ID,'mw_check','check')
                 except Exception as error:
                     from .cancellation import JobCancelled
                     if isinstance(error, JobCancelled):raise
                     self.record_error(error,'Compatibility check')
-                    value={'ok':False,'message':friendly_error(error)}
+                    value={**value,'ok':False,'message':friendly_error(error)}
             if len(cache)>=32: cache.pop(next(iter(cache)))
             cache[key]=value
         return cache[key]
@@ -1208,7 +1289,7 @@ class AppState:
     def armor_preview(self, body):
         from .extra_armor import preview
         if self.index is None: self.index_resources()
-        return preview(self.index, body['asset'])
+        return preview(self.index, body['asset'], body.get('paint','steel'))
 
     def support_preview(self, body):
         from .support_vehicle import preview
@@ -1290,6 +1371,9 @@ class AppState:
             draft=transform['assembly_draft'];donor=([*design_turrets(draft),*(draft.get('guns') or []),{}][0]).get('donor_template') or body['hull']
             with self.phase('Design: compile vehicle'):
                 result=compile_draft(self.index,body['hull'],donor,transform,Path(temp.name)/'compiled','mw_design_preview')
+                if transform.get('sight'):
+                    from .sights import apply as apply_sight
+                    apply_sight(result,transform['sight'])
             with self.phase('Design: index compiled output'):
                 view=self.index.with_overlay(Path(temp.name)/'compiled')
             context={'key':key,'geometry_key':geometry_key,'limit_key':limit_key,'index':view,'temp':temp,'token':secrets.token_urlsafe(24),'result':result}
@@ -1558,9 +1642,9 @@ class AppState:
             """A chassis/module comes from an owned vehicle or from the depot."""
             if body.get(kind+'_depot'):
                 item=depot.get(data['source_path'],body[kind+'_depot'])
-                if item['part']!=('hull' if kind=='recipient' else 'turret'):
+                if item['part'] not in (('hull',) if kind=='recipient' else ('turret','gun') if transform.get('gun_swap') or transform.get('gun_swaps') else ('turret',)):
                     raise ValueError('Esa pieza del depósito no sirve para esa parte.')
-                return {'template':item['template'],'label':item['label'],'depot':item['id'],'eid':None,'mount':item.get('mount')}
+                return {'template':item['template'],'label':item['label'],'depot':item['id'],'eid':None,'mount':item.get('mount'),'place':item.get('place')}
             unit=units.get(body.get(kind+'_eid'))
             if not unit or unit['kind']!='vehicle':
                 raise ValueError('Elegí un vehículo de tu partida o una pieza del depósito para el chasis y para el módulo.')
@@ -1600,12 +1684,15 @@ class AppState:
                     if row.get('assembly_scope')=='complete':
                         raise ValueError('El conjunto completo requiere un donante entero de la campaña.')
                     item=depot.get(data['source_path'],row['donor_depot'])
-                    if item['part']!='turret' or item['template']!=row['donor_template']:raise ValueError('El donante guardado ya no coincide con una unidad de la campaña.')
+                    if item['part'] not in (('gun','turret') if 'donor_place' in row else ('turret',)) or item['template']!=row['donor_template']:raise ValueError('El donante guardado ya no coincide con una unidad de la campaña.')
+                    if item['part']=='gun':row['unloaded']=True
+                    if item['part']=='gun' and row.get('donor_place')!=item.get('place'):
+                        raise ValueError('Elegí el cañón guardado en esa pieza del depósito.')
                     if item.get('mount') and row.get('donor_mount')!=item['mount']:
                         raise ValueError('Elegí el montaje guardado en esa pieza del depósito.')
                     if 'donor_place' in row:
                         from .gun_assembly import discover
-                        stored=discover(self.index,item['template'],module=item.get('mount') or True)['weapons']
+                        stored=discover(self.index,item['template'],module=(item.get('mount') or True) if item['part']=='turret' else None)['weapons']
                         if not any(w['available'] and w['place']==row['donor_place'] for w in stored):
                             raise ValueError('Esa arma no está en la torreta guardada en el depósito.')
                     continue
@@ -1613,6 +1700,9 @@ class AppState:
                 if not unit or unit['kind']!='vehicle' or unit['template']!=row['donor_template'] or unit['eid']==recipient['eid']:
                     raise ValueError('El donante guardado ya no coincide con una unidad de la campaña.')
                 resolved.append(unit)
+            gun_stock=[r['donor_depot'] for r in spec.get('guns',[]) if r.get('donor_depot') and depot.get(data['source_path'],r['donor_depot'])['part']=='gun']
+            if len(gun_stock)!=len(set(gun_stock)):raise ValueError('Ese cañón del depósito ya se está usando en el diseño.')
+            transform={**transform,'assembly_draft':spec}
             donor=resolved[0] if resolved else {**recipient,'eid':None};source=self.edit_source({'eid':recipient['eid']})
             seed=spec.get('seed')
             if seed:
@@ -1640,9 +1730,11 @@ class AppState:
             recipient,donor=part('recipient'),part('donor')
         if recipient.get('eid') and recipient.get('eid')==donor.get('eid'):
             raise ValueError('Elegiste el mismo vehículo como chasis y como módulo. Cambiá una de las dos partes.')
-        if not creative and not recipient.get('eid') and not donor.get('eid'):
-            raise ValueError('Usá al menos un vehículo de tu partida: dos piezas del depósito no tienen tripulación ni lugar en la campaña.')
-        if not creative:transform=body.get('transform',{})
+        if not drafting and donor.get('place'):
+            changes=transform.get('gun_swaps') or [transform.get('gun_swap') or {}]
+            if len(changes)!=1 or changes[0].get('donor_place')!=donor['place']:
+                raise ValueError('Elegí el cañón guardado en esa pieza del depósito.')
+            changes[0]['unloaded']=True
         if not drafting and donor.get('depot') and donor.get('mount'):
             if transform.get('donor_mount') not in (None,donor['mount']):
                 raise ValueError('Elegí el montaje guardado en esa pieza del depósito.')
@@ -1660,7 +1752,7 @@ class AppState:
             return weapon_identity(tr)
         if editing and weapon_choices(transform)!=weapon_choices(source.get('transform',{})):
             raise ValueError('Editar conserva el cañón instalado; para cambiarlo usá dos unidades con Cambiar cañón.')
-        if (transform.get('gun_swap') or transform.get('gun_swaps')) and not editing and not creative and (not recipient.get('eid') or not donor.get('eid')):
+        if (transform.get('gun_swap') or transform.get('gun_swaps')) and not editing and not creative and (not recipient.get('eid') or not donor.get('eid')) and not (recipient.get('eid') and donor.get('depot') and donor.get('place')):
             raise ValueError('Cambiar cañón requiere dos unidades de la campaña; las piezas del depósito no identifican un cañón individual.')
         fingerprint=hashlib.sha256(json.dumps({'hull':recipient['template'],'module':donor['template'],'transform':transform,
             'sources':self.index.sources},sort_keys=True).encode()).hexdigest()[:12]
@@ -1731,6 +1823,8 @@ class AppState:
             from .campaign import plan_draft
             plan=plan_draft(snapshot,recipient['eid'],new_id,crew_slots,metadata['draft_steps'],
                 addon_mod=ADDON_MOD,state_profile=metadata.get('state_profile'))
+        elif not recipient.get('eid') and not donor.get('eid'):
+            plan=plan_new(snapshot,new_id,crew_slots,addon_mod=ADDON_MOD)
         elif editing or supporting:
             plan=plan_edit(snapshot,recipient['eid'],new_id,crew_slots,addon_mod=ADDON_MOD,
                            state_profile=metadata.get('state_profile'),keep_names=True if supporting else source['recipe'])
@@ -2680,6 +2774,10 @@ class Handler(BaseHTTPRequestHandler):
             if self.headers.get('X-Workshop-Token')!=self.state.token: raise PermissionError('Sesión inválida.')
             if path=='/api/config': return self.send_json(self.state.config())
             if path=='/api/ui-preferences': return self.send_json(self.state.ui_preferences())
+            if path=='/api/cache': return self.send_json(self.state.cache_info())
+            if path=='/api/editor-draft':
+                from .editor_draft import access
+                with self.state.lock:return self.send_json(access(self.state.workspace))
             if path=='/api/design-templates':
                 from .design_templates import listing
                 return self.send_json({'templates':listing(self.state.workspace)})
@@ -2707,7 +2805,7 @@ class Handler(BaseHTTPRequestHandler):
                 if self.state.index is None: return self.send_json({'units':[],'indexed':False})
                 # Vehicles only, uncapped: with MACE the ~5,500 infantry breeds
                 # filled a 2,000-row cap sorted by kind and no tank reached the list.
-                units=[row for row in self.state.index.list_units(search=query.get('search',[''])[0]) if row['kind']!='infantry']
+                units=[row for row in self.state.index.list_units(search=query.get('search',[''])[0]) if row['kind']!='infantry' and row['id'] not in self.state.component_source_ids()]
                 return self.send_json({'units':units,'indexed':True})
             if path=='/api/unit-image':
                 try:data=self.state.unit_image(query.get('template',[''])[0])
@@ -2723,7 +2821,7 @@ class Handler(BaseHTTPRequestHandler):
             if path=='/api/commander-mg': return self.send_json(self.state.commander_catalog())
             if path=='/api/mod-stack': return self.send_json({'problem':self.state.stack_problem()})
             if path=='/api/texture':
-                data=self.state.texture(query.get('mtl',[''])[0],query.get('portrait_token',[None])[0])
+                data=self.state.texture(query.get('mtl',[''])[0],query.get('portrait_token',[None])[0],query.get('quality',[None])[0])
                 if data is None:
                     self.send_response(204); self.send_header('Cache-Control','private, max-age=3600'); self.end_headers(); return
                 self.send_response(200); self.send_header('Content-Type','image/png'); self.send_header('Content-Length',str(len(data)))
@@ -2754,6 +2852,9 @@ class Handler(BaseHTTPRequestHandler):
             limit=24*1024*1024 if route=='/api/screenshot' else 1024*1024  # a PNG of the 3D view
             if length<=0 or length>limit: raise ValueError('Tamaño de solicitud inválido.')
             body=json.loads(self.rfile.read(length))
+            if route=='/api/editor-draft':
+                from .editor_draft import access
+                with self.state.lock:return self.send_json(access(self.state.workspace,body))
             if route=='/api/ui-preferences':
                 if not isinstance(body,dict): raise ValueError('Invalid interface preferences.')
                 return self.send_json(self.state.ui_preferences(body))
@@ -2770,6 +2871,7 @@ class Handler(BaseHTTPRequestHandler):
                      '/api/repair':('Actualizar vehículos',self.state.repair),'/api/check':('Revisar compatibilidad',self.state.check),
                      '/api/edit-source':('Abrir vehículo para editar',self.state.edit_source)}
             actions['/api/shop']=('Actualizar la tienda',self.state.set_shop)
+            actions['/api/clear-cache']=('Limpiando caché',self.state.clear_cache)
             actions['/api/creative']=('Construir en modo creativo',self.state.creative)
             actions['/api/commander-mg-preview']=('Cargar montura de comandante',self.state.commander_preview)
             actions['/api/commander-catalog']=('Read commander weapons and supports',lambda body:self.state.commander_catalog())
@@ -2780,6 +2882,8 @@ class Handler(BaseHTTPRequestHandler):
             actions['/api/rider-preview']=('Cargar MG de pasajero',self.state.rider_preview)
             actions['/api/passenger-catalog']=('Leer poses de pasajeros',self.state.passenger_catalog)
             actions['/api/remove-vehicle']=('Quitar de la campaña',self.state.remove_vehicle)
+            actions['/api/dismantle-preview']=('Revisando componentes',self.state.dismantle_preview)
+            actions['/api/dismantle-vehicle']=('Desmantelando vehículo',self.state.dismantle_vehicle)
             actions['/api/store-vehicle']=('Quitar de la campaña',self.state.store_vehicle)
             actions['/api/restore-stored-vehicle']=('Devolver a la campaña',self.state.restore_stored_vehicle)
             actions['/api/recover-stored-vehicle']=('Recuperar traslado',self.state.recover_stored_vehicle)

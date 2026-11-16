@@ -11,6 +11,33 @@ from workshop.syntax import parse
 
 
 class RegistrationTests(unittest.TestCase):
+    def test_unregistered_component_sources_use_native_roster_authority(self):
+        self.output.mkdir(parents=True)
+        for name in ('mw_parts_source','mw_parts_source_hull'):
+            (self.output/('assembly_'+name+'.json')).write_text(json.dumps({'id':name,'metadata':{
+                'component_source':True,'recipient':'base','donor':'donor'}}))
+        self.result['metadata'].update(recipient='mw_parts_source_hull',donor='mw_parts_source')
+        register_variant(self.index,self.result,self.output,'mw_reassembled','Reassembled')
+        text=(self.output/'resource/set/multiplayer/units/modular_workshop/mw_reassembled.set').read_text()
+        self.assertIn('mw_reassembled',text)
+        self.assertNotIn('mw_parts_source',text)
+        self.assertEqual(self.result['metadata']['recipient'],'mw_parts_source_hull','the native registration authority does not replace the saved physical source')
+
+    def test_custom_sight_uses_compiled_model_before_it_is_copied_to_addon(self):
+        self.write('set/third_person/mace.inc','{"default" {level {linkBone "basis"}} {level {zoom}{linkBone "retired_scope"}{camera "zoom2"}}} {"base.camera" inherit "vehicle default"}',mod=True)
+        self.index.build()
+        compiled=self.root/'compiled'
+        model='entity/-vehicle/workshop/mw_sight/mw_sight.mdl'
+        path=compiled/'resource'/model;path.parent.mkdir(parents=True)
+        path.write_text('{skeleton {bone "basis" {bone "cw_sight_0"}}}')
+        self.result.update(output_dir=str(compiled),model_path=model)
+        self.result['metadata']['sight']={'bone':'cw_sight_0','parent':'basis','position':[0,0,0],'rotation':[0,0,0]}
+        register_variant(self.index,self.result,self.output,'mw_sight','Sight')
+        camera=parse((self.output/'resource/set/tp_control.set').read_bytes()).find('third_person_control').find('vehicle').find('mw_sight')
+        self.assertEqual(camera.find_all('level')[1].find('linkBone').args,['cw_sight_0'])
+        self.assertEqual(camera.find_all('level')[1].find('camera').args,['zoom2'])
+        self.assertNotIn('retired_scope',camera.render())
+
     def test_replaced_weapon_merges_fire_declared_by_a_native_class_macro(self):
         from workshop.registration import _entity_sound_record, _validate_interaction_events, _interaction_events
         self.write('set/stuff/gun/test_cannon','{weapon_bullet {fireSound "cannon/Shared/NewGun/"}}')

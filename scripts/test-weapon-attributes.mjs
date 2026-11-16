@@ -1,5 +1,27 @@
 import assert from 'node:assert/strict';
-import {setValue,placeLabel} from '../frontend/weapon-attributes.js';
+import {setValue,placeLabel,reconcileWeapons,weaponAttributesEditor} from '../frontend/weapon-attributes.js';
+const oldWeapons=[{place:'gun',weapon:'cannon'},{place:'mgun',weapon:'mg'}];
+const edits={places:{gun:{shells:{ap:{penetration:[1,2,3]}}},mgun:{fire_rate:700}},ammo:{'mg belt':100}};
+assert.deepEqual(reconcileWeapons(edits,oldWeapons,[{place:'gun',weapon:'autocannon'},{place:'mgun',weapon:'mg'}]),
+  {places:{mgun:{fire_rate:700}},ammo:{'mg belt':100}});
+assert.deepEqual(reconcileWeapons(edits,oldWeapons,oldWeapons),edits);
+assert.equal(reconcileWeapons({places:{gun:{range:200}}},oldWeapons,[]),undefined);
+globalThis.Option=class {constructor(text,value){this.text=text;this.value=value;}};
+const elements=new Map();
+const $=id=>{
+  if(!elements.has(id))elements.set(id,{dataset:{},classList:{toggle(){}},replaceChildren(){}});
+  return elements.get(id);
+};
+const described=weapon=>({place:'gun',weapon,fields:{},shells:[],ammo:[]});
+const state={hull:{template:'tank'},transform:{weapon_attributes:{places:{gun:{range:200}}}},check:{weapons:[described('cannon')]}};
+const editor=weaponAttributesEditor({state,$,remember(){}});
+editor.refresh();
+state.check={weapons:[described('autocannon')]};editor.refresh();
+assert.equal(state.transform.weapon_attributes,undefined);
+state.transform={weapon_attributes:{places:{gun:{range:200}}}};
+editor.refresh();
+state.check={weapons:[described('cannon')]};editor.refresh();
+assert.equal(state.transform.weapon_attributes.places.gun.range,200,'undo restores its own weapon attributes');
 // Only changed values are kept; going back to the native one removes it.
 let spec=setValue(undefined,['places','gun','range'],250,200);
 assert.deepEqual(spec,{places:{gun:{range:250}}});

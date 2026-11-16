@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import {applyPose,poseMatrix} from './pivot-editor.js';
+import {applyPose,poseMatrix,poseFromMatrix} from './pivot-editor.js';
 import {t} from './i18n.js';
 
 // One point on the vehicle plus the game's own data: the towing hook (its
@@ -51,8 +51,7 @@ export function pointEditor({key,field,prefix,front,color,state,$,groups,scene,r
   // Another part keeps the point where it is in the vehicle, as the smoke launchers do.
   $(prefix+'-parent').onchange=run(async()=>{const value=row(),next=hosts.find(h=>h.name===$(prefix+'-parent').value),old=value&&hosts.find(h=>h.name===value.parent);
     if(!value||!next||!old)return;remember();const local=poseMatrix(value).premultiply(matrix(old.matrix)).premultiply(matrix(next.matrix).invert());
-    const p=new THREE.Vector3(),q=new THREE.Quaternion(),s=new THREE.Vector3();local.decompose(p,q,s);
-    value.parent=next.name;value.position=p.toArray();value.rotation=new THREE.Euler().setFromQuaternion(q,'ZYX').toArray().slice(0,3).map(THREE.MathUtils.radToDeg);
+    Object.assign(value,poseFromMatrix(local,value),{parent:next.name});
     sync();selectEdit(key);refreshCheck();});
   $(prefix+'-remove').onclick=run(async()=>{if(!row())return;remember();delete state.transform[key];restore();selectEdit('hull');refreshCheck();});
   $(prefix+'-edit').onclick=()=>{if(row())selectEdit(key);};

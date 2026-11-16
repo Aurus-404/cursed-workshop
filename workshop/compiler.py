@@ -585,6 +585,8 @@ def _load_entity(resources, template):
     if container is None:
         raise CompileError(f"{template} has no game_entity block")
     _merge_weaponry(container)
+    from .components import inject
+    inject(resources,info,container)
     return info, root, container
 
 
@@ -606,16 +608,20 @@ def _shared_include(resources, path):
     its macro definitions are only read (rendered or cloned), never edited.
     The catalogs asked for the same few files thousands of times, and copying
     them was most of a minute. The loose-file change guard still runs."""
+    # Native global libraries can contain stray terminators accepted by GEM.
+    # Read them without discarding later declarations; exports stay strict.
     resolve = getattr(resources, "resolve", None)
     if resolve is None:
-        return parse(resources.read(path))
+        return parse(resources.read(path),lenient=True)
     entry = resolve(path)
+    try:hash(entry)
+    except TypeError:return parse(resources.read(path),lenient=True)
     cache = resources.__dict__.setdefault("_include_documents", {})
     cached = cache.get(entry)
     if cached is not None:
         resources.verify_unchanged(path)
         return cached
-    document = parse(resources.read(path))
+    document = parse(resources.read(path),lenient=True)
     cache[entry] = document
     return document
 
@@ -834,7 +840,7 @@ def _explicit_weapon_operators(resources, root):
                 continue
             seen.add(path)
             try:
-                visit(parse(resources.read(path)), path)
+                visit(_shared_include(resources,path), path)
             except (KeyError, OSError):
                 continue
         for weaponry in doc.find_all('Weaponry'):
@@ -957,7 +963,7 @@ def _inherited_crew(resources, root, base="", seen=None, depth=0):
             continue
         seen.add(path.casefold())
         try:
-            included = parse(resources.read(path))
+            included = _shared_include(resources,path)
         except (KeyError, OSError, ValueError):
             continue
         nodes += _inherited_crew(resources, included, path, seen, depth+1)
@@ -978,16 +984,15 @@ def _unique_name(name, taken):
 
 
 def _crew_role_names(resources):
-    """Verified operator place names from the active game's crew properties.
+    """Existing numbered operator IDs preferred when resolving seat collisions.
 
-    Numbered roles (gunner2, charger2...) exist in the native macros. Arbitrary
-    suffixes do not: crewbar labels and worker animation binding use these
-    place identities. Passenger and cannon-pushing driver seats are excluded.
+    These examples are native macro declarations, not an engine capacity limit.
+    Passenger and cannon-pushing driver seats are excluded.
     """
     names = {"gunner", "charger", "commander"}
     for path in ("properties/tank_crew.ext", "properties/car_crew.ext", "properties/cannon_crew.ext"):
         try:
-            document = parse(resources.read(path))
+            document = _shared_include(resources,path)
         except (KeyError, OSError):
             continue
         for node in document.walk():
@@ -1017,7 +1022,10 @@ def _allocate_crew_roles(resources, roles, taken):
             int(re.search(r"\d+$", name).group()) if re.search(r"\d+$", name) else 0, name))
         replacement = next((name for name in candidates if name not in reserved), None)
         if replacement is None:
-            raise CompileError(f"No unused native crew role for {role}; free mount needs a crew assignment profile")
+            # Placer IDs and their explicit Weaponry/Boarder/worker references
+            # are an entity-local namespace. Extend the same numbered family
+            # once the examples declared by the native macros are exhausted.
+            replacement = _unique_name(role, reserved)
         mapping[role] = replacement
         reserved.add(replacement)
     return mapping
@@ -1388,14 +1396,14 @@ def _crew_positions(spec, roles, excluded, role_mapping, link_bones, model, bone
         if yaw is not None and (isinstance(yaw, bool) or not isinstance(yaw, (int, float)) or not math.isfinite(yaw)):
             raise CompileError(f"Invalid crew seat orientation: {place}")
         final = {"position": point(module_frame, position) if space == "module" else list(position), "yaw": yaw}
-        rotation = value.get('rotation')
+        rotation = value.get('rotation',[0,0,0]) if 'mirror' in value else value.get('rotation')
         if rotation is not None:
             if (not isinstance(rotation, (list, tuple)) or len(rotation) != 3
                     or any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) for v in rotation)):
                 raise CompileError(f"Invalid crew seat rotation: {place}")
             # Relative adjustment around the seat origin, keeping the entire
             # native frame (including reflections), just like the editor group.
-            adjustment = euler_matrix(rotation)
+            adjustment = pose_matrix({'rotation':rotation,'mirror':value.get('mirror',[False,False,False])})
             frame = multiply(module_frame, adjustment) if space == 'module' else multiply(adjustment, module_frame)
             final['orientation'] = [row[:3] for row in multiply(frame, model['bones'][bone]['world'])[:3]]
         name = bone_mapping.get(bone, bone)
@@ -1479,7 +1487,7 @@ def _passenger_macros(resources, root):
     definitions = _include_defines(resources, root)
     for path in ("properties/tank_crew.ext", "properties/car_crew.ext", "properties/cannon_crew.ext"):
         try:
-            document = parse(resources.read(path))
+            document = _shared_include(resources,path)
         except (KeyError, OSError):
             continue
         for node in document.find_all("define"):
@@ -1569,7 +1577,7 @@ def _crew_definitions(resources, root):
     definitions = _include_defines(resources, root)
     for path in ("properties/tank_crew.ext", "properties/car_crew.ext", "properties/cannon_crew.ext"):
         try:
-            document = parse(resources.read(path))
+            document = _shared_include(resources,path)
         except (KeyError, OSError):
             continue
         for node in document.find_all("define"):
@@ -1607,6 +1615,11 @@ def _crew_expansion(resources, root):
             index = next(i for i, item in enumerate(root.items) if item is call)
             nodes = expand(call)
             root.items[index:index+1] = [item for node in nodes for item in (Trivia("\n"), node)]
+    # Some native carriers use passenger-seat macros for their actual driver
+    # and fixed-weapon operator too. Materialize those declarations without
+    # importing the carrier's ordinary passenger seats or changing their group.
+    operational = _operational_seat_roles(root)
+    _expand_place_macros(resources, root, lambda nodes, places: bool(places & operational))
     # Definitions that were embedded in a crew extension must not redefine global macros.
     for node in list(root.find_all("define")):
         if node.args and _is_crew_macro(node.args[0]):
@@ -1844,9 +1857,24 @@ def _cannon_workers(root):
     return states
 
 
+def _operational_seat_roles(root):
+    """Actual driver and operators of installed weapons, not optional riders."""
+    roles = {'driver'}
+    for weaponry in root.find_all('Weaponry'):
+        for place in weaponry.find_all('place'):
+            weapon=place.find('weapon')
+            if weapon is not None and weapon.args:
+                roles |= {role for role in _place_roles(place, implicit_gunner=True)
+                          if re.fullmatch(r'(?:gunner|charger|commander|shooter)\d*',role)}
+    return roles
+
+
 def _crew_roles(root):
+    operational = _operational_seat_roles(root)
     roles = {p.args[0] for pl in root.find_all('placer') for p in pl.find_all('place')
-             if p.args and p.find('group') and p.find('group').args == ['crew']}
+             if p.args and p.find('group') and
+             (p.find('group').args == ['crew'] or
+              (p.find('group').args == ['passenger'] and p.args[0] in operational))}
     states = _cannon_workers(root)
     if states.get('attack'):
         roles -= (states.get('move', set()) | states.get('trailing', set())) - states['attack']
@@ -2700,9 +2728,8 @@ def _compile_vehicle_edit(resources, template, transform, output_dir, new_id):
         model=parse_model(model['document'].render())
         skipped=apply_limits(model,root,transform['joint_limits'],{'hull':{n:n for n in model['bones']},'turret':{}})
         if skipped:diagnostics.append(skipped_limits_diagnostic(skipped))
-    if transform.get('mobility') is not None:
-        from .mobility import apply as apply_mobility
-        apply_mobility(root,transform['mobility'],diagnostics)
+    from .mobility import apply as apply_mobility
+    apply_mobility(root,transform.get('mobility'),diagnostics,resources=resources,document=document)
     contract = None
     if transform.get('commander_mg') is not None:
         from .commander_mg import apply_mount
@@ -2878,16 +2905,30 @@ def compile_assembly(resources, recipient_template, donor_template, transform, o
     """Compile a vehicle; edited weapon attributes are applied last, to the
     finished definition, whatever operation built it."""
     attributes = (transform or {}).get('weapon_attributes')
-    if not attributes:
-        return _compile_assembly(resources, recipient_template, donor_template, transform, output_dir, new_id)
-    from .weapon_attributes import validate
-    try:
+    sight = (transform or {}).get('sight')
+    if attributes:
+        from .weapon_attributes import validate
         validate(attributes)
-    except ValueError as error:
-        raise CompileError(str(error)) from error
-    inner = {k: v for k, v in transform.items() if k != 'weapon_attributes'}
+    if sight is not None:
+        from .sights import configuration
+        configuration(sight)
+    inner = {k: v for k, v in (transform or {}).items() if k not in ('weapon_attributes', 'sight')}
     result = _compile_assembly(resources, recipient_template, donor_template, inner, output_dir, new_id)
-    return apply_weapon_attributes(resources, result, attributes)
+    if attributes:
+        result = apply_weapon_attributes(resources, result, attributes)
+    if sight is not None:
+        from .sights import apply
+        result = apply(result, sight)
+    from .components import finalize,describe,strip_guns
+    detached=(transform or {}).get('component_guns')
+    if detached is not None:
+        if recipient_template!=donor_template or not inner.get('commander_only') or not isinstance(detached,list):
+            raise CompileError('El origen de componentes no es válido.')
+        guns={g['place']:g for g in describe(resources,recipient_template)['guns']}
+        if len(detached)!=len(set(detached)) or any(place not in guns for place in detached):
+            raise CompileError('El origen de componentes no es válido.')
+        strip_guns(result,[guns[place] for place in detached])
+    return finalize(result)
 
 
 def apply_weapon_attributes(resources, result, attributes):
@@ -3786,9 +3827,8 @@ def _compile_assembly(resources, recipient_template, donor_template, transform, 
                                {'hull':{n:n for n in kept_bones},'turret':{n:bone_mapping.get(n,n) for n in donor_names}})
         if skipped:
             diagnostics.append(skipped_limits_diagnostic(skipped))
-    if transform.get('mobility') is not None:
-        from .mobility import apply as apply_mobility
-        apply_mobility(recipient_root, transform['mobility'], diagnostics)
+    from .mobility import apply as apply_mobility
+    apply_mobility(recipient_root, transform.get('mobility'), diagnostics,resources=resources,document=recipient_doc)
     commander_mg = None
     if transform.get('commander_mg') is not None:
         from .commander_mg import apply_mount

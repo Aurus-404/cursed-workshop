@@ -4,12 +4,144 @@ import {PASSENGER_EN,PASSENGER_ZH} from './passenger-copy.js';
 import {ZH} from './zh-cn.js';
 import {EXTRA_EN,EXTRA_ZH} from './ui-copy.js';
 import {uiStorage,saveUISettings} from './ui-settings.js';
-// English / Spanish interface. Spanish is the source language: every visible
-// string (static HTML, dynamic messages and the backend's replies) is looked up
-// line by line when English is selected, so backend messages need no changes.
+import {LOCALE_ES,LOCALE_EN,LOCALE_ZH} from './locale-extra.js';
+import {RU,russianPatterns} from './ru.js';
+// Spanish is the source language. Static and dynamic text share these tables;
+// names and identifiers supplied by the game remain literal data.
 
-const CHINESE={...ZH,...EXTRA_ZH,...SMOKE_ZH,...RIDER_ZH,...PASSENGER_ZH};
+export const CHINESE={...ZH,...EXTRA_ZH,...SMOKE_ZH,...RIDER_ZH,...PASSENGER_ZH,...LOCALE_ZH};
 export const EN={
+...LOCALE_EN,
+"No se pudo completar la operación.":"Could not complete the operation.",
+"Buscar pieza":"Search pieces",
+  "Ajustar":"Snap",
+  "Piezas":"Pieces",
+  "Piezas de la vista":"Viewport pieces",
+  "Ocultar selección":"Hide selection",
+  "Aislar selección":"Isolate selection",
+  "Bloquear selección":"Lock selection",
+  "Mostrar todo":"Show all",
+  "Solo cambia la vista del editor.":"Only changes the editor view.",
+  "Hay un borrador recuperable.":"A recoverable draft is available.",
+  "Recuperar borrador":"Recover draft",
+  "Descartar borrador":"Discard draft",
+  "Controles del editor":"Editor controls",
+  "Autoguardar borrador":"Autosave draft",
+  "Ajustar a incrementos":"Snap to increments",
+  "Incremento de movimiento (unidades del editor)":"Movement increment (editor units)",
+  "Incremento de giro (grados)":"Rotation increment (degrees)",
+  "Factor de movimiento fino":"Fine movement factor",
+  "Atajos de teclado":"Keyboard shortcuts",
+  "Seleccioná un campo y presioná la combinación deseada. Backspace borra un atajo.":"Select a field and press the desired combination. Backspace clears a shortcut.",
+  "Restablecer controles":"Reset controls",
+  "Los ajustes se guardan automáticamente. El borrador no modifica tu campaña.":"Settings are saved automatically. The draft does not change your campaign.",
+  "Detalle técnico":"Technical details",
+  "Local / Global":"Local / World",
+  "Guardar borrador":"Save draft",
+  "Buscar vehículos":"Search vehicles",
+  "Ajustar mientras se mantiene":"Hold to snap",
+  "Movimiento fino mientras se mantiene":"Hold for fine movement",
+  "Ese atajo ya está asignado.":"That shortcut is already assigned.",
+  "Borrador recuperado.":"Draft recovered.",
+  "Borrador guardado automáticamente.":"Draft autosaved.",
+  "No se pudo guardar el borrador.":"Could not save the draft.",
+  "Recuperando borrador":"Recovering draft",
+  "La campaña cambió desde el autoguardado. Se conserva el borrador; no se aplicaron sus piezas.":"The campaign changed since autosaving. The draft is retained; its components were not applied.",
+  "Falta un vehículo del borrador.":"A vehicle required by the draft is missing.",
+  "Falta una pieza del borrador.":"A component required by the draft is missing.",
+  "Podés cancelar esta tarea sin modificar tu campaña.":"You can cancel this task without changing your campaign.",
+  "Completando la operación. Esta etapa debe terminar antes de continuar.":"Completing the operation. This stage must finish before continuing.",
+  "Cancelando la operación…":"Cancelling the operation…",
+  "Se perdió la conexión con el editor.":"The connection to the editor was lost.",
+  "Volvé a abrir Cursed Workshop. Tu último borrador guardado se puede recuperar al iniciar.":"Reopen Cursed Workshop. Your last saved draft can be recovered at startup.",
+  "No hay suficiente memoria para completar la operación.":"There is not enough memory to complete the operation.",
+  "Activá el modo de bajo uso de RAM en Configuración y reducí la resolución de las texturas. Después reintentá.":"Enable low memory mode in Settings and reduce texture resolution. Then try again.",
+  "El juego está usando los archivos que se necesitan actualizar.":"The game is using files that need to be updated.",
+  "Volvé al menú principal del juego o cerralo y reintentá.":"Return to the game main menu or close the game, then try again.",
+  "Falta un recurso necesario para esta operación.":"A resource required by this operation is missing.",
+  "Revisá la carpeta del juego y los mods activos en Configuración. Si persiste, copiá el diagnóstico.":"Check the game folder and active mods in Settings. If it persists, copy the diagnostic.",
+  "Revisá el detalle. Podés corregir la selección y reintentar; si el problema continúa, copiá el diagnóstico para reportarlo.":"Review the details, adjust the selection and try again. If the issue persists, copy the diagnostic to report it.",
+
+  "El origen de componentes no es válido.":"The component source is invalid.",
+  "Vehículo + pieza del Depósito → vehículo":"Vehicle + Depot component → vehicle",
+
+  "El vehículo se crea con puestos vacíos para la tripulación. Podés usar tus veteranos de reserva. Las piezas desmanteladas no aportan munición.":"The vehicle is created with empty crew seats. You can use your reserve veterans. Dismantled components do not supply ammunition.",
+
+  "Montura de arma":"Weapon mount",
+  "Elegí primero un chasis para montar la torreta.":"Select a chassis first to mount the turret.",
+
+  "Cañón / arma":"Gun / weapon",
+  "Tipo de pieza":"Component type",
+  "Procedencia":"Source",
+  "Todas las procedencias":"All sources",
+  "Desconocido":"Unknown",
+  "Desmantelar":"Dismantle",
+  "Desmantelar vehículo":"Dismantle vehicle",
+  "Desmantelando vehículo":"Dismantling vehicle",
+  "Revisando componentes":"Reviewing components",
+  "Componentes guardados para reutilizar":"Components stored for reuse",
+  "Componentes guardados en el Depósito.":"Components saved in the Depot.",
+  "El vehículo sale de la campaña y sus tripulantes pasan a la reserva. Las piezas se guardan por separado en el Depósito. El inventario original queda en la copia de recuperación, no se duplica entre las piezas.":"The vehicle leaves the campaign and its crew returns to reserve. Components are stored separately in the Depot. The original inventory remains in the recovery backup and is not duplicated across components.",
+  "Las armas que no se pueden separar conservan su pieza de montaje.":"Weapons that cannot be separated stay with their mounting component.",
+  "Elegí un vehículo propio para desmantelar.":"Select an owned vehicle to dismantle.",
+  "Elegí primero un vehículo receptor de tu campaña para instalar el cañón.":"First select a recipient vehicle from your campaign to install the gun.",
+  "Elegí el cañón guardado en esa pieza del depósito.":"Select the gun stored in that Depot component.",
+  "Ese cañón del depósito ya se está usando en el diseño.":"That Depot gun is already used in this design.",
+  "Punto de montaje vacío":"Empty weapon socket",
+  "Elegí un cañón disponible, no un punto de montaje vacío.":"Select an available gun rather than an empty socket.",
+  "Los puntos de montaje de esta pieza no son válidos.":"This component has invalid weapon sockets.",
+  "Todavía no hay piezas guardadas. Desmantelá un vehículo o guardá los componentes que sobren de una construcción.":"No stored components yet. Dismantle a vehicle or keep the components left over from a build.",
+
+  "El reflejo debe indicar tres ejes válidos.":"Mirror must specify three valid axes.",
+  "El punto de fijación cambia la escala de la pieza.":"The attachment changes the scale of the piece.",
+  "Elegí la pieza que acompaña a la mira.":"Choose the part the sight follows.",
+  "La pieza que acompaña a la mira ya no existe.":"The part the sight follows no longer exists.",
+  "La posición y orientación de la mira no son válidas.":"The sight position and orientation are invalid.",
+  "Este vehículo no tiene una cámara de apuntado nativa.":"This vehicle has no native aiming camera.",
+
+  "Ejes de transformación":"Transform axes",
+  "Global":"Global",
+  "Local":"Local",
+  "Espejar X":"Mirror X",
+  "Espejar Y":"Mirror Y",
+  "Espejar Z":"Mirror Z",
+  "Mira del vehículo":"Vehicle sight",
+  "Pieza que acompaña a la mira":"Sight attachment",
+  "Editar mira":"Edit sight",
+  "Previsualizar mira":"Preview sight",
+  "Salir de la mira":"Exit sight preview",
+  "Restaurar mira original":"Restore original sight",
+  "Colocá la mira invisible y elegí qué pieza acompaña.":"Position the invisible sight and choose the part it follows.",
+  "La mira es invisible en el juego. La flecha muestra hacia dónde mira. La previsualización muestra su posición y dirección; el zoom y la óptica originales se conservan en el juego.":"The sight is invisible in game. The arrow shows its direction. Preview shows position and direction; the original zoom and optics are retained in game.",
+  "1 = monotiro. Más de 1 = cargador. La cadencia controla el intervalo entre disparos y la recarga se aplica al terminar el cargador.":"1 = single shot. More than 1 = magazine. Fire rate controls the interval between shots; reload time applies when the magazine is empty.",
+
+  'Textura del blindaje':'Armor texture',
+  'Worn steel':'Worn steel',
+  "Calidad de la vista 3D":"3D view quality",
+  "Resolución de las texturas originales":"Original texture resolution",
+  "Baja (256 px)":"Low (256 px)",
+  "Media (512 px)":"Medium (512 px)",
+  "Alta (2048 px)":"High (2048 px)",
+  "Original (máxima resolución disponible)":"Original (maximum available resolution)",
+  "Los modelos usan el mayor detalle disponible. Las texturas de mayor resolución consumen más memoria y tardan más en cargar.":"Models use the highest available detail. Higher-resolution textures use more memory and take longer to load.",
+  "Placa circular":"Circular plate",
+  "Shift + clic para seleccionar varios puntos y moverlos juntos.":"Shift + click to select multiple points and move them together.",
+  "Blindaje redimensionable":"Resizable armor",
+  "Forma":"Shape",
+  "Cilindro":"Cylinder",
+  "Triángulo":"Triangle",
+  "Placa":"Plate",
+  "Editar esquinas":"Edit corners",
+  "Esquina":"Corner",
+  "Coordenadas locales en mm desde la esquina inferior izquierda original.":"Local coordinates in mm from the original lower-left corner.",
+  "En cilindros, ancho es diámetro, alto es longitud y grosor es la pared.":"For cylinders, width is diameter, height is length, and thickness is wall thickness.",
+  "X local (mm)":"Local X (mm)",
+  "Y local (mm)":"Local Y (mm)",
+  "Agujero circular":"Circular opening",
+  "Centro X (mm)":"Center X (mm)",
+  "Centro Y (mm)":"Center Y (mm)",
+  "Diámetro (mm)":"Diameter (mm)",
+  "La forma debe ser convexa y el agujero debe quedar dentro del blindaje.":"Keep the shape convex and the opening entirely inside the armor.",
   'Copiar todo':'Copy all',
   'No se pudo leer la partida: está guardada solo en OneDrive (en la nube) y no se pudo descargar. En el Explorador de archivos, hacé clic derecho sobre la partida → «Mantener siempre en este dispositivo», o revisá que OneDrive esté funcionando, y abrila de nuevo.':'Couldn\'t read the save: it\'s stored only in OneDrive (in the cloud) and couldn\'t be downloaded. In File Explorer, right-click the save → "Always keep on this device", or check that OneDrive is working, and open it again.',
   'Linux: no puedo ver el juego · construí con el juego en el menú o cerrado':"Linux: can't see the game · build with the game in the main menu or closed",
@@ -30,6 +162,7 @@ export const EN={
   'El informe está en inglés. Revisalo antes de compartirlo. Podés copiar el informe completo como texto. No se envía nada automáticamente.':'The report is in English. Review it before sharing. You can copy the entire report as plain text. Nothing is sent automatically.',
   ...EXTRA_EN,...SMOKE_EN,...RIDER_EN,...PASSENGER_EN,
   'Progreso por etapas':'Progress by stage',
+  'Ahorrar RAM cargando los catálogos solo cuando se usan':'Save RAM by loading catalogs only when needed',
   'Aviso sonoro al terminar de construir o cargar un vehículo':'Play a sound when vehicle building or loading finishes',
   'Vehículo cargado':'Vehicle loaded',
   'Recargando campaña y unidades':'Reloading campaign and units',
@@ -308,23 +441,32 @@ const ZH_PATTERNS=[
 ];
 
 const STORE='cw.lang';
-function initialLang(){const saved=uiStorage.getItem(STORE);if(['es','en','zh-CN'].includes(saved))return saved;const system=uiStorage.getItem('cw.systemLang');if(['es','en','zh-CN'].includes(system))return system;const locale=(globalThis.navigator?.language||'es').toLowerCase();return locale.startsWith('zh')?'zh-CN':locale.startsWith('es')?'es':'en';}
+export const LANGUAGES=['es','en','zh-CN','ru'];
+export function initialLang(){const saved=uiStorage.getItem(STORE);if(LANGUAGES.includes(saved))return saved;const system=uiStorage.getItem('cw.systemLang');if(LANGUAGES.includes(system))return system;const locale=(globalThis.navigator?.language||'es').toLowerCase();return locale.startsWith('zh')?'zh-CN':locale.startsWith('es')?'es':locale.startsWith('ru')?'ru':'en';}
 export const lang=initialLang();
-export async function setLang(value){await saveUISettings({language:value});uiStorage.setItem(STORE,value);location.reload();}
+export async function setLang(value){if(!LANGUAGES.includes(value))throw new RangeError('Unsupported interface language');await saveUISettings({language:value});uiStorage.setItem(STORE,value);location.reload();}
+
+const DICTIONARIES={es:LOCALE_ES,en:EN,'zh-CN':CHINESE,ru:RU};
+// Some catalog display labels arrive in English. Translate only known UI labels,
+// never substrings of names, file paths or resource IDs.
+const SOURCE_FROM_EN=new Map(Object.entries(EN).filter(([key])=>key!==EN[key]).map(([key,value])=>[value,key]));
+const RU_PATTERNS=russianPatterns(translate,englishText);
 
 function line(text,language='en'){
   const lead=(text.match(/^\s*(?:[·•]\s*|\d+\.\s*)?/)||[''])[0],body=text.slice(lead.length),tail=(body.match(/\s*$/)||[''])[0],core=body.slice(0,body.length-tail.length);
   if(!core)return text;
   const technical='Detalle técnico: ';
   if(core.startsWith(technical))return lead+line('Detalle técnico:',language)+' '+line(core.slice(technical.length),language)+tail;
-  const dict=language==='zh-CN'?CHINESE:EN;
-  if(Object.prototype.hasOwnProperty.call(dict,core))return lead+dict[core]+tail;
-  for(const [pattern,replacement] of (language==='zh-CN'?ZH_PATTERNS:PATTERNS))if(pattern.test(core))return lead+core.replace(pattern,replacement)+tail;
+  const dict=DICTIONARIES[language]||EN;
+  const key=Object.hasOwn(dict,core)?core:SOURCE_FROM_EN.get(core)||core;
+  if(Object.hasOwn(dict,key))return lead+dict[key]+tail;
+  if(language==='es')return lead+key+tail;
+  for(const [pattern,replacement] of (language==='zh-CN'?ZH_PATTERNS:language==='ru'?RU_PATTERNS:PATTERNS))if(pattern.test(core))return lead+core.replace(pattern,replacement)+tail;
   return text;
 }
-const EN_FROM_ZH=new Map(Object.entries(CHINESE).map(([key,value])=>[value,EN[key]||key]));
-export function englishText(text){if(typeof text!=='string'||!text)return text;return text.split('\n').map(value=>EN_FROM_ZH.get(value)||line(value,'en')).join('\n');}
-export function translate(text,language=lang){if(typeof text!=='string'||!text||language==='es')return text;return text.split('\n').map(value=>line(value,language)).join('\n');}
+const EN_FROM_TRANSLATION=new Map([CHINESE,RU,LOCALE_ES].flatMap(dict=>Object.entries(dict).map(([key,value])=>[value,EN[key]||key])));
+export function englishText(text){if(typeof text!=='string'||!text)return text;return EN_FROM_TRANSLATION.get(text)||text.split('\n').map(value=>EN_FROM_TRANSLATION.get(value)||line(value,'en')).join('\n');}
+export function translate(text,language=lang){if(typeof text!=='string'||!text)return text;const dict=DICTIONARIES[language]||EN;if(Object.hasOwn(dict,text))return dict[text];return text.split('\n').map(value=>line(value,language)).join('\n');}
 export function tr(text){return translate(text);}
 export const t=tr;
 
@@ -338,7 +480,6 @@ function translateNode(node){
 }
 export function startI18n(){
   document.documentElement.lang=lang;
-  if(lang==='es')return;
   translateNode(document.body);document.title=tr(document.title);
   new MutationObserver(records=>{for(const record of records){
     if(record.type==='characterData')translateNode(record.target);

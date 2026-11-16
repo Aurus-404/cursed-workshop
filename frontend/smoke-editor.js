@@ -1,4 +1,4 @@
-import {applyPose,poseMatrix,fittingParent} from './pivot-editor.js';
+import {applyPose,poseFromMatrix,poseMatrix,fittingParent} from './pivot-editor.js';
 import * as THREE from 'three';
 import {t} from './i18n.js';
 import {previewMesh} from './model-geometry.js';
@@ -64,9 +64,8 @@ export function smokeEditor({state,$,groups,scene,job,loading,remember,selectEdi
   $('smoke-list').onchange=()=>{selected=Number($('smoke-list').value);for(const n of [...group.children])if(n.userData.candidate)dispose(n);candidate=null;render();selectEdit('smoke_launchers');};
   $('smoke-parent').onchange=run(async()=>{const row=candidate||rows()[selected],next=hosts.find(p=>p.name===$('smoke-parent').value),old=hosts.find(p=>p.name===parentName(row));if(!row||!next||!old)return;
     const local=poseMatrix(row);
-    local.premultiply(matrix(old.matrix)).premultiply(matrix(next.matrix).invert());const p=new THREE.Vector3(),q=new THREE.Quaternion(),scale=new THREE.Vector3();local.decompose(p,q,scale);
-    if(scale.toArray().some(v=>Math.abs(v-1)>.002)){render();throw Error(t('Ese punto de fijación cambia la escala o refleja la pieza. Elegí otro.'));}
-    if(!candidate)remember();row.parent=next.name;const pivot=new THREE.Vector3(...(row.pivot||[0,0,0]));row.position=p.sub(pivot).add(pivot.clone().applyQuaternion(q)).toArray();row.rotation=new THREE.Euler().setFromQuaternion(q,'ZYX').toArray().slice(0,3).map(THREE.MathUtils.radToDeg);
+    local.premultiply(matrix(old.matrix)).premultiply(matrix(next.matrix).invert());const placed=poseFromMatrix(local,row);
+    if(!candidate)remember();Object.assign(row,placed,{parent:next.name});
     sync();if(!candidate){selectEdit('smoke_launchers');refreshCheck();}});
   $('smoke-add').onclick=run(async()=>{if(!candidate)return;remember();state.transform.smoke_launchers??=[];rows().push(structuredClone(candidate));selected=rows().length-1;await restore();selectEdit('smoke_launchers');refreshCheck();});
   $('smoke-duplicate').onclick=run(async()=>{if(!rows()[selected])return;remember();const copy=structuredClone(rows()[selected]);copy.position[1]+=8;rows().push(copy);selected=rows().length-1;await restore();selectEdit('smoke_launchers');refreshCheck();});

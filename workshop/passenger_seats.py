@@ -114,6 +114,8 @@ def configuration(index, spec):
                 'rotation': _vector(row.get('rotation'), 3, 360, 'La orientación del asiento no es válida.')}
         if 'pivot' in row:
             item['pivot'] = pivot_of(row)
+        from .pivots import copy_mirror
+        copy_mirror(row,item)
         added.append(item)
     changes = spec.get('native') or {}
     if not isinstance(changes, dict):

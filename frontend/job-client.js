@@ -11,7 +11,7 @@ export async function runJob(api,path,body,{signal,onStatus=()=>{},wait=ms=>new 
     for(;;){
       const job=await api('/api/job?id='+encodeURIComponent(job_id));onStatus(job);
       if(job.status==='cancelled'||job.status==='superseded')throw stopped();
-      if(job.status==='error')throw new Error(job.error);
+      if(job.status==='error')throw Object.assign(new Error(job.error),{detail:job.detail,errorType:job.error_type});
       if(job.status==='done'){
         if(signal?.aborted&&job.cancellable)throw stopped();
         return job.result;

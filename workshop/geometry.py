@@ -189,8 +189,12 @@ def parse_model(text: str | bytes) -> dict:
         for child in node.find_all("bone"):
             visit(child, name, world, entry["visible"])
 
-    for node in skeleton.find_all("bone"):
-        visit(node, None, identity(), _initially_visible(skeleton))
+    try:
+        for node in skeleton.find_all("bone"):
+            visit(node, None, identity(), _initially_visible(skeleton))
+    finally:
+        # Release the recursive closure's model tree on success and failure.
+        del visit
     volumes = {}
     for node in document.find_all("volume"):
         owner = node.find("bone")

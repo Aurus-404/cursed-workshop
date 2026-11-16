@@ -102,7 +102,7 @@ export async function copyPart(area,clipboard) {
 
 export async function downloadReport(url,token) {
   const response=await fetch(url,{headers:{'X-Workshop-Token':token}});
-  if(!response.ok)throw new Error('Report download failed.');
+  if(!response.ok)throw new Error(t('No se pudo descargar el reporte.'));
   const objectUrl=URL.createObjectURL(await response.blob());
   const link=document.createElement('a');link.href=objectUrl;link.download=new URL(url,location.href).searchParams.get('name')||'diagnostic.zip';
   document.body.appendChild(link);link.click();link.remove();

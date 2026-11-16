@@ -6,6 +6,7 @@ export const INSPECTOR_TOOLS={
   position:{hint:'Colocá la torreta o el arma y elegí con qué parte gira.',label:'Posición y montaje',fields:['design-turret-pos-field','mount-select','module-host-field'],pose:true},
   joints:{hint:'Ajustá cuánto giran y se elevan la torreta y el cañón, y a qué velocidad.',label:'Límites de torreta y cañón',fields:['design-turret-limits-field','weapon-joints']},
   mobility:{hint:'Cambiá la velocidad, el giro y la potencia del chasis.',label:'Movilidad del chasis',fields:['mobility-field'],part:'hull'},
+  sight:{hint:'Colocá la mira invisible y elegí qué pieza acompaña.',label:'Mira del vehículo',fields:['sight-field'],part:'sight',pose:true},
   weapons:{hint:'Cambiá recarga, cadencia, alcance, munición, penetración y daño de cada arma del vehículo.',label:'Atributos de armas',fields:['weapons-field']},
   crew:{hint:'Mové, ocultá o fijá a los tripulantes del vehículo.',label:'Tripulantes',fields:['design-module-crew-field','crew-pending-field','crew-static-field','crew-field','crew-visibility-field']},
   commander:{hint:'Agregá un arma que usa el comandante desde su escotilla.',label:'Arma del comandante',fields:['commander-field'],part:'commander_mg',pose:true},
@@ -89,10 +90,13 @@ export function inspectorMenus({document=globalThis.document,state,support,gun=(
       smoke:!!state.transform.smoke_launchers?.length,towing:!!state.transform.towing,charge:!!state.transform.charge,rider:!!state.transform.rider_mgs?.length,passengers:!!state.transform.passenger_seats?.added?.length,cargo:!!state.transform.support_vehicle?.cargo?.length};
     const gunReady=navigation.tool!=='position'||!gun()||!!(state.transform.gun_swap?.recipient_place&&state.transform.gun_swap?.donor_place);
     const pose=navigation.pose()&&(poseAvailable()??placed[navigation.tool]??true)&&gunReady;
+    const actions=$('pose-actions'),slot=$(navigation.tool==='armor'?'armor-pose-slot':'pose-actions-home');
+    if(actions.parentElement!==slot)slot.append(actions);
+    actions.classList.toggle('hidden',!pose);actions.inert=busy;
     $('inspector-transforms').classList.toggle('hidden',!pose);
     $('inspector-tool').setAttribute('aria-busy',String(state.inspectorPending>0));content.inert=busy;$('inspector-transforms').inert=busy;$('inspector-history').inert=busy;
     for(const id of ['mode-move','mode-rotate'])$(id).disabled=busy||!(pose||navigation.tool==='crew');
-    for(const id of ['pose-move','pose-rotate'])$(id).disabled=busy||!pose;
+    for(const id of ['pose-move','pose-rotate','mirror-0','mirror-1','mirror-2'])$(id).disabled=busy||!pose;
     $('inspector-history').classList.toggle('hidden',!editing);
     $('inspector-finish').disabled=busy;
     $('inspector-cancel').classList.toggle('hidden',!state.toolCancellable);

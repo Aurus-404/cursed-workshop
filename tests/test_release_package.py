@@ -13,6 +13,20 @@ builder = runpy.run_path(str(ROOT / "scripts/build-workshop-item.py"))
 
 
 class ReleasePackageTests(unittest.TestCase):
+    def test_only_named_bundled_paints_can_bypass_the_game_dds_block(self):
+        dist=self.distribution()
+        paint=dist/'_internal/workshop/web/assets/armor-paints/british.dds'
+        paint.parent.mkdir();paint.write_bytes(b'DDS bundled test')
+        release.validate_distribution(dist,self.root)
+        item=self.root/'item'
+        published=item/'CursedWorkshop/_internal/workshop/web/assets/armor-paints/british.dds'
+        published.parent.mkdir(parents=True);published.write_bytes(paint.read_bytes())
+        self.assertIn(published.relative_to(item).as_posix(),release.audit_item(item))
+        for relative in ('game.dds','_internal/workshop/web/assets/armor-paints/foreign.dds','_internal/workshop/web/assets/british.dds'):
+            file=dist/relative;file.parent.mkdir(parents=True,exist_ok=True);file.write_bytes(b'DDS game')
+            with self.assertRaises(ValueError):release.validate_distribution(dist,self.root)
+            file.unlink()
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

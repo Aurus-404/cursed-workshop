@@ -10,8 +10,9 @@ const turn=degrees=>new THREE.Quaternion().setFromEuler(new THREE.Euler(...degre
 // about it moves the origin too, so the pivot stays where it is.
 export function turnSeatAbout(row,rotation){
   const pivot=new THREE.Vector3(...(row.pivot||[0,0,0]));
-  const held=new THREE.Vector3(...row.position).add(pivot.clone().applyQuaternion(turn(row.rotation||[0,0,0])));
-  const position=held.sub(pivot.applyQuaternion(turn(rotation))).toArray().map(v=>Number(v.toFixed(3)));
+  const scale=new THREE.Vector3(...(row.mirror||[false,false,false]).map(v=>v?-1:1));
+  const held=new THREE.Vector3(...row.position).add(pivot.clone().multiply(scale).applyQuaternion(turn(row.rotation||[0,0,0])));
+  const position=held.sub(pivot.multiply(scale).applyQuaternion(turn(rotation))).toArray().map(v=>Number(v.toFixed(3)));
   return {...row,position,rotation};
 }
 
@@ -34,7 +35,8 @@ export function crewPoseEditor({control,state,$,figure,module,remember,applied,c
     const seat=figure();if(!seat)return;
     if(proxy.parent!==seat.parent)seat.parent.add(proxy);
     proxy.quaternion.copy(seat.quaternion);
-    proxy.position.copy(seat.position).add(pivotOf().applyQuaternion(seat.quaternion));
+    proxy.scale.copy(seat.scale);
+    proxy.position.copy(seat.position).add(pivotOf().multiply(seat.scale).applyQuaternion(seat.quaternion));
     proxy.updateMatrixWorld(true);
     const value=current();
     for(let axis=0;axis<3;axis++){
@@ -49,13 +51,22 @@ export function crewPoseEditor({control,state,$,figure,module,remember,applied,c
     control.setMode(mode==='rotate'?'rotate':'translate');
   }
   function setMode(value){mode=value;attach();}
+  function mirror(axis){
+    if(!figure())return;
+    remember();const value=current(),flags=[...(value.mirror||[false,false,false])];
+    const pivot=pivotOf(),oldScale=new THREE.Vector3(...flags.map(v=>v?-1:1));
+    const held=new THREE.Vector3(...value.position).add(pivot.clone().multiply(oldScale).applyQuaternion(turn(value.rotation||[0,0,0])));
+    flags[axis]=!flags[axis];
+    const position=held.sub(pivot.multiply(new THREE.Vector3(...flags.map(v=>v?-1:1))).applyQuaternion(turn(value.rotation||[0,0,0]))).toArray();
+    write({...value,position,mirror:flags});applied();attach();check();
+  }
   function capture(){
     const seat=figure();if(!seat)return;
     if(mode==='pivot'){
-      const pivot=proxy.position.clone().sub(seat.position).applyQuaternion(seat.quaternion.clone().invert());
+      const pivot=proxy.position.clone().sub(seat.position).applyQuaternion(seat.quaternion.clone().invert()).divide(seat.scale);
       write({...current(),pivot:pivot.toArray().map(v=>Number(v.toFixed(3)))});
     }else{
-      if(mode==='rotate'){seat.quaternion.copy(proxy.quaternion);seat.position.copy(proxy.position).sub(pivotOf().applyQuaternion(proxy.quaternion));}
+      if(mode==='rotate'){seat.quaternion.copy(proxy.quaternion);seat.position.copy(proxy.position).sub(pivotOf().multiply(seat.scale).applyQuaternion(proxy.quaternion));}
       write(current());
     }
     sync();
@@ -83,5 +94,5 @@ export function crewPoseEditor({control,state,$,figure,module,remember,applied,c
   $('crew-pose-rotate').onclick=()=>setMode('rotate');
   $('crew-pose-pivot').onclick=()=>setMode('pivot');
   $('crew-pivot-reset').onclick=reset;
-  return {attach,sync,setMode,capture};
+  return {attach,sync,setMode,capture,mirror};
 }
