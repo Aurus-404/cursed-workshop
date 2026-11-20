@@ -172,7 +172,7 @@ export function armorEditor({state,$,groups,scene,job,loading,remember,selectEdi
   const target=()=>group.children.find(n=>candidate?n.userData.candidate:n.userData.armorIndex===selected)?.children[0];
   const parentName=row=>fittingParent(row,state.check?.commander_bones);
   const matrix=rows=>new THREE.Matrix4().set(...rows.flat());
-  function dispose(node){node.traverse(n=>{n.geometry?.dispose();for(const m of new Set([n.userData?.flat,...[n.material].flat()]))if(m&&!m.userData?.shared)m.dispose();});node.removeFromParent();}
+  function dispose(node){node.traverse(n=>{n.geometry?.dispose();for(const m of new Set([n.userData?.flat,n.userData?.untextured,...[n.material].flat()]))if(m&&!m.userData?.shared)m.dispose();});node.removeFromParent();}
   function clear(){stopCorners();for(const n of [...group.children])dispose(n);candidate=null;}
   function sync(){for(const host of group.children){const item=host.userData.candidate?candidate:rows()[host.userData.armorIndex];
     if(!item)continue;const native=hosts.find(h=>h.name===parentName(item));host.visible=!!native;host.userData.hostBone=native?.name;

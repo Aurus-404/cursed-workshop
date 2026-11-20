@@ -70,4 +70,38 @@ assert.equal($('mount-select').disabled,false);
   stored.tab='catalog';
   await assert.rejects(editor.select({depot:'kept',part:'turret',template:'lvt'},'turret'),/torreta del depósito/);
 }
-console.log('Gun editor: operation, owned-unit selection, blocked donors, preview, recipe restore and history passed.');
+// "Choose MG / AT rifle": the donor is an infantry weapon and the recipient gun becomes its slot.
+{
+  globalThis.document={createElement:()=>({label:'',options:[],append(...o){this.options.push(...o);}})};
+  const {setSlot}=await import('../frontend/mounted-weapon-editor.js');
+  const guns=[],hidden=new Set(),changes=[];
+  const kept={tab:'campaign',hull:{eid:'0x1',template:'tank'},turret:{designPlaceholder:true},transform:{hull:{position:[0,0,0],rotation:[0,0,0]},turret:{position:[0,0,0],rotation:[0,0,0]}}};
+  const fields=new Map(),$$=id=>{if(!fields.has(id))fields.set(id,{value:'',checked:false,disabled:false,textContent:'',
+    classList:{toggle(name,on){if(on)hidden.add(id);else hidden.delete(id);}},add(o){(this.options??=[]).push(o);},append(...o){(this.options??=[]).push(...o.flatMap(g=>g.options||[g]));},replaceChildren(...o){this.options=o;}});return fields.get(id);};
+  $$('operation-select').value='gun';
+  const fake={active:()=>true,draft:()=>({guns}),ensure(){},body:()=>({}),refresh:async()=>{},placeholder(){}};
+  const tool={slotPlaces:()=>[{place:'mgun',weapon:'browning',mountable:false}],weapons:async()=>[{id:'mg42_belt',label:'MG 42',kind:'mgun'},{id:'boys_mk1',label:'Boys',kind:'at_rifle'}],
+    weaponLabel:id=>id==='mg42_belt'?'MG 42':id,placeable:()=>true,restore:async()=>{},placeSlot:place=>changes.push(['place',place]),
+    changeSlot:async(place,item)=>{changes.push([place,item]);setSlot(kept.transform,place,item);}};
+  const ask=async()=>({kind:'vehicle',source:'x',weapons:[{place:'mgun',weapon:'browning',label:'Browning',available:false}]});
+  const editor=gunEditor({state:kept,$:$$,job:ask,displayPart(){},updateSelection(){},selectEdit(){},remember(){},reportError(error){throw error;},design:fake,mounted:()=>tool});
+  await editor.restore();
+  assert.ok(hidden.has('gun-mountable-field'),'the unit donor list shows first');
+  await $$('gun-mountable').onclick();
+  assert.ok(hidden.has('gun-donor-field')&&hidden.has('gun-barrel-only-field')&&!hidden.has('gun-mountable-field'));
+  assert.deepEqual($$('gun-recipient').options.map(o=>o.value),['mgun'],'only guns that can hold a slot');
+  assert.equal($$('gun-recipient').value,'mgun');
+  assert.deepEqual($$('gun-mountable-item').options.map(o=>o.value),['','mg42_belt','boys_mk1'],'MGs first, then AT rifles');
+  assert.ok($$('gun-save').disabled,'nothing to save before a weapon is chosen');
+  $$('gun-mountable-item').value='mg42_belt';$$('gun-mountable-item').onchange();
+  assert.ok(!$$('gun-save').disabled);
+  await $$('gun-save').onclick();
+  assert.deepEqual(kept.transform.mounted_weapons.slots.map(r=>[r.place,r.item]),[['mgun','mg42_belt']]);
+  assert.equal(kept.transform.gun_swap,undefined,'no unit donor is involved');
+  assert.match($$('gun-saved').options.at(-1).text,/mgun ← MG 42/);assert.equal($$('gun-saved').options.at(-1).value,'slot:mgun');
+  await $$('gun-mountable-place').onclick();assert.deepEqual(changes.at(-1),['place','mgun']);
+  $$('gun-saved').value='slot:mgun';await $$('gun-remove-change').onclick();
+  assert.equal(kept.transform.mounted_weapons,undefined,'removing the change gives the gun back');
+  await $$('gun-mountable').onclick();assert.ok(hidden.has('gun-mountable-field'),'back to a unit donor');
+}
+console.log('Gun editor: operation, owned-unit selection, blocked donors, preview, recipe restore, history and MG / AT rifle donors passed.');

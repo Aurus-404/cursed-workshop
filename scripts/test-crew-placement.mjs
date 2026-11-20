@@ -18,6 +18,17 @@ const box=new THREE.Box3(new THREE.Vector3(-20,-10,0),new THREE.Vector3(20,10,30
   placeCrewFigure(seat,module,{position:[1,2,9],space:'module'},true,box,hull,8);assert.deepEqual(seat.position.toArray(),[1,2,9],'a hand-placed seat wins');
   seats.remove(seat);
 }
+{ // A carried gun's loader is fitted on the deck with the gun seated, then rides with it: no edge holds it back.
+  const hull=new THREE.Group();hull.updateMatrixWorld(true);
+  const gun=new THREE.Group(),seat=new THREE.Group();gun.add(seat);
+  seat.userData={weapon:true,aims:false,staticSeat:true,origin:[0,40,2]};
+  const seated=new THREE.Matrix4().makeTranslation(0,0,20);
+  for(const x of [0,3,6,60]){gun.position.set(x,0,20);gun.updateMatrixWorld(true);placeCrewFigure(seat,gun,null,true,box,hull,null,seated);
+    assert.deepEqual(seat.position.toArray(),[0,4,2],`moved ${x}: the loader keeps its fitted place on the gun`);}
+  gun.position.set(0,0,20);gun.updateMatrixWorld(true);placeCrewFigure(seat,gun,null,true,box,hull);
+  assert.deepEqual(seat.position.toArray(),[0,4,2],'with no seated frame it is fitted where the gun is');
+  placeCrewFigure(seat,gun,null,false,box,hull,null,seated);assert.deepEqual(seat.position.toArray(),[0,40,2],'not fixed: its native place');
+}
 for(const aims of [true,false])for(const fixed of [true,false]) {
   const figure=new THREE.Group();figure.name=aims?'gunner':'charger';
   figure.userData={weapon:true,aims,staticSeat:!aims,origin:[3,40,2]};seats.add(figure);

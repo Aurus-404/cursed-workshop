@@ -386,10 +386,51 @@ def _scaled_node(head, node, value):
     return block('{%s (* %s %s)}' % (head, _number_text(factor), _number_text(value)))
 
 
-def weapon_names(resources, name):
-    """The weapon's shown name in each language the game ships: {"default":
-    English, "es": Spanish}, read from desc/weapon/<name> in the .pot/.po
-    tables. Later mods override earlier ones, as in the game."""
+_DESC_FAMILIES = ('desc/weapon/', 'desc/stuff/', 'desc/ammo/')
+_STUFF_TYPES = ('weapon', 'ammo', 'grenade', 'mine', 'hand', 'pattern')
+
+
+def _tagged(node, tags):
+    """The tags after one level of a stuff: {tag "a b -c"} adds a and b and
+    drops c; a {from ...} keeps its parent's tags."""
+    tags = set(tags)
+    for child in node.children:
+        if child.opener == '{' and _key(child) == 'tag':
+            for word in ' '.join(child.args).casefold().split():
+                if word.startswith('-'):
+                    tags.discard(word[1:])
+                else:
+                    tags.add(word)
+    return tags
+
+
+def _desc_key(kinds, name):
+    """The key the game names a stuff by, in the weapon bar and its tooltip.
+    call_to_arms.exe builds "desc/" + kind + "/" + name, the kind "ammo" if
+    the stuff is an ammo, else "weapon" if it is a weapon, else "stuff". A
+    stuff is a weapon by a "weapon" tag (gun.pattern, bullet.pattern) or by
+    its own file type (panzershreck_54_x6.weapon); {from ...} passes the tags
+    on, never the file type."""
+    kind = 'ammo' if 'ammo' in kinds else 'weapon' if 'weapon' in kinds else 'stuff'
+    return 'desc/%s/%s' % (kind, name.casefold())
+
+
+def _desc_keys(resources, name):
+    """([key of the weapon, of what it inherits from, ...], tags it ends with)."""
+    keys, tags = [], set()
+    for path, node in _chain(resources, name):
+        tags = _tagged(node, tags)
+        base = posixpath.basename(path)
+        stem, dot, kind = base.rpartition('.')
+        if not dot or kind.casefold() not in _STUFF_TYPES:
+            stem, kind = base, ''
+        keys.append(_desc_key(tags | {kind.casefold()}, stem))
+    return keys[::-1], tags
+
+
+def _desc_names(resources):
+    """{key: {"default": English, "es": Spanish, ...}} of every stuff's name in
+    the .pot/.po tables. Later mods override earlier ones, as in the game."""
     cache = getattr(resources, '_weapon_names', None)
     if cache is None:
         cache = {}
@@ -401,8 +442,10 @@ def weapon_names(resources, name):
             context = source = None
             for line in resources.read_text(entry.path).splitlines():
                 line = line.strip()
-                if line.startswith('msgctxt "desc/weapon/'):
-                    context, source = line[len('msgctxt "desc/weapon/'):-1].casefold(), None
+                if line.startswith('msgctxt "'):
+                    context, source = line[len('msgctxt "'):-1].casefold(), None
+                    if not context.startswith(_DESC_FAMILIES):
+                        context = None
                 elif context and line.startswith('msgid "'):
                     source = line[len('msgid "'):-1].replace('\\"', '"')
                 elif context and line.startswith('msgstr "'):
@@ -415,7 +458,24 @@ def weapon_names(resources, name):
             resources._weapon_names = cache
         except AttributeError:
             pass
-    return dict(cache.get(name.casefold(), {}))
+    return cache
+
+
+def _named(resources, keys):
+    names = _desc_names(resources)
+    for key in keys:
+        shown = names.get(key)
+        if shown and shown.get('default'):
+            return dict(shown)
+    return {}
+
+
+def weapon_names(resources, name):
+    """The weapon's shown name in each language the game ships: {"default":
+    English, "es": Spanish}, read under the key the game reads (_desc_key).
+    A weapon without a name of its own shows the nearest one it inherits
+    ({from "weapon panzershreck_54"} names panzershreck_54_x6)."""
+    return _named(resources, _desc_keys(resources, name)[0])
 
 
 def copy_name(new_id, place):
@@ -515,15 +575,43 @@ def _copy_text(resources, name, row, magazine_filling=None):
     return info['path'], text
 
 
-def apply(resources, root, spec, new_id, diagnostics=None):
+def _native_reload(resources, name):
+    try:
+        top = effective(resources, name)['top']
+    except Exception:
+        return None
+    node = top.get('rechargetime')
+    operands = _operands(node) if node is not None else []
+    return evaluate(operands[1]) if len(operands) > 1 else None
+
+
+def apply(resources, root, spec, new_id, diagnostics=None, reload_factors=None):
     """Point each edited place at its own weapon copy and set the vehicle's
-    ammunition. Returns ({addon path: text}, places given a copy, ammo totals)."""
+    ammunition. `reload_factors` ({place: multiplier}) shortens a weapon's
+    reload (extra loaders), on top of its edited or native reload time.
+    Returns ({addon path: text}, places given a copy, ammo totals)."""
     validate(spec)
     files, renamed, labels = {}, [], []
-    if not spec:
+    if not spec and not reload_factors:
         return files, renamed, {}
+    spec = spec or {}
     places = {place.args[0]: weapon for place, weapon in _places(root)}
-    for place, row in sorted((spec.get('places') or {}).items()):
+    rows = {place: dict(row or {}) for place, row in (spec.get('places') or {}).items()}
+    low, high = WEAPON_FIELDS['reload_time']
+    for place, factor in sorted((reload_factors or {}).items()):
+        weapon = places.get(place)
+        row = rows.setdefault(place, {})
+        base = row.get('reload_time') if 'reload_time' in row else (_native_reload(resources, weapon.args[0]) if weapon is not None else None)
+        if base is None:
+            if diagnostics is not None:
+                diagnostics.append({'code': 'extra_loader_reload_skipped', 'level': 'warning',
+                                    'message': f'The weapon of {place} has no reload time to shorten; its extra loaders only stand by.'})
+            continue
+        row['reload_time'] = round(min(high, max(low, base * factor)), 3)
+        if diagnostics is not None:
+            diagnostics.append({'code': 'extra_loader_reload', 'level': 'info',
+                                'message': f'{place}: reload {base:g} s -> {row["reload_time"]:g} s with its extra loaders.'})
+    for place, row in sorted(rows.items()):
         if not row:
             continue
         weapon = places.get(place)
@@ -541,10 +629,14 @@ def apply(resources, root, spec, new_id, diagnostics=None):
         source, text = _copy_text(resources, weapon.args[0], row, filling)
         name = copy_name(new_id, place)
         files['resource/' + posixpath.dirname(source) + '/' + name] = text
-        # The copy shows the original's name, not desc/weapon/<copy>.
-        shown = weapon_names(resources, weapon.args[0])
-        if shown.get('default'):
-            labels.append((name, shown['default'], shown.get('es') or shown['default']))
+        # The copy shows the original's name. It is a file without a type, so
+        # only its inherited tags decide the key: a copy of a .weapon is named
+        # desc/stuff/<copy> unless the weapon is also tagged "weapon". Where
+        # nothing in the chain has a name (the game shows the original's raw
+        # key), the copy shows the original's identifier, not its own key.
+        keys, tags = _desc_keys(resources, weapon.args[0])
+        shown = _named(resources, keys) or {'default': weapon.args[0].split()[-1]}
+        labels.append((_desc_key(tags, name), shown['default'], shown.get('es') or shown['default']))
         weapon.atoms[1].set(name)
         if 'magazine' in row and 'filling' in weapon.args:
             at=weapon.args.index('filling')
@@ -557,9 +649,8 @@ def apply(resources, root, spec, new_id, diagnostics=None):
     if labels:
         from .registration import _pot
         table = 'localizations/{}/interface/text/desc/modular_workshop_' + new_id + '_weapons.{}'
-        rows = [('desc/weapon/' + name, english, spanish) for name, english, spanish in labels]
-        files[table.format('default', 'pot')] = _pot([row[:2] for row in rows])
-        files[table.format('es', 'po')] = _pot(rows, 'es')
+        files[table.format('default', 'pot')] = _pot([row[:2] for row in labels])
+        files[table.format('es', 'po')] = _pot(labels, 'es')
     totals = {}
     for item in _inventory_items(root):
         count = (spec.get('ammo') or {}).get(item.args[0])

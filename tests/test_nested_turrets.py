@@ -128,6 +128,28 @@ class NestedTurretTests(unittest.TestCase):
         self.assertEqual(after['bones'][pitch]['node'].find('limits').args, ['-5','20'])
         self.assert_effects(edited, after, after_root)
 
+    def test_a_launcher_whose_only_yaw_turns_its_sight_turns_with_the_turret(self):
+        # Wanze on a Pz I turret: the launcher only elevates (gun_rot); the 3.5
+        # degree yaw under it (foresight_rot) turns the sight. Taking that for
+        # the launcher's own traverse cut it off from the turret: it never turned.
+        mdl = self.root/'game/resource/entity/donor/donor.mdl'
+        mdl.write_bytes(mdl.read_bytes().replace(b'{bone revolute "turret"', b'{bone "turret"').replace(
+            b'{bone "shooter00"', b'{bone revolute "sight_rot" {Orientation 1 0 0 0 0 -1 0 1 0}{limits -3.5 3.5}'
+            b'{bone "foresight3"}}{bone "shooter00"'))
+        definition = self.root/'game/resource/entity/donor/donor.def'
+        definition.write_bytes(definition.read_bytes().replace(b'{place "dual" {Barrels 2}', b'{place "dual" {Barrels 2}{foresight "foresight3"}'))
+        self.index.close();self.index=ResourceIndex(self.root/'game').build();self.addCleanup(self.index.close)
+        built = compile_assembly(self.index, 'hull', 'donor', {'recipient_mount':'@free:turret'}, self.root/'wanze', 'mw_wanze')
+        _, model, root = self.load(built)
+        mount = built['metadata']['bone_mapping']['turret']
+        self.assertEqual(model['bones'][mount]['parent'], 'turret')
+        for name in descendants(model['bones'], mount):
+            self.assertIsNone(model['bones'][name]['node'].find('terminator'), name)
+        from workshop.articulation import weapon_joints
+        driven = {j['bone']: set(j['weapons']) for j in weapon_joints(model, root)}
+        launcher = next(p.args[0] for p in root.find('Weaponry').find_all('place') if p.find('Barrels'))
+        self.assertEqual(driven['turret'], {'gun', launcher}, 'aiming the launcher turns the turret it stands on')
+
     def test_a_turret_on_a_turret_aims_by_itself(self):
         # Natively so (panzer4h mgun_a_rot1): the game walks up to {terminator},
         # or the small turret's gunner would drive the big turret too.

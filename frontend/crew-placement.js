@@ -14,7 +14,8 @@ export function saveCrewPlacement(figure, module) {
   return {position:local.toArray().map(v=>Number(v.toFixed(3))),space:'module',...(rotation.some(v=>v)?{rotation}:{}),...(mirror.some(Boolean)?{mirror}:{})};
 }
 
-export function placeCrewFigure(figure,module,manual,fixed,box,hull=null,floor=null) {
+// `seated`: the module's world frame with the gun at its seated spot on the deck.
+export function placeCrewFigure(figure,module,manual,fixed,box,hull=null,floor=null,seated=null) {
   figure.position.set(...figure.userData.origin);
   figure.rotation.set(...(manual?.rotation||[0,0,0]).map(THREE.MathUtils.degToRad),'ZYX');
   figure.scale.set(...(manual?.mirror||[false,false,false]).map(v=>v?-1:1));
@@ -28,10 +29,17 @@ export function placeCrewFigure(figure,module,manual,fixed,box,hull=null,floor=n
   if(!(hullSeat||(fixed&&figure.userData.staticSeat))||box.isEmpty())return;
   const size=box.getSize(new THREE.Vector3());
   const padX=Math.min(Math.max(size.x*.06,6),size.x*.45),padY=Math.min(Math.max(size.y*.06,6),size.y*.45);
-  // A seat the source keeps in its hull stays there, the same as in the compiler.
-  const world=hullSeat?.position&&hull?hull.localToWorld(new THREE.Vector3(...hullSeat.position)):module.localToWorld(new THREE.Vector3(...figure.userData.origin));
-  world.x=THREE.MathUtils.clamp(world.x,box.min.x+padX,box.max.x-padX);
-  world.y=THREE.MathUtils.clamp(world.y,box.min.y+padY,box.max.y-padY);
-  if(hullSeat&&hull&&floor!==null&&floor!==undefined)world.z=Math.max(world.z,hull.localToWorld(new THREE.Vector3(0,0,floor)).z);
-  figure.position.copy(module.worldToLocal(world));
+  const inside=world=>{world.x=THREE.MathUtils.clamp(world.x,box.min.x+padX,box.max.x-padX);world.y=THREE.MathUtils.clamp(world.y,box.min.y+padY,box.max.y-padY);return world;};
+  if(hullSeat) {
+    // A seat the source keeps in its hull stays there, the same as in the compiler.
+    const world=inside(hullSeat.position&&hull?hull.localToWorld(new THREE.Vector3(...hullSeat.position)):module.localToWorld(new THREE.Vector3(...figure.userData.origin)));
+    if(hull&&floor!==null&&floor!==undefined)world.z=Math.max(world.z,hull.localToWorld(new THREE.Vector3(0,0,floor)).z);
+    figure.position.copy(module.worldToLocal(world));
+    return;
+  }
+  // A carried gun's loaders are fitted on the deck with the gun at its seated
+  // spot and then ride with the gun: fitting them wherever the gun is now left
+  // some pinned to an edge until the gun came back over the hull.
+  const frame=seated||module.matrixWorld;
+  figure.position.copy(inside(new THREE.Vector3(...figure.userData.origin).applyMatrix4(frame)).applyMatrix4(frame.clone().invert()));
 }

@@ -51,6 +51,8 @@ def weapon_joints(model, root, adjustment=None, visible=None, defines=None):
     definitions = {bone_name(node):node for node in root.find_all('bone') if bone_name(node)}
     driven = {name for name,node in definitions.items()
               if any(child.head.casefold() in ('limits','speed','speed2') for child in node.children)}
+    from .weapon_operators import _mountable_slots
+    slots = _mountable_slots(root)  # the Carrier's hull Bren: its weapon comes from the inventory
     for weaponry in root.find_all('Weaponry'):
         for place in weaponry.find_all('place'):
             if not place.args:
@@ -59,7 +61,7 @@ def weapon_joints(model, root, adjustment=None, visible=None, defines=None):
                 continue  # Binocular/vision pseudo-weapon, not a gun pivot.
             name = weapon_link(place, model)
             # Only actual weapon paths, never hatch, suspension or wheel joints.
-            if not place.find('weapon') and not (place.find('type') and place.find('type').args == ['aa']):
+            if not place.find('weapon') and not (place.find('type') and place.find('type').args == ['aa']) and place.args[0] not in slots:
                 continue
             linked = name
             while name in model['bones']:

@@ -71,6 +71,14 @@ class ApplicationTests(unittest.TestCase):
         with self.assertRaises(ValueError):self.state.ui_preferences({'editor_options':{'angle_step':0}})
         self.assertEqual(self.state.ui_preferences()['editor_options'],options)
 
+    def test_view_colors_are_validated_and_saved_as_interface_preferences(self):
+        colors={'by_kind':True,'colors':{'chassis':'#7b9dab','weapon':'#ABCDEF','tracks':'#000000'}}
+        self.state.ui_preferences({'view_colors':colors})
+        self.assertEqual(self.state.ui_preferences()['view_colors'],colors)
+        for bad in ({'colors':{'weapon':'red'}},{'colors':{'engine':'#ffffff'}},{'by_kind':'yes','colors':{}},{'by_kind':True}):
+            with self.subTest(bad=bad),self.assertRaises(ValueError):self.state.ui_preferences({'view_colors':bad})
+        self.assertEqual(self.state.ui_preferences()['view_colors'],colors)
+
     def test_low_memory_stops_and_skips_catalog_warmup(self):
         import threading
         from unittest.mock import patch
@@ -835,6 +843,80 @@ class ApplicationTests(unittest.TestCase):
             self.assertTrue(json.loads((addon/'workshop_manifest_mw_a.json').read_text())['shop_archived'])
             self.assertEqual(self.state.shop_listing()['vehicles'],[])
 
+    def test_shop_vehicle_reopens_without_a_campaign_and_its_edit_replaces_it(self):
+        # Editing a shop vehicle: its saved recipe opens with catalog parts, and
+        # building sells the new version while the old one leaves the list but
+        # stays registered for the units already bought.
+        from workshop.transactions import _owned_addon, _tree_hashes
+        self.state.snapshot=None
+        addon=self.game/'mods'/'modular_workshop';addon.mkdir(parents=True)
+        (addon/'mod.info').write_text('{mod {name "Modular Workshop"}}')
+        recipe={'recipient':'hull','donor':'donor','recipient_mount':'turret','donor_mount':'turret','transform':{
+            'gun_swap':{'recipient_place':'gun','donor_place':'gun'},'source_recipe':{'template':'x'},
+            'assembly_draft':{'schema':1,'turrets':[{'donor_template':'donor','donor_eid':'0x7','recipient_mount':'turret'}],
+                              'guns':[{'donor_template':'donor','donor_depot':'d1'}]}}}
+        (addon/'assembly_mw_a.json').write_text(json.dumps({'id':'mw_a','metadata':recipe}))
+        (addon/'workshop_manifest_mw_a.json').write_text(json.dumps({'id':'mw_a','display_name':'A','shop':{'parts':['hull','donor'],'cost':123}}))
+        (addon/OWNERSHIP_FILE).write_text(json.dumps({'addon_mod':'modular_workshop:0','files':_tree_hashes(addon)}))
+        def catalog():
+            self.state.index=SimpleNamespace(has_entity=lambda t:t in ('hull','donor'),label_for=lambda t:t.title(),sources=[],close=lambda:None)
+        catalog()
+        source=self.state.edit_source({'shop':'mw_a'})
+        self.assertEqual((source['shop'],source['name'],source['custom_cost'],source['recipient'],source['donor']),('mw_a','A',123,'hull','donor'))
+        draft=source['transform']['assembly_draft']
+        self.assertEqual(draft['turrets'][0],{'donor_template':'donor','recipient_mount':'turret','donor_catalog':True},'no unit of another campaign')
+        self.assertNotIn('donor_depot',draft['guns'][0])
+        with self.assertRaisesRegex(ValueError,'inválido'):self.state.edit_source({'shop':'../x'})
+        with self.assertRaisesRegex(ValueError,'ya no está'):self.state.edit_source({'shop':'mw_missing'})
+        seen={'rebuilt':[]}
+        def compile_fixture(index,hull,donor,transform,out,new_id):
+            seen['transform']=transform
+            target=Path(out)/'resource/entity/-vehicle/workshop'/new_id/(new_id+'.def')
+            target.parent.mkdir(parents=True);target.write_text('{game_entity}')
+            return {'id':new_id,'metadata':{'recipient':hull,'donor':donor,'transform':transform},'diagnostics':[]}
+        def register(index,result,staging,new_id,name,shop=None):
+            seen.update(shop=shop,name=name)
+            return {'shop':{'offer':{'cost':150,'stage':1}}}
+        skipped=[]
+        def rebuild(index,staging,identifiers=None):
+            manifest=json.loads((Path(staging)/'workshop_manifest_mw_a.json').read_text(encoding='utf-8'))
+            seen['rebuilt'].append((sorted(identifiers or []),manifest.get('shop'),manifest.get('shop_archived')))
+            return {'registered':[],'skipped':list(skipped)}
+        body={'recipient':'hull','donor':'donor','name':'A v2','replace':'mw_a','transform':source['transform']}
+        with patch('workshop.compiler.compile_assembly',side_effect=compile_fixture), \
+             patch('workshop.registration.register_variant',side_effect=register), \
+             patch('workshop.registration.rebuild_registrations',side_effect=rebuild), \
+             patch('workshop.resources.ResourceIndex'), \
+             patch('workshop.registration.recorded_stack',return_value=[]),patch('workshop.registration.stack_signature',return_value=[]), \
+             patch('workshop.registration.describe_addon'),patch('workshop.registration.write_stack'), \
+             patch.object(self.state,'stack_problem',return_value=None),patch.object(self.state,'mod_stack_problem',return_value=None):
+            # The old one must stay registered: if that fails, nothing is published.
+            skipped.append({'id':'mw_a','reason':'Entity template not found: hull'})
+            with self.assertRaisesRegex(ValueError,'No se cambió nada'):self.state.creative(body)
+            self.assertEqual(json.loads((addon/'workshop_manifest_mw_a.json').read_text())['shop']['cost'],123)
+            skipped.clear()
+            result=self.state.creative(body)
+        self.assertEqual(seen['rebuilt'][-1],(['mw_a'],None,True),'only the old version is registered again, out of the shop')
+        self.assertEqual(seen['shop'],{'parts':['hull','donor','donor']})
+        self.assertEqual(seen['transform']['gun_swap'],{'recipient_place':'gun','donor_place':'gun'},'the installed gun is part of the recipe')
+        self.assertEqual(seen['transform']['source_recipe'],{'template':'x'})
+        self.assertEqual((result['replaced'],result['replaced_name'],result['name']),('mw_a','A','A v2'))
+        old=json.loads((addon/'workshop_manifest_mw_a.json').read_text(encoding='utf-8'))
+        self.assertNotIn('shop',old);self.assertTrue(old['shop_archived']);self.assertEqual(old['shop_replaced_by'],result['new_template'])
+        self.assertTrue((addon/'assembly_mw_a.json').is_file(),'units already bought keep their recipe')
+        self.assertTrue((addon/'resource/entity/-vehicle/workshop'/result['new_template']/(result['new_template']+'.def')).is_file())
+        _owned_addon(addon,'modular_workshop:0')
+        rows=[json.loads(line) for line in (self.state.workspace/'history'/'builds.jsonl').read_text(encoding='utf-8').splitlines()]
+        self.assertEqual((rows[-1]['event'],rows[-1]['replaced']),('shop_edit','mw_a'))
+        catalog()
+        with self.assertRaisesRegex(ValueError,'ya no está'):self.state.edit_source({'shop':'mw_a'})
+        # A vehicle made with mods that are not active cannot be reopened.
+        new=result['new_template']
+        (addon/'workshop_stack.json').write_text(json.dumps({'skipped':[{'id':new,'reason':'missing'}]}))
+        (addon/f'workshop_manifest_{new}.json').write_text(json.dumps({'id':new,'display_name':'A v2'}))
+        (addon/f'assembly_{new}.json').write_text(json.dumps({'id':new,'metadata':recipe}))
+        with self.assertRaisesRegex(ValueError,'mods que no están activos'):self.state.edit_source({'shop':new})
+
     def test_creative_build_goes_to_the_shop_without_any_campaign(self):
         # Geofisika: any parts from the catalog, no unit spent, sold in the shop.
         from workshop.transactions import _owned_addon
@@ -1050,6 +1132,14 @@ class ApplicationTests(unittest.TestCase):
 
 
 class LocalHTTPTests(unittest.TestCase):
+    def test_ui_types_ignore_a_windows_registry_that_maps_js_to_text(self):
+        # Some PCs register .js as text/plain; with nosniff the module never runs.
+        with patch("workshop.app.mimetypes.guess_type",return_value=('text/plain',None)):
+            for route,expected in (('/assets/app.js','text/javascript'),('/assets/style.css','text/css'),('/','text/html')):
+                status,_,headers=self.request('GET',route)
+                self.assertEqual(status,200,route)
+                self.assertTrue(headers['Content-Type'].startswith(expected),(route,headers['Content-Type']))
+
     def test_cache_endpoints_are_authenticated_and_cleanup_runs_as_a_job(self):
         path=self.state.workspace/'texture_cache'/'texture.png'
         path.parent.mkdir();path.write_bytes(b'cached')

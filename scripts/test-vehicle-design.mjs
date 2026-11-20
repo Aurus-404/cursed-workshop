@@ -108,6 +108,26 @@ const old=vehicleDesign({state:legacy,$,job:async()=>({hull:{},turret:{}}),displ
 assert.equal(old.turrets()[0].donor_eid,'2');assert.equal(legacy.transform.assembly_draft.turret,undefined,'older single-turret designs read as a list');
 console.log('Several turrets: chassis targets, one change each, edit and remove, and older designs passed.');
 
+// A mount inside a turret that a donor replaced went with it (a Char B1's cupola
+// MG once its turret is swapped): no list offers what the view cannot show.
+const b2State={busy:false,campaign:{units:[base,a,b]},hull:{eid:'1',template:'b2'},transform:{hull:{},turret:{}}};
+const b2=vehicleDesign({state:b2State,$,job:async(path,body)=>path==='/api/preview'
+  ?{mounts:['turret','mgun_c_rot1','gun1_rot','@free','@free:turret','@free:mgun_c_rot1'],module_mounts:['turret','mgun_c_rot1','gun1_rot'],
+    bones:[{name:'basis',parent:null},{name:'body',parent:'basis'},{name:'turret',parent:'body'},{name:'mgun_c_rot1',parent:'turret'},{name:'gun1_rot',parent:'body'}]}
+  :{hull:{anchor_name:body.pending?.recipient_mount||'turret'},turret:{anchor_name:body.pending?'turret':''}},
+  displayPart(){},updateSelection(){},remember(){},reportError(e){throw e;},confirm:()=>true});
+$('operation-select').value='turret';await b2.switchMode('turret');await b2.refresh();b2.controls();
+assert.ok($('design-turret-limits').options.some(o=>o.value==='mgun_c_rot1'),'the original cupola MG is there while its turret is');
+$('turret-target').value='turret';await $('turret-target').onchange();await b2.select(a,'turret');b2.controls();
+assert.ok(!$('turret-target').options.some(o=>o.value==='mgun_c_rot1'),'a donor being tried on the turret takes its cupola away');
+await b2.saveTurret();b2.controls();
+for(const id of ['turret-target','design-turret-limits','design-turret-pos','design-module-crew'])
+  assert.ok(!$(id).options.some(o=>['mgun_c_rot1','@free:mgun_c_rot1'].includes(o.value)),id+' offers no part of the replaced turret');
+assert.ok($('turret-target').options.some(o=>o.value==='@free:turret'),'the roof of the new turret is still a deck spot');
+assert.ok($('design-turret-limits').options.some(o=>o.value==='gun1_rot'),'other chassis mounts stay');
+assert.ok(!b2.moduleChoices().some(c=>c.value==='mgun_c_rot1'));
+console.log('Replaced turret: its inner mounts leave every list, its deck spot stays.');
+
 // A carrier's root rotation encloses the entire chassis. Selecting a mortar
 // must retain the chassis and prefer its native free/deck mounting choice.
 const carrier={eid:'carrier',template:'carrier_fixture'},mortar={eid:'mortar',template:'mortar_fixture'};

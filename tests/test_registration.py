@@ -7,7 +7,7 @@ import json
 from workshop.registration import (RegistrationError, rebuild_registrations, recorded_stack, register_variant,
                                    stack_signature, validate_dependencies)
 from workshop.resources import ResourceIndex
-from workshop.syntax import parse
+from workshop.syntax import block, parse
 
 
 class RegistrationTests(unittest.TestCase):
@@ -24,7 +24,7 @@ class RegistrationTests(unittest.TestCase):
         self.assertEqual(self.result['metadata']['recipient'],'mw_parts_source_hull','the native registration authority does not replace the saved physical source')
 
     def test_custom_sight_uses_compiled_model_before_it_is_copied_to_addon(self):
-        self.write('set/third_person/mace.inc','{"default" {level {linkBone "basis"}} {level {zoom}{linkBone "retired_scope"}{camera "zoom2"}}} {"base.camera" inherit "vehicle default"}',mod=True)
+        self.write('set/third_person/mace.inc','{"default" {clip {distanceMin 200}} {level {linkBone "basis"}} {level {zoom}{linkBone "retired_scope"}{camera "zoom2"}}} {"base.camera" inherit "vehicle default"}',mod=True)
         self.index.build()
         compiled=self.root/'compiled'
         model='entity/-vehicle/workshop/mw_sight/mw_sight.mdl'
@@ -37,6 +37,7 @@ class RegistrationTests(unittest.TestCase):
         self.assertEqual(camera.find_all('level')[1].find('linkBone').args,['cw_sight_0'])
         self.assertEqual(camera.find_all('level')[1].find('camera').args,['zoom2'])
         self.assertNotIn('retired_scope',camera.render())
+        self.assertEqual(camera.find('clip').find('distanceMin').args,['0'],'full zoom must not pull the camera back off the sight')
 
     def test_replaced_weapon_merges_fire_declared_by_a_native_class_macro(self):
         from workshop.registration import _entity_sound_record, _validate_interaction_events, _interaction_events
@@ -117,11 +118,35 @@ class RegistrationTests(unittest.TestCase):
         preserved={p.relative_to(self.output):p.read_bytes() for p in self.output.rglob('*')
                    if p.is_file() and (p.stem=='mw_b' or p.name in ('workshop_manifest_mw_b.json','portrait_mw_b.json'))}
         self.assertTrue(preserved)
+        from workshop.registration import write_stack
+        write_stack(self.output,self.index)  # both registered for this same mod stack
         result=rebuild_registrations(self.index,self.output,identifiers={'mw_a'})
         self.assertEqual(result['registered'],['mw_a'])
         for relative,raw in preserved.items():self.assertEqual((self.output/relative).read_bytes(),raw,relative)
         self.assertIn('mw_b',(self.output/'resource/set/registry/unit.reg').read_text())
         self.assertIn('modular_workshop/mw_b',(self.output/'resource/set/interaction_entity/entity.set').read_text())
+
+    def test_a_scoped_refresh_on_other_mods_registers_every_vehicle(self):
+        # The shop update refreshed one vehicle after a tester changed mods and
+        # recorded the new stack; the others kept MACE macros and the game
+        # crashed with "define not found".
+        from workshop.registration import STACK_FILE
+        register_variant(self.index,json.loads(json.dumps(self.result)),self.output,'mw_a','A')
+        register_variant(self.index,json.loads(json.dumps(self.result)),self.output,'mw_b','B')
+        for identifier in ('mw_a','mw_b'):
+            (self.output/f'assembly_{identifier}.json').write_text(json.dumps(
+                {'id':identifier,'metadata':self.result['metadata']}))
+        (self.output/STACK_FILE).write_text(json.dumps({'schema':1,'stack':[{'id':'mace','version':'old'}]}))
+        result=rebuild_registrations(self.index,self.output,identifiers={'mw_a'})
+        self.assertEqual(sorted(result['registered']),['mw_a','mw_b'])
+
+    def test_a_workshop_record_calling_an_unknown_macro_is_reported(self):
+        from workshop.registration import missing_interaction_macros
+        native=parse('{"tank" {on "fire" ("known_fx") (mod 1 2)}} (define "known_fx" {view start "x"})')
+        own=parse('{"mw_a tank" {on "fire" ("known_fx" a(1)) ("2cm_Flakvierling") (mod 3 4)}}')
+        records=[('set/interaction_entity/tank.inc',node) for node in native.children if getattr(node,'opener','') in ('{','(')]
+        records+=[('set/interaction_entity/modular_workshop/mw_a.inc',node) for node in own.children if getattr(node,'opener','')=='{']
+        self.assertEqual(missing_interaction_macros(records),[('set/interaction_entity/modular_workshop/mw_a.inc','2cm_Flakvierling')])
 
     def test_stale_generated_globals_do_not_poison_checks_or_active_mod_authority(self):
         import shutil
@@ -349,6 +374,17 @@ class RegistrationTests(unittest.TestCase):
         self.assertIn('mp/ger/mid/tankman:1', content)
         self.assertNotIn('commander', content)
         self.assertNotIn(':0', content)
+
+    def test_towed_gun_squad_counts_soldiers_not_push_and_tow_places(self):
+        # 2 cm Flak 30 carriage: gunner and commander also own two pusher and
+        # two towing places. Six places, two men: never four more on foot.
+        self.result['metadata']['crew_roles'] = ['commander', 'driver1', 'driver2', 'gunner', 'seat1', 'seat2']
+        self.result['metadata']['crew_slots'] = 2
+        register_variant(self.index, self.result, self.output, 'mw_new', 'Towed gun')
+        roster = parse((self.output/'resource/set/multiplayer/units/modular_workshop/mw_new.set').read_bytes())
+        content = next(roster.walk('content')).args[0]
+        self.assertIn('mp/ger/mid/tankman:1', content)
+        self.assertIn('mp/ger/mid/commander:1', content)
 
     def test_effective_crew_counts_include_defaults_and_already_expanded_content(self):
         from workshop.registration import _resize_roster_crew
@@ -768,6 +804,33 @@ class RegistrationTests(unittest.TestCase):
         self.assertNotIn("base_scope", camera.render())
         self.assertTrue(metadata["camera_authority"]["aiming_transferred"])
         self.assertEqual(len(camera.find_all("level")), 3)
+
+    def test_camera_bone_sight_lowers_chassis_clip_so_full_zoom_stays_on_the_sight(self):
+        # Pz I chassis (distanceMin 200) + 251/17 2 cm sight on its "camera" bone
+        # ({distance 1}, donor clip distanceMin 1): at full zoom the camera went
+        # 200/20 = 10 m behind the sight bone and showed the vehicle from behind.
+        self.write("set/tp_control.set", '{third_person_control {vehicle (include "third_person/mace.inc") {"base" inherit "vehicle base.camera"} {"donor" inherit "vehicle donor.camera"}}}', mod=True)
+        self.write("set/third_person/mace.inc", '{"base.camera" {clip {viewMin -12}{distanceMin 200}{distanceMax 350}} {level {linkBone "basis"}} {level {zoom} {linkBone "turret"} {distance 30}}} {"donor.camera" {clip {viewMin -20}{distanceMin 1}{distanceMax 350}} {level {linkBone "basis"}} {level {zoom} {linkBone "camera"} {distance 1} {offset 0 0 0} {camera "zoom1.5"}}}', mod=True)
+        self.index.build()
+        self.result["metadata"]["bone_mapping"] = {"camera": "camera"}
+        register_variant(self.index, self.result, self.output, "mw_camera", "Camera")
+        camera = parse((self.output / "resource/set/tp_control.set").read_text()).find("third_person_control").find("vehicle").find("mw_camera")
+        clip = camera.find("clip")
+        self.assertEqual(clip.find("distanceMin").args, ["1"])
+        self.assertEqual(clip.find("distanceMax").args, ["350"], "the chassis third-person range is kept")
+        self.assertEqual(clip.find("viewMin").args, ["-12"])
+        self.assertEqual(camera.find_all("level")[1].find("linkBone").args, ["camera"])
+
+    def test_offset_sights_keep_the_native_chassis_clip(self):
+        from workshop.registration import fit_camera_clip
+        stug = block('{x {clip {distanceMin 200}} {level {linkBone "basis"}} {level {zoom}{linkBone "visor1"}{distance 5}{offset 3 0 3}}}')
+        fit_camera_clip(stug, 200)
+        self.assertEqual(stug.find("clip").find("distanceMin").args, ["200"], "native td.stug3 pairs distance 5 with distanceMin 200")
+        sight = block('{x {clip {distanceMin 200}} {level {linkBone "basis"}} {level {zoom}{linkBone "cw_sight_0"}{distance 0}}}')
+        fit_camera_clip(sight)
+        self.assertEqual(sight.find("clip").find("distanceMin").args, ["0"])
+        no_clip = block('{x {level {linkBone "basis"}} {level {zoom}{distance 1}}}')
+        self.assertIsNone(fit_camera_clip(no_clip).find("clip"))
 
     def test_partial_camera_overrides_keep_native_zoom_levels_and_clip_fields(self):
         from workshop.registration import _native_camera_profile

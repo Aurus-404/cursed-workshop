@@ -47,7 +47,7 @@ export function commanderEditor({state,groups,scene,api,quickJob,remember,select
     applyPose(group,spec);
     group.updateMatrixWorld(true);arcs.visible=active();
   }
-  function clearMeshes(){for(const child of [...group.children]){if(child===arcs)continue;group.remove(child);child.traverse(n=>{if(!n.userData.keepGeometry)n.geometry?.dispose();for(const m of [n.material].flat())if(m&&!m.userData?.shared)m.dispose();});}}
+  function clearMeshes(){for(const child of [...group.children]){if(child===arcs)continue;group.remove(child);child.traverse(n=>{if(!n.userData.keepGeometry)n.geometry?.dispose();for(const m of new Set([n.userData?.flat,n.userData?.untextured,...[n.material].flat()]))if(m&&!m.userData?.shared)m.dispose();});}}
   async function preview(){const spec=state.transform.commander_mg,version=++revision;if(!spec){previewTask.cancel();clearMeshes();sync();return;}
     try{const data=await previewTask.run(structuredClone(spec));if(version!==revision)return;
       clearMeshes();for(const mesh of data.meshes){

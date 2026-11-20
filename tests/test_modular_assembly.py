@@ -185,6 +185,67 @@ class ModularAssemblyTests(unittest.TestCase):
         self.assertLess(data['hull']['free_anchor'][2],obsolete[2])
         self.assertEqual(data['turret']['anchor_name'],'frame')
 
+    def test_reopened_saved_turret_keeps_the_vehicle_crew_names(self):
+        # Loaders left in reserve on a saved deck gun showed again while that gun
+        # was reopened to adjust its limits: the donor was drawn under its own
+        # crew names, and crew_exclude names the finished vehicle's places.
+        from workshop.app import AppState
+        index=self.index();state=AppState(self.folder/'workspace');state.index=index
+        self.addCleanup(state.pool.shutdown,wait=True)
+        self.addCleanup(state.clear_portrait_previews)
+        row={'donor_template':'towed','recipient_mount':'@free','assembly_scope':'complete','donor_catalog':True}
+        tr={'assembly_draft':{'schema':1,'turrets':[row],'guns':[]},'crew_exclude':['commander']}
+        compiled=compile_assembly(index,'receiver','towed',copy.deepcopy(tr),self.folder/'deck','mw_deck')
+        names=compiled['metadata']['draft_module_crew']['@free']
+        final={r['place'] for r in compiled['metadata']['crew_visibility']}|{'commander'}
+        self.assertTrue(names);self.assertLessEqual(set(names.values()),final)
+        self.assertNotEqual(names,{k:k for k in names},'the fixture renames the donor crew')
+        full=state.design_preview_data({'hull':'receiver','transform':tr})
+        self.assertTrue(full['hull']['vehicle_places'])
+        self.assertEqual(set(full['hull']['module_roots']),{'@free'})
+        self.assertFalse(full['turret'].get('vehicle_places'))
+        reopened={**row,'kind':'turret','original':'@free'}
+        self.assertEqual(state.reopened_crew(state.design_display_body({'hull':'receiver','transform':tr}),
+            {'hull':'receiver','transform':tr},reopened),names)
+        data=state.design_preview_data({'hull':'receiver','transform':tr,'pending':reopened})
+        self.assertTrue(data['turret']['vehicle_places'])
+        for seat in [*data['turret']['seats'],*data['turret']['internal_seats']]:
+            self.assertNotIn(seat['place'],set(names)-set(names.values()),'every donor seat shows its place on the vehicle')
+        # Another donor, or the same one moved to another mount, is a new change:
+        # its crew get their names when it is applied, never through a shared name.
+        for other in ({**reopened,'donor_template':'donor','assembly_scope':None},{**reopened,'recipient_mount':'@free:frame'}):
+            changed=state.design_preview_data({'hull':'receiver','transform':tr,'pending':other})
+            self.assertFalse(changed['turret'].get('vehicle_places'))
+
+    def test_a_deck_gun_without_traverse_turns_the_hull_however_its_limits_were_set(self):
+        # A 155 mm GPF on a Char B2's deck with its traverse at 0: only the main
+        # gun was looked at, so the hull never turned to aim the deck gun.
+        index=self.index()
+        def rotates(name,extra):
+            tr={'assembly_draft':{'schema':1,'turrets':[{'donor_template':'towed','recipient_mount':'@free','donor_catalog':True,**extra.get('row',{})}],'guns':[]},
+                **({'joint_limits':extra['hull']} if 'hull' in extra else {})}
+            result=compile_assembly(index,'receiver','towed',tr,self.folder/name,'mw_'+name)
+            root=parse((self.folder/name/'resource'/result['definition_path']).read_bytes()).find('game_entity')
+            model=parse_model((self.folder/name/'resource'/result['model_path']).read_bytes())
+            places={p.args[0]:bool(p.find_all('rotate')) for w in root.find_all('Weaponry') for p in w.find_all('place')}
+            return places,model
+        places,_=rotates('free_deck',{})
+        self.assertFalse(places['main_slot2'],'a deck gun that turns all around asks nothing')
+        places,model=rotates('fixed_row',{'row':{'joint_limits':{'azimuth':[0,0]}}})
+        self.assertTrue(places['main_slot2'],'limits saved on the deck gun')
+        self.assertFalse(places['main_slot'],'the turret gun still turns on its own')
+        top=next(bone['node'] for bone in model['bones'].values() if bone['parent'] is None)
+        self.assertEqual((top.args[0],top.find('limits').args),('revolute',['0','0']),'the chassis is locked so the aimer turns it')
+        places,_=rotates('fixed_hull',{'hull':{'hull':{'module_azimuth':[0,0]}}})
+        self.assertTrue(places['main_slot2'],'limits set on the whole chassis, applied after the deck gun was fitted')
+
+    def test_later_steps_carry_saved_turret_crew_names(self):
+        from workshop.draft import follow_crew
+        crew={'@free':{'gunner':'gunner','charger':'charger2'}}
+        follow_crew(crew,{'crew_visibility':[{'place':'gunner2','part':'hull','source_place':'gunner'},
+            {'place':'gunner','part':'turret','source_place':'gunner'},{'place':'driver','part':'hull','source_place':'driver'}]})
+        self.assertEqual(crew,{'@free':{'gunner':'gunner2','charger':'charger2'}},'a dropped place keeps its last name; a new donor never renames')
+
     def test_installed_module_pose_and_limits_need_no_donor_and_keep_other_weapons(self):
         index=self.index()
         tr={'assembly_draft':{'schema':1,'turrets':[{'native':True,'recipient_mount':'azimuth',

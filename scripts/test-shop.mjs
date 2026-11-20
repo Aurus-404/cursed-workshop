@@ -65,4 +65,17 @@ vehicles[1].unavailable='Entity template not found: pzspwg_204';
 await confirming.open();rows=$('shop-list').children;
 assert.equal(rows[1].children[0].disabled,true,'unavailable vehicles cannot be listed');
 assert.equal(rows[1].children[6].textContent,'Hecho con mods que no están activos. No se puede vender así.');
-console.log('Shop: price-only edits, zero/unpriced vehicles, confirmed removal, unavailable vehicles, invalid values and restore-suggested passed.');
+// "Editar" reopens a shop vehicle in the editor; the dialog closes and pending shop changes are asked about first.
+const edited=[];let keep=true;
+const editing=shopEditor({state:{busy:false},$,api:async()=>({vehicles}),operation:async()=>({offers:{},reload_steps:[]}),
+  artwork:{clear(){},attach(){}},svgVehicle:'',reportError:error=>{throw error;},refreshConfig:async()=>{},reloadText:()=>'',
+  edit:async vehicle=>{edited.push(vehicle.id);},confirm:()=>keep});
+await editing.open();rows=$('shop-list').children;
+assert.equal(rows[0].children[5].textContent,'Editar');assert.equal(rows[0].children[6].textContent,'Eliminar de la lista');
+assert.equal(rows[1].children[5].disabled,true,'a vehicle made with inactive mods cannot be reopened');
+await rows[0].children[5].onclick();
+assert.deepEqual(edited,['mw_a']);assert.equal($('shop-dialog').open,false);
+await editing.open();rows=$('shop-list').children;price(rows[0]).value='5';price(rows[0]).oninput();keep=false;
+await rows[0].children[5].onclick();
+assert.deepEqual(edited,['mw_a'],'cancelling keeps the unapplied shop changes');assert.equal($('shop-dialog').open,true);
+console.log('Shop: price-only edits, zero/unpriced vehicles, confirmed removal, unavailable vehicles, invalid values and restore-suggested and Edit passed.');

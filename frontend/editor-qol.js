@@ -2,7 +2,7 @@ import {t} from './i18n.js';
 import {uiStorage,saveUISettings} from './ui-settings.js';
 import {DEFAULT_BINDINGS,editorOptions,chord,snapping} from './editor-options.js';
 import {isTextEntry} from './accessibility.js';
-export function editorQoL({$,document=globalThis.document,control,controls=[control],actions,visibility,target,reselect,reportError,status,recovery,restore}){
+export function editorQoL({$,document=globalThis.document,control,controls=[control],actions,visibility,target,reselect,reportError,status,recovery,restore,mark=()=>{}}){
   const forControls=(...args)=>controls.filter(Boolean).forEach(c=>snapping(c,...args));
   let options;try{options=editorOptions(JSON.parse(uiStorage.getItem('cw.editorOptions')||'{}'));}catch{options=editorOptions();}
   let viewSelection=null,offered=null;
@@ -28,15 +28,33 @@ export function editorQoL({$,document=globalThis.document,control,controls=[cont
   $('qol-reset').onclick=()=>{options=editorOptions();saved();renderOptions();};
   $('qol-snap-toggle').onclick=()=>{options.snap=!options.snap;saved();renderOptions();};
   const viewActions={hide:()=>visibility.hide(current()),isolate:()=>visibility.isolate(current()),show:()=>visibility.showAll(),lock:()=>visibility.lock(current())};
-  for(const action of Object.keys(viewActions))$('qol-'+action).onclick=()=>{viewActions[action]();if(visibility.canEdit(target()))reselect();renderPieces();};
+  for(const action of Object.keys(viewActions))$('qol-'+action).onclick=()=>{viewActions[action]();if(visibility.canEdit(target()))reselect();renderPieces();markPieces();};
+  const pieceRow=key=>key?visibility.rows().find(r=>r.key===key)||null:null;
+  const panelOpen=()=>!$('qol-pieces-panel').classList.contains('hidden');
+  // Like every list that picks a part: the piece under the pointer, or else
+  // the chosen one, is marked in the 3D view while the list is open.
+  let pointed=null;
+  function markPieces(){if(!panelOpen()){mark(null);return;}const row=pieceRow(pointed||$('qol-pieces').value);mark(row?row.objects:null);}
+  function removalControls(row=pieceRow($('qol-pieces').value)){
+    const button=$('qol-remove'),note=$('qol-remove-note'),count=visibility.rows().filter(r=>r.removed).length;
+    button.disabled=!row?.removable||actions.blocked();
+    button.textContent=t(row?.removed?'Devolver a la partida':'Quitar en la partida');button.setAttribute('aria-pressed',String(!!row?.removed));
+    note.textContent=row&&!row.removable?t(row.reason==='donor'?'Aplicá el cambio de torreta para quitar piezas de la torreta donante: después aparecen en el chasis.':'Esta pieza no es del modelo del vehículo: se cambia desde su propia herramienta.')
+      :count?t('Quitadas en la partida: {count}. Solo se quita lo visible; el blindaje no cambia.').replace('{count}',count):'';
+  }
   function renderPieces(){
-    const list=$('qol-pieces'),selected=list.value;list.replaceChildren();
-    for(const row of visibility.rows().filter(row=>row.label.toLocaleLowerCase().includes($('qol-piece-search').value.toLocaleLowerCase()))){const option=document.createElement('option');option.value=row.key;option.textContent=(visibility.hidden.has(row.key)?'◌ ':'')+(visibility.locked.has(row.key)?'🔒 ':'')+row.label;list.append(option);}
-    list.value=selected;
+    const list=$('qol-pieces'),selected=list.value,top=list.scrollTop;list.replaceChildren();
+    for(const row of visibility.rows().filter(row=>row.label.toLocaleLowerCase().includes($('qol-piece-search').value.toLocaleLowerCase()))){const option=document.createElement('option');option.value=row.key;option.textContent=(row.removed?'✕ ':'')+(visibility.hidden.has(row.key)?'◌ ':'')+(visibility.locked.has(row.key)?'🔒 ':'')+row.label;if(row.removed)option.title=t('Quitada en la partida');list.append(option);}
+    list.value=selected;list.scrollTop=top;
+    removalControls();
   }
   $('qol-piece-search').oninput=renderPieces;
-  $('qol-pieces').onchange=()=>{viewSelection=visibility.rows().find(r=>r.key===$('qol-pieces').value)?.objects[0]||null;};
-  $('qol-pieces-toggle').onclick=()=>{const panel=$('qol-pieces-panel');panel.classList.toggle('hidden');renderPieces();};
+  $('qol-pieces').onchange=()=>{const row=pieceRow($('qol-pieces').value);viewSelection=row?.objects[0]||null;pointed=null;removalControls(row);markPieces();};
+  $('qol-pieces').onmouseover=event=>{const value=event.target?.closest?.('option')?.value||null;if(value===pointed)return;pointed=value;markPieces();};
+  $('qol-pieces').onmouseleave=()=>{pointed=null;markPieces();};
+  $('qol-remove').onclick=()=>{if(actions.blocked())return;const key=$('qol-pieces').value;if(!visibility.toggleRemoved(key))return;
+    const row=pieceRow(key);status(t(row?.removed?'La pieza no va a estar en el vehículo construido.':'La pieza vuelve al vehículo construido.'));renderPieces();markPieces();};
+  $('qol-pieces-toggle').onclick=()=>{const panel=$('qol-pieces-panel');panel.classList.toggle('hidden');pointed=null;renderPieces();markPieces();};
   document.addEventListener('keydown',event=>{
     if(document.querySelector('dialog[open]')||event.defaultPrevented)return;
     const action=Object.entries(options.bindings).find(([key,value])=>!key.endsWith('_hold')&&value&&value===chord(event))?.[0];
@@ -54,7 +72,7 @@ export function editorQoL({$,document=globalThis.document,control,controls=[cont
   $('qol-recover').onclick=async()=>{if(!offered)return;recovery.pause();try{await restore(offered);$('qol-recovery').classList.add('hidden');offered=null;recovery.resume();status(t('Borrador recuperado.'));}catch(error){reportError(error);}};
   $('qol-discard').onclick=async()=>{try{await recovery.discard();offered=null;$('qol-recovery').classList.add('hidden');recovery.resume();}catch(error){reportError(error);}};
   renderOptions();forControls(options);
-  return {get options(){return options;},renderPieces,
+  return {get options(){return options;},renderPieces,markPieces,
     select(){viewSelection=null;},
     async offer(){const saved=await recovery.offer();offered=saved.draft;if(offered){$('qol-recovery').classList.remove('hidden');$('qol-recovery-time').textContent=saved.saved_utc?new Date(saved.saved_utc).toLocaleString():'';}else recovery.resume();},
   };

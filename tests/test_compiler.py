@@ -46,6 +46,22 @@ class CompilerTests(unittest.TestCase):
         self.assertTrue(all(p.find('group').args==['passenger'] for pl in root.find_all('placer') for p in pl.find_all('place')))
         self.assertIn('seat_human',root.render(),'ordinary passengers retain their original macro')
 
+    def test_a_removed_place_is_gone_from_the_crew(self):
+        # The 15.5cm GPF platform takes ("crew_wheeled_cannon_5") and removes the
+        # limber drivers and seats it brings; kept, driver1 became a crew role
+        # linked to a bone the gun does not have, and the design would not load.
+        from workshop.compiler import _crew_expansion,_crew_roles
+        r=FakeResources()
+        r.files['properties/cannon_crew.ext']=(b'(define "crew_wheeled_cannon_5" {placer {place "gunner" {group "crew"}{LinkBone "gunner"}}'
+            b'{place "driver1" {group "crew"}{LinkBone "driver1"}}{place "seat1" {group "passenger"}{LinkBone "seat1"}}})')
+        root=parse('{game_entity ("crew_wheeled_cannon_5") {placer {place "driver1" remove}{place "seat1" remove}{place "seat9" remove}}'
+                   '{placer {place "seat1" {group "passenger"}{LinkBone "bench"}}}}').find('game_entity')
+        _crew_expansion(r,root)
+        places=[p.args for pl in root.find_all('placer') for p in pl.find_all('place')]
+        self.assertEqual(places,[['gunner'],['seat9','remove'],['seat1']],
+                         'removed places are gone, one declared again stays, and a marker with nothing to remove is left for the game')
+        self.assertEqual(_crew_roles(root),{'gunner'})
+
     def test_five_free_turrets_keep_independent_workers_after_native_names_are_exhausted(self):
         from tests.test_gun_assembly import Resources
         from workshop.resources import ResourceIndex
@@ -218,6 +234,40 @@ class CompilerTests(unittest.TestCase):
         root = built('mg34', [('turret', '-10 10'), ('gun_rot', '-5 15')])
         self.assertIsNone(_apply_traverse_class(resources, root, model), 'machine guns never decide the class')
         self.assertEqual(last(root), 'turret')
+
+    def test_an_added_gun_without_its_own_traverse_turns_the_hull(self):
+        # Char B2 + 155 mm GPF on the deck, its traverse set to 0: the hull 75 mm
+        # turned the tank (native {rotate}), the deck gun never did, as only the
+        # main gun was looked at. The turret gun still names the class, and the
+        # vehicle's own secondary guns keep what the game gave them (T-35, O-I).
+        from types import SimpleNamespace
+        from workshop.compiler import _apply_traverse_class
+        from workshop.syntax import block
+        resources = SimpleNamespace(entries={f'set/stuff/{kind}/{name}.weapon': SimpleNamespace(path=f'set/stuff/{kind}/{name}.weapon')
+                                             for kind, name in (('gun', 'kwk'), ('gun', 'gpf'), ('mgun', 'mg'))})
+        model = parse_model(b'{skeleton {bone "basis" {bone "body" {bone revolute "turret" {bone revolute "gun_rot" {bone "gun"}}}'
+                            b' {bone revolute "deck" {bone revolute "deck_rot" {bone "deck_gun"}}} {bone revolute "mg_yaw" {bone "mgun"}}}}}')
+        def built(deck):
+            return block('{game_entity {props "tank" "turret"} {Weaponry {place "gun" {weapon "kwk"}} {place "gun2" {weapon "gpf"} {LinkBone "deck_gun"} {basic}}'
+                         ' {place "mgun" {weapon "mg"} {type "aa"}} {place "slot" {LinkBone "deck_gun"} {type "hull"} {rotate}}}'
+                         '{bone "turret" {limits -180 180}} {bone "gun_rot" {limits -5 15}} {bone "deck" {limits ' + deck + '}} {bone "deck_rot" {limits -4 25}} {bone "mg_yaw" {limits -10 10}}}')
+        places = lambda root: {p.args[0]: p for w in root.find_all('Weaponry') for p in w.find_all('place')}
+        root = built('0 0')
+        self.assertEqual(_apply_traverse_class(resources, root, model), 'turret')
+        self.assertEqual(places(root)['gun2'].find_all('rotate'), [], "a vehicle's own side gun keeps the game's choice")
+        added = {'gun2', 'mgun', 'slot'}
+        self.assertEqual(_apply_traverse_class(resources, root, model, added=added, chosen={'slot'}), 'turret', 'the turret gun names the class')
+        self.assertEqual(len(places(root)['gun2'].find_all('rotate')), 1, 'the fixed deck gun asks the hull to turn')
+        self.assertEqual(places(root)['gun'].find_all('rotate'), [])
+        self.assertEqual(places(root)['mgun'].find_all('rotate'), [], 'never for a machine gun')
+        self.assertEqual(len(places(root)['slot'].find_all('rotate')), 1, "a mounted slot keeps the player's choice")
+        chassis = parse_model(model['document'].render())['bones']['basis']['node']
+        self.assertEqual((chassis.args, chassis.find('limits').args), (['revolute', 'basis'], ['0', '0']))
+        self.assertEqual(_apply_traverse_class(resources, root, model, added=added), 'turret')
+        self.assertEqual(len(places(root)['gun2'].find_all('rotate')), 1, 'compiling twice')
+        root = built('-180 180')
+        _apply_traverse_class(resources, root, model, added=added)
+        self.assertEqual(places(root)['gun2'].find_all('rotate'), [], 'a deck gun that turns all around asks nothing')
 
     def test_casemate_root_preserves_pose_physics_and_other_weapon_chains(self):
         from types import SimpleNamespace
@@ -538,6 +588,26 @@ class CompilerTests(unittest.TestCase):
             weapon=root.find('Weaponry').find('place')
             self.assertEqual(weapon.find('gunner').args,['gunner'])
             self.assertEqual(weapon.find('charger').args,['charger'])
+
+    def test_stand_mg_place_gets_its_only_sight_and_loses_carriage_rotate(self):
+        # Ya's T-26 + DS-39 stand: the stand's "mgun1" names no bone, so on the
+        # vehicle it had no aiming chain, and its {Rotate} would turn the hull.
+        resources=FakeResources()
+        key='entity/donor/donor.def'
+        resources.files[key]=resources.files[key].replace(
+            b'{place "gun" {weapon "20mm" filling "ammo ap" 1}{gunner "gunner"}}',
+            b'{place "mgun1" {type "main"}{weapon "20mm" filling "ammo ap" 1}{gunner "gunner"}{Rotate}}')
+        mdl='entity/donor/donor.mdl'
+        resources.files[mdl]=resources.files[mdl].replace(b'{bone "gun"}',b'{bone "gun" {bone "foresight14"}}')
+        resolve=resources.resolve_template
+        resources.resolve_template=lambda name:{**resolve(name),'kind':'artillery'} if name=='donor' else resolve(name)
+        with tempfile.TemporaryDirectory() as temp:
+            result=compile_assembly(resources,'hull','donor',{'recipient_mount':'@free','auto_seat':False},temp,'vww_stand')
+            root=parse((Path(temp)/'resource/entity/-vehicle/workshop/vww_stand/vww_stand.def').read_bytes()).find('game_entity')
+        place=next(p for p in root.find('Weaponry').find_all('place') if p.args==['mgun1'])
+        sight=result['metadata']['bone_mapping'].get('foresight14','foresight14')
+        self.assertEqual(place.find('foresight').args,[sight])
+        self.assertIsNone(place.find('rotate'))
 
     def test_carried_aiming_ancestor_keeps_axes_limits_and_exact_rest_pose_without_carriage(self):
         resources=FakeResources()
@@ -1190,6 +1260,15 @@ class CompilerTests(unittest.TestCase):
                'commander','charger'}
         self.assertEqual(_allocate_crew_roles(resources,{'gunner'},taken),{'gunner':'gunner20'})
 
+    def test_every_role_gets_its_own_jobs_number_before_another_job_takes_it(self):
+        # Pz.Sp.Wg. 204 turret on a Pz IV (0.11.11 brought its commander along):
+        # the commander, sorted first, took "gunner2" and the gunner fell to
+        # "gunner4"; the design's saved seat for its gunner landed inside the hull.
+        resources=FakeResources()
+        resources.files['properties/tank_crew.ext']=b'(define "x" ("crew_human" place(gunner3)) ("crew_human" place(gunner4)))'
+        taken={'driver','gunner','gunner3','commander','charger'}
+        self.assertEqual(_allocate_crew_roles(resources,{'gunner','commander'},taken),{'gunner':'gunner2','commander':'gunner4'})
+
     def test_role_rename_updates_cannon_workers_but_preserves_animation_resources(self):
         root=parse('{game_entity {placer {place "gunner" {group "crew"}}}'
                    '{boarder {anm "gunner" {forward {end "cannon_small_gunner"}}}'
@@ -1219,6 +1298,16 @@ class CompilerTests(unittest.TestCase):
         first,second=(item['to'] for item in report)
         self.assertEqual(first,[-44.0,9,30])                    # inside the footprint (6% margin)
         self.assertGreaterEqual(abs(second[0]-first[0]),10)     # not on top of the first loader
+
+    def test_carried_gun_loaders_ride_with_the_gun_wherever_it_is_moved(self):
+        # Fitted where the gun was moved to, a loader beyond an edge stayed
+        # pinned to it and only followed once the gun came back over the hull.
+        from workshop.compiler import _static_crew
+        for shift in (0,5,40,100):
+            mounted=parse('{bone "turret" {bone "charger"}}').children[0]
+            _,report=_static_crew(mounted,{'charger'},{'turret'},lambda name: translation([-60+shift,9,30]),
+                                  euler_matrix(),((-50,-20),(50,20)),seated=translation([-shift,0,0]))
+            self.assertEqual(report[0]['to'],[-44.0+shift,9,30],f'gun moved {shift}')
 
     def test_volume_binding_already_broken_in_the_source_is_kept(self):
         # lorraine_37l_xx binds volume "gun" to "gun1" (its bone is "gun1_xx");

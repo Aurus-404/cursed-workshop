@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 globalThis.localStorage={getItem:()=> 'es'};
 class Element{
-  children=[];classList={toggle(){}};
+  children=[];classList={toggle(){}};dataset={};
   append(...nodes){this.children.push(...nodes);}
   replaceChildren(){this.children=[];}
   setAttribute(key,value){this[key]=value;}
@@ -46,4 +46,19 @@ for(const text of ['Ocultar tripulantes al embarcar','Ocultar al embarcar','Inte
 }
 state.busy=false;editor.render();$('crew-visibility-list').children[0].onclick();assert.ok(!state.transform.crew_hidden,'reset remains available even with a stale or rejected seat');
 assert.ok(shown>=1);
+
+// A design: crew settings name the finished vehicle's places. The compiled chassis
+// and a saved turret reopened unchanged use those names; a donor still being
+// tried keeps its own, so a name it only shares (charger) hides nobody there.
+{const {vehiclePlaceParts}=await import('../frontend/crew-visibility.js');
+  const design={hull:{template:'tank'},turret:{template:'tank'},mounts:{},transform:{assembly_draft:{schema:1,turrets:[]},crew_hidden:['charger3']},
+    previews:{hull:{vehicle_places:true},turret:{}}};
+  const rows=[{place:'charger3',part:'hull',source_place:'charger3',can_hide:true}];
+  const own=crewVisibilityEditor({state:design,$,remember(){},refreshCheck(){},applyShow(){},roleName:r=>r,detachHidden(){}});own.receive(rows);
+  assert.deepEqual(vehiclePlaceParts(design),['hull']);
+  assert.ok(crewHidden(design,'hull','charger3'));assert.ok(!crewHidden(design,'turret','charger3'),'a donor being tried keeps its own seat names');
+  design.pendingTurret={kind:'turret',original:'@free',recipient_mount:'@free'};design.previews.turret={vehicle_places:true};
+  assert.deepEqual(vehiclePlaceParts(design),['hull','turret']);assert.ok(crewHidden(design,'turret','charger3'),'a reopened saved turret shows its crew by their places');
+  assert.deepEqual(JSON.parse($('crew-visibility-list').children.at(-1).dataset.mark),{crew:'charger3'},'pointing at the row marks that crewman');
+  assert.equal(vehiclePlaceParts({transform:{}}),null,'a plain combination keeps its own rule');}
 console.log('Crew visibility: individual final roles, preview origins, commander, internal/unsupported seats, history/recipe, stale selection, busy state, diagnostics and translations passed.');

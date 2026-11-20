@@ -24,6 +24,7 @@ import {weaponJointEditor} from './weapon-joints.js';
 import {mobilityEditor} from './mobility-editor.js';
 import {weaponAttributesEditor} from './weapon-attributes.js';
 import {partHighlight} from './part-highlight.js';
+import {hoverMarks} from './hover-marks.js';
 import {armorView} from './armor-view.js';
 import {weaponArcs,ownsFitting} from './weapon-arcs.js';
 import {crewPoseEditor} from './crew-pose.js';
@@ -32,7 +33,7 @@ import {latestTask} from './latest-task.js';
 import {localRequest,pageId} from './local-request.js';
 import {serverWatch} from './server-watch.js';
 import {canPlaceCrew,placeCrewFigure} from './crew-placement.js';
-import {crewVisibilityEditor,crewHidden,visibilityKey} from './crew-visibility.js';
+import {crewVisibilityEditor,crewHidden,visibilityKey,vehiclePlaceParts} from './crew-visibility.js';
 import {operationProgress,elapsedTime,completionSound} from './operation-progress.js';
 import {toolProgress} from './tool-progress.js';
 import {buildVehicle} from './build-vehicle.js';
@@ -44,8 +45,13 @@ import {armorEditor as createArmorEditor} from './armor-editor.js';
 import {smokeEditor as createSmokeEditor} from './smoke-editor.js';
 import {pointEditor} from './point-editor.js';
 import {riderEditor as createRiderEditor} from './rider-editor.js';
+import {mountedWeaponEditor as createMountedEditor} from './mounted-weapon-editor.js';
 import {passengerEditor as createPassengerEditor} from './passenger-editor.js';
+import {extraCrewEditor as createExtraCrewEditor} from './extra-crew-editor.js';
+import {weaponOperatorsEditor as createWeaponOperatorsEditor,forgetOperator} from './weapon-operators.js';
 import {uiStorage,saveUISettings} from './ui-settings.js';
+import {viewColors,plainColor} from './part-colors.js';
+import {viewColorSettings} from './view-colors-settings.js';
 import {workspaceLayout} from './workspace-layout.js';
 import {inspectorMenus} from './inspector.js';
 import {shown} from './number-field.js';
@@ -54,7 +60,7 @@ import {runJob} from './job-client.js';
 import {unitArtwork} from './unit-artwork.js';
 import {vehicleDesign,withoutPlacement,LOOSE_FITTINGS} from './vehicle-design.js';
 import {designTemplates} from './design-templates.js';
-import {searchableSelects,moveSelectField} from './searchable-select.js';
+import {searchableSelects,moveSelectField,selectOfButton} from './searchable-select.js';
 let inspector=null,qol=null,viewPieces=null,recovery=null;
 
 const $=id=>document.getElementById(id);
@@ -200,29 +206,38 @@ function partRig(part){const data=state.previews[part];if(!data?.joints?.length)
   return {key:part,group:groups[part],revision:previewId(data),parentOf:bone=>parents.get(bone),extras,
     jointOf:object=>nearest(object.userData.hostBone??(object.userData.seat?object.userData.bone:object.userData.mesh?.bone)),
     joints:data.joints.map(joint=>({key:joint.bone,weapons:joint.weapons||[],matrix:new THREE.Matrix4().set(...previewJointFrame(joint,data.anchor_name,part==='turret'?state.transform.turret?.pivot:null,levelJointFrame(part)).flat()),limits:()=>jointLimits(part,joint)}))};}
-var weaponView=weaponArcs({state,groups,camera,viewport,orbit,rigs:()=>[partRig('hull'),partRig('turret'),cmdEditor.weaponRig(),...riderEditor.weaponRigs()],
+var weaponView=weaponArcs({state,groups,camera,viewport,orbit,rigs:()=>[partRig('hull'),partRig('turret'),cmdEditor.weaponRig(),...riderEditor.weaponRigs(),...mountedEditor.weaponRigs()],
   describe:(joint,kind)=>`${t(kind==='traverse'?'Giro':'Elevación')}: ${[...new Set(joint.weapons||[])].join(', ')} (${joint.key})`});
 $('reset-weapon-pose').onclick=()=>weaponView.reset();
 const draftEditor=vehicleDesign({state,$,job:quickJob,displayPart,updateSelection,remember,reportError,mountLabel,receiveCrew:rows=>crewVisibility.receive(rows),onFocus:part=>selectEdit(part)});
 state.restoreDesign=()=>draftEditor.refresh(state.pendingTurret);
-const gunEditor=createGunEditor({state,$,job:quickJob,displayPart,updateSelection,selectEdit,remember,reportError,design:draftEditor});
+const gunEditor=createGunEditor({state,$,job:quickJob,displayPart,updateSelection,selectEdit,remember,reportError,design:draftEditor,mounted:()=>mountedEditor});
 const supportEditor=createSupportEditor({state,$,THREE,groups,job:quickJob,displayPart,updateSelection,selectEdit,remember,refreshCheck,reportError});
 const armorEditor=createArmorEditor({state,$,groups,scene:designFrame,job:quickJob,loading,remember,selectEdit,refreshCheck,reportError,applyShow,camera,canvas:renderer.domElement,orbit,detach:()=>transformControl.detach(),stretchMode:()=>setTransformMode('scale')});
 const smokeEditor=createSmokeEditor({state,$,groups,scene:designFrame,job:quickJob,loading,remember,selectEdit,refreshCheck,reportError,applyShow,active:()=>inspector?.navigation.tool==='smoke'});
 const towingEditor=pointEditor({key:'towing',field:'tier',prefix:'towing',front:false,color:0x7fb6ff,state,$,groups,scene:designFrame,remember,selectEdit,refreshCheck,reportError,applyShow,active:()=>inspector?.navigation.tool==='towing'});
 const chargeEditor=pointEditor({key:'charge',field:'charge',prefix:'charge',front:true,color:0xff6a3d,state,$,groups,scene:designFrame,remember,selectEdit,refreshCheck,reportError,applyShow,active:()=>inspector?.navigation.tool==='charge'});
 const riderEditor=createRiderEditor({state,$,groups,scene:designFrame,job:quickJob,loading,remember,selectEdit,refreshCheck,reportError,applyShow,makeSeat:seat=>makeSeatFigure(seat,'rider_mgs'),active:()=>inspector?.navigation.tool==='rider'});
+const mountedEditor=createMountedEditor({state,$,groups,scene:designFrame,job:quickJob,loading,remember,selectEdit,refreshCheck,reportError,applyShow,roleName,active:()=>inspector?.navigation.tool==='mounted',
+  // Replace gun's MG / AT rifle change is moved on its mount in the tool that has the gizmo.
+  openPlacement:()=>{if(inspector?.navigation.tool!=='mounted'){inspector?.navigation.finish();inspector?.navigation.open('mounted');}},onSlots:()=>gunEditor.controls()});
 const passengerEditor=createPassengerEditor({state,$,groups,scene:designFrame,job:quickJob,loading,remember,selectEdit,refreshCheck,reportError,applyShow,makeSeat:seat=>makeSeatFigure(seat,'passenger_seats'),reposeSeat,active:()=>inspector?.navigation.tool==='passengers'});
+// Who works each weapon: a crewman can work several; a seat that aims nothing can stay in reserve.
+var weaponOperators=createWeaponOperatorsEditor({state,$,remember,refreshCheck,roleName,enabled:()=>draftEditor.active()||!!state.transform.commander_only});
+// Extra crew go on the part the crew tool edits, beside a native seat of the same job.
+var extraCrew=createExtraCrewEditor({state,$,scene:designFrame,control:transformControl,remember,refreshCheck,applyShow,makeSeat:seat=>makeSeatFigure(seat,'extra_crew'),
+  part:()=>draftEditor.active()?($('design-module-crew').value||(state.inspectorFocusPart==='hull'?'@hull':'')):crewPart()==='hull'?'@hull':'turret',
+  reference:role=>{let found=null;for(const part of ['turret','hull'])groups[part].traverse(n=>{if(!found&&n.userData?.seat==='crew'&&n.name.replace(/\d+$/,'')===role)found=n;});return found?found.getWorldPosition(new THREE.Vector3()):null;}});
 const templateLabel=template=>(state.catalog||[]).find(u=>(u.id||u.template)===template)?.label||(state.campaign?.units||[]).find(u=>u.template===template)?.label||String(template||'').replaceAll('_',' ');
 // A template replaces the whole design, then every editor rebuilds from it, as when a built vehicle is opened.
 async function applyDesign(transform){resetAssemblyExtras();state.transform=transform;draftEditor.placeholder();$('operation-select').value=transform.assembly_draft.guns?.length?'gun':'turret';
-  await draftEditor.refresh();await gunEditor.restore();await cmdEditor.restore();await armorEditor.restore();await smokeEditor.restore();towingEditor.restore();chargeEditor.restore();await riderEditor.restore();await passengerEditor.restore();mobility.refresh();weaponAttributes.refresh(true);updateSelection();updateBuild();}
+  await draftEditor.refresh();await gunEditor.restore();await cmdEditor.restore();await armorEditor.restore();await smokeEditor.restore();towingEditor.restore();chargeEditor.restore();await riderEditor.restore();await mountedEditor.restore();await passengerEditor.restore();extraCrew.restore();mobility.refresh();weaponAttributes.refresh(true);updateSelection();updateBuild();}
 // A vehicle opened with Edit keeps a plain recipe: the template replaces it and its own mounts stay.
 async function applyRecipe(transform){const keep={...(state.transform.commander_only?{commander_only:true}:{}),...(state.transform.source_recipe?{source_recipe:state.transform.source_recipe}:{})};
   resetAssemblyExtras();const {recipient_mount,donor_mount,crew_static,...rest}=transform;
   state.transform={crew_seats:{},crew_exclude:[],crew_hidden:[],joint_limits:{},...rest,...keep};state.editSeat=null;
   if(typeof crew_static==='boolean')$('crew-static').checked=crew_static;
-  applyTransforms();await gunEditor.restore();await cmdEditor.restore();await armorEditor.restore();await smokeEditor.restore();towingEditor.restore();chargeEditor.restore();await riderEditor.restore();await passengerEditor.restore();mobility.refresh();weaponAttributes.refresh(true);updateSelection();refreshCheck();}
+  applyTransforms();await gunEditor.restore();await cmdEditor.restore();await armorEditor.restore();await smokeEditor.restore();towingEditor.restore();chargeEditor.restore();await riderEditor.restore();await mountedEditor.restore();await passengerEditor.restore();extraCrew.restore();mobility.refresh();weaponAttributes.refresh(true);updateSelection();refreshCheck();}
 const templateRecipe=()=>draftEditor.active()?{transform:draftEditor.transform(),recipient:state.hull.template,draft:true}:
   {transform:{...structuredClone(state.transform),recipient_mount:state.mounts.hull,donor_mount:state.mounts.turret,crew_static:$('crew-static').checked},recipient:state.hull.template,donor:state.turret?.template};
 const templateEditor=designTemplates({state,$,api,draftEditor,recipe:templateRecipe,applyDesign,applyRecipe,remember,reportError,status:message=>status(message),labelOf:templateLabel});
@@ -253,7 +268,7 @@ const pivotEditor=createPivotEditor({scene,control:transformControl,state,$,pose
 // the cases below only say which model, or which bones, a value stands for.
 const highlight=partHighlight({scene,groups,previews:()=>state.previews});
 const armorLayer=armorView({state,groups,camera,canvas:renderer.domElement,viewport});
-const HOST_PICKERS=['armor-parent','smoke-parent','rider-parent','passenger-parent','cmd-parent'];
+const HOST_PICKERS=['armor-parent','smoke-parent','rider-parent','mounted-parent','passenger-parent','cmd-parent','towing-parent','charge-parent','sight-parent','extra-crew-parent'];
 const CHASSIS_PICKERS=['turret-target','design-turret-pos','design-turret-limits','design-module-crew','turret-saved','turret-removed'];
 function hostPoint(name){const host=[...(state.check?.armor_hosts||[]),...(state.check?.hosts||[])].find(h=>h.name===name);if(!host)return null;
   const m=host.matrix;designFrame.updateWorldMatrix(true,false);return designFrame.localToWorld(new THREE.Vector3(m[0][3],m[1][3],m[2][3]));}
@@ -261,6 +276,18 @@ function partSpec(select,value){
   if(value===null||value===undefined||value==='')return select.id==='mount-select'&&state[state.edit]?{whole:state.edit}:null;
   if(value==='@hull')return {whole:'hull'};
   if(select.id==='gun-recipient'||select.id==='gun-donor'){const part=select.id==='gun-recipient'?'hull':'turret',bones=gunEditor.bones(part,value);return bones?{bones,parts:[part],subtree:false}:null;}
+  // Turret and gun limits: a joint is "part:bone" (weapon-joints.js jointKey).
+  if(select.id==='joint-select'){const [part,...rest]=String(value).split(':'),bone=rest.join(':');
+    return ['hull','turret'].includes(part)&&state.previews[part]?.bones?.some(b=>b.name===bone)?{bones:[bone],parts:[part]}:null;}
+  // A design's own mounts: the module being adjusted is drawn as the moving part;
+  // a saved one hangs in the drawn chassis under the bone its step gave it
+  // (a deck gun on "@free" is "module_turret" there).
+  if(CHASSIS_PICKERS.includes(select.id)&&state.transform.assembly_draft){
+    const adjusting=state.pendingTurret?state.pendingTurret.recipient_mount||'turret':null;
+    if(value===adjusting&&state.previews.turret?.meshes?.length)return {whole:'turret'};
+    const root=state.previews.hull?.module_roots?.[value];
+    if(root&&state.previews.hull?.bones?.some(b=>b.name===root))return {bones:[root],parts:['hull']};
+  }
   // A free deck mount has no bone: point at the deck spot once it is known.
   if(value==='@free'){if(!Array.isArray(state.freeAnchor))return null;groups.hull.updateWorldMatrix(true,false);return {bones:[],parts:['hull'],point:groups.hull.localToWorld(new THREE.Vector3(...state.freeAnchor))};}
   const bone=String(value).replace(/^@free:/,'');
@@ -272,9 +299,58 @@ function partSpec(select,value){
   if(HOST_PICKERS.includes(select.id))return {bones:[bone],parts,point:known?null:hostPoint(bone)};
   return known?{bones:[bone],parts}:null;
 }
-document.addEventListener('part-hover',event=>{const select=event.target;if(!(select instanceof HTMLSelectElement))return;
-  const value=event.detail?.value;if(value===null||value===undefined){highlight.clear();return;}
-  try{highlight.show(partSpec(select,value));}catch(error){console.warn('part highlight',error);highlight.clear();}});
+function modelCenter(group){const box=new THREE.Box3();group.updateWorldMatrix(true,true);
+  group.traverse(node=>{let seat=false;for(let n=node;n&&n!==group;n=n.parent)if(n.userData?.seat)seat=true;if(node.isMesh&&node.userData?.mesh&&!seat)box.expandByObject(node);});
+  return box.isEmpty()?null:box.getCenter(new THREE.Vector3());}
+// A crewman: his figure in the part that draws him under that place (a hidden
+// or reserve one gets a marker where he sits), an extra crewman the editor
+// draws, or, inside a tank where the model gives him no seat, a marker where he
+// works (the weapon he works, else a hatch named after him, else the part's middle).
+function showCrew(place,part){
+  const parts=part?[part]:vehiclePlaceParts(state)||['hull','turret'],figures=[];
+  for(const key of parts)groups[key]?.traverse(node=>{if(node.userData?.seat==='crew'&&node.name===place)figures.push(node);});
+  if(!figures.length){const index=(state.previews.hull?.extra_crew_places||[]).indexOf(place);
+    const host=index>=0?extraCrew?.group?.children.find(h=>h.userData?.crewIndex===index):null;if(host)figures.push(host);}
+  if(figures.length)return highlight.showObjects(figures);
+  for(const key of parts){const spot=(state.previews[key]?.internal_seats||[]).find(s=>s.place===place),group=groups[key];if(!spot||!group)continue;
+    group.updateWorldMatrix(true,false);const point=spot.position?group.localToWorld(new THREE.Vector3(...spot.position)):modelCenter(group);
+    if(point)return highlight.show({bones:[],parts:[],point});}
+  return highlight.show(null);
+}
+// A weapon: the bone it hangs from, else the innermost joint that turns it.
+function showWeapon(place,bone){
+  bone??=state.check?.operators?.find(row=>row.place===place)?.bone;
+  for(const part of ['hull','turret'])if(bone&&state.previews[part]?.bones?.some(b=>b.name===bone))return highlight.show({bones:[bone],parts:[part]});
+  let best=null;
+  for(const part of ['hull','turret']){const data=state.previews[part];if(!data)continue;const parents=new Map((data.bones||[]).map(b=>[b.name,b.parent]));
+    const depth=name=>{let d=0;for(const seen=new Set();name&&!seen.has(name);name=parents.get(name)){seen.add(name);d++;}return d;};
+    for(const joint of data.joints||[])if((joint.weapons||[]).includes(place)){const d=depth(joint.bone);if(!best||d>best.d)best={part,bone:joint.bone,d};}}
+  return highlight.show(best?{bones:[best.bone],parts:[best.part]}:null);
+}
+// A placed fitting in its own list (data-pick="fitting:<group>"): rows follow the group's order.
+function fittingObjects(key,value){
+  const index=Number(String(value).replace(/^a:/,'')),found=[];
+  if(key==='cargo'){groups.turret.traverse(n=>{if(n.userData?.cargoIndex===index)found.push(n);});return found;}
+  if(key==='passenger_seats'&&String(value).startsWith('n:')){const place=String(value).slice(2);
+    for(const part of ['hull','turret'])groups[part].traverse(n=>{if(n.userData?.seat==='passenger'&&n.name===place)found.push(n);});return found;}
+  const children=(key==='extra_crew'?extraCrew?.group:groups[key])?.children||[],own={passenger_seats:'seatIndex',mounted_weapons:'mountedIndex',extra_crew:'crewIndex'}[key];
+  const host=own?children.find(h=>h.userData?.[own]===index):children[index];return host?[host]:[];
+}
+function showMark(mark){
+  if(!mark){highlight.clear();return;}
+  const select=mark.select instanceof HTMLSelectElement?mark.select:null,pick=select?.dataset.pick||'';
+  if(select&&pick==='crew')return showCrew(mark.value);
+  if(select&&pick==='weapon')return showWeapon(mark.value);
+  // A saved gun change marks the weapon it replaced on the vehicle.
+  if(select&&pick==='saved-gun'){const value=String(mark.value),guns=state.transform.assembly_draft?.guns||state.transform.gun_swaps||[];
+    return showWeapon(value.startsWith('slot:')?value.slice(5):guns[Number(value)]?.recipient_place);}
+  if(select&&pick.startsWith('fitting:'))return highlight.showObjects(fittingObjects(pick.slice(8),mark.value));
+  if(select)return highlight.show(partSpec(select,mark.value));
+  if(mark.crew)return showCrew(mark.crew,mark.part);
+  if(mark.weapon)return showWeapon(mark.weapon,mark.bone);
+  highlight.clear();
+}
+var marks=hoverMarks({selectOf:selectOfButton,show:mark=>{try{showMark(mark);}catch(error){console.warn('part highlight',error);highlight.clear();}}});
 const jointEditor=weaponJointEditor({state,groups,$,remember,refreshCheck,active:()=>inspector?.navigation.tool==='joints',level:part=>levelJointFrame(part),limitsOf:jointLimits});
 const mobility=mobilityEditor({state,$,remember,refreshCheck});
 const weaponAttributes=weaponAttributesEditor({state,$,remember});
@@ -283,7 +359,7 @@ let syncing=false;
 transformControl.addEventListener('objectChange',()=>{if(syncing||state.busy||state.inspectorPending>0||!inspector?.navigation.tool||!state.qolCanEdit?.())return;
   // Stretching a made-to-measure plate: the handles' scale becomes its measures, never a scaled piece.
   if(!state.editSeat&&transformControl.getMode()==='scale'){armorEditor.stretch(pivotEditor.proxy.scale.toArray());pivotEditor.proxy.scale.set(1,1,1);pivotEditor.sync();return;}
-  if(!state.editSeat&&pivotEditor.capture()){updateFields();return;}if(state.editSeat){crewPose.capture();return;}if(smokeEditor.capture()||towingEditor.capture()||chargeEditor.capture()||riderEditor.capture()||passengerEditor.capture()||armorEditor.capture()||supportEditor.capture()){updateFields();return;}const part=state.edit,g=groups[part],base=part==='turret'?moduleBase():[0,0,0];state.transform[part].position=g.position.toArray().map((v,i)=>Number((v-base[i]).toFixed(3)));const e=new THREE.Euler().setFromQuaternion(g.quaternion,'ZYX');state.transform[part].rotation=[e.x,e.y,e.z].map(v=>Number(THREE.MathUtils.radToDeg(v).toFixed(3)));updateFields();});
+  if(extraCrew.capture())return;if(!state.editSeat&&pivotEditor.capture()){updateFields();return;}if(state.editSeat){crewPose.capture();return;}if(smokeEditor.capture()||towingEditor.capture()||chargeEditor.capture()||riderEditor.capture()||mountedEditor.capture()||passengerEditor.capture()||armorEditor.capture()||supportEditor.capture()){updateFields();return;}const part=state.edit,g=groups[part],base=part==='turret'?moduleBase():[0,0,0];state.transform[part].position=g.position.toArray().map((v,i)=>Number((v-base[i]).toFixed(3)));const e=new THREE.Euler().setFromQuaternion(g.quaternion,'ZYX');state.transform[part].rotation=[e.x,e.y,e.z].map(v=>Number(THREE.MathUtils.radToDeg(v).toFixed(3)));updateFields();});
 function resize(){const width=viewport.clientWidth,height=viewport.clientHeight;renderer.setSize(width,height);camera.aspect=width/height;camera.updateProjectionMatrix();}new ResizeObserver(resize).observe(viewport);
 // The near plane follows the orbit distance: a fixed tiny one wasted the depth
 // buffer, so close surfaces (armour plates on the hull) flickered when zoomed in.
@@ -298,7 +374,7 @@ function animate(now){requestAnimationFrame(animate);const aiming=sight.view(cam
   if(document.hidden||(!moved&&now>activeUntil&&now-lastFrame<250))return;
   lastFrame=now;fitClipPlanes();updateSeatFrames(groups,camera);const helper=transformControl.getHelper(),visible=helper.visible;if(aiming)helper.visible=false;viewPieces?.restore();viewPieces?.apply();renderer.render(scene,aiming||camera);helper.visible=visible;}requestAnimationFrame(animate);
 
-function disposeGroup(group){while(group.children.length){const child=group.children[0];group.remove(child);child.traverse(node=>{if(!node.userData?.keepGeometry)node.geometry?.dispose();const flat=node.userData?.flat;if(flat&&flat!==node.material)flat.dispose();for(const m of [node.material].flat())if(m&&!m.userData?.shared)m.dispose();});}}
+function disposeGroup(group){while(group.children.length){const child=group.children[0];group.remove(child);child.traverse(node=>{if(!node.userData?.keepGeometry)node.geometry?.dispose();for(const extra of [node.userData?.flat,node.userData?.untextured])if(extra&&extra!==node.material&&!extra.userData?.shared)extra.dispose();for(const m of [node.material].flat())if(m&&!m.userData?.shared)m.dispose();});}}
 function displayPart(part,data){disposeGroup(groups[part]);for(const mesh of data.meshes){const geometry=new THREE.BufferGeometry();geometry.setAttribute('position',new THREE.Float32BufferAttribute(mesh.positions,3));if(mesh.normals?.length)geometry.setAttribute('normal',new THREE.Float32BufferAttribute(mesh.normals,3));if(mesh.uv?.length)geometry.setAttribute('uv',new THREE.Float32BufferAttribute(mesh.uv,2));if(mesh.indices?.length)geometry.setIndex(mesh.indices);if(!mesh.normals?.length)geometry.computeVertexNormals();const material=new THREE.MeshStandardMaterial({color:mesh.color==='#d2a150'?0xc5a36b:mesh.color==='#7696a8'?0x7b9dab:part==='hull'?0x7b9dab:0xc5a36b,metalness:.16,roughness:.84,side:THREE.DoubleSide,wireframe:state.wire});const object=new THREE.Mesh(geometry,material);object.name=mesh.bone||mesh.name||part;object.userData={mesh,flat:material};if(!(part==='turret'&&supportEditor.addMesh(mesh,object)))groups[part].add(object);}state.previews[part]=data;addSeats(part,data);applyShow();applyTransforms();refreshFreeAnchor();refreshCheck();$('crew-static-field').classList.toggle('hidden',!state.previews.turret?.carried);renderCrewList();$('viewport-empty').classList.add('hidden');updateDiagnostics();updateMeshInfo();updateMounts();fitNewVehicle();selectEdit(state.edit);}
 // Only another vehicle moves the camera: the same one drawn again keeps the player's view.
 // In the next microtask, so a vehicle whose two parts arrive together is framed whole.
@@ -334,14 +410,14 @@ async function refreshFreeAnchor(){
 // A module's position counts from its free spot: moved to another one it stays where it was put.
 function keepFreePlace(part,before){const after=state.freeAnchor;if(part!=='hull'||!Array.isArray(before)||!Array.isArray(after))return;const pose=state.transform.turret;pose.position=pose.position.map((value,axis)=>value+before[axis]-after[axis]);applyTransforms();}
 function moduleBase(){const a=(hullIsFree()&&state.freeAnchor)||state.previews.hull?.anchor||[0,0,0];return [a[0],a[1],a[2]+seatOffset()];}
-function applyTransforms(){sight.sync();queueMicrotask(updateStaticSeats);syncing=true;if(draftEditor.active()){if(groups.hull.parent!==designFrame)designFrame.add(groups.hull,moduleCarrier);applyPose(designFrame,state.transform.hull);}else{if(groups.hull.parent!==scene)scene.add(groups.hull,moduleCarrier);designFrame.position.set(0,0,0);designFrame.rotation.set(0,0,0);designFrame.scale.set(1,1,1);}if(supportEditor.active()){for(const part of ['hull','turret']){groups[part].position.set(0,0,0);groups[part].rotation.set(0,0,0);groups[part].scale.set(1,1,1);}const node=supportEditor.target(),pose=supportEditor.pose();if(node){applyPose(node,pose);}armorEditor.sync();smokeEditor.sync();towingEditor.sync();chargeEditor.sync();riderEditor.sync();passengerEditor.sync();pivotEditor.sync();syncing=false;return;}for(const part of ['hull','turret']){const t=state.transform[part],anchor=part==='turret'?moduleBase():[0,0,0];if(draftEditor.active()&&part==='hull'){groups.hull.position.set(0,0,0);groups.hull.rotation.set(0,0,0);groups.hull.scale.set(1,1,1);}else applyPose(groups[part],t,anchor);}cmdEditor.sync();armorEditor.sync();smokeEditor.sync();towingEditor.sync();chargeEditor.sync();riderEditor.sync();passengerEditor.sync();pivotEditor.sync();syncing=false;}
+function applyTransforms(){sight.sync();queueMicrotask(updateStaticSeats);syncing=true;if(draftEditor.active()){if(groups.hull.parent!==designFrame)designFrame.add(groups.hull,moduleCarrier);applyPose(designFrame,state.transform.hull);}else{if(groups.hull.parent!==scene)scene.add(groups.hull,moduleCarrier);designFrame.position.set(0,0,0);designFrame.rotation.set(0,0,0);designFrame.scale.set(1,1,1);}if(supportEditor.active()){for(const part of ['hull','turret']){groups[part].position.set(0,0,0);groups[part].rotation.set(0,0,0);groups[part].scale.set(1,1,1);}const node=supportEditor.target(),pose=supportEditor.pose();if(node){applyPose(node,pose);}armorEditor.sync();smokeEditor.sync();towingEditor.sync();chargeEditor.sync();riderEditor.sync();mountedEditor.sync();passengerEditor.sync();extraCrew.sync();pivotEditor.sync();syncing=false;return;}for(const part of ['hull','turret']){const t=state.transform[part],anchor=part==='turret'?moduleBase():[0,0,0];if(draftEditor.active()&&part==='hull'){groups.hull.position.set(0,0,0);groups.hull.rotation.set(0,0,0);groups.hull.scale.set(1,1,1);}else applyPose(groups[part],t,anchor);}cmdEditor.sync();armorEditor.sync();smokeEditor.sync();towingEditor.sync();chargeEditor.sync();riderEditor.sync();mountedEditor.sync();passengerEditor.sync();extraCrew.sync();pivotEditor.sync();syncing=false;}
 function fitView(direction='perspective'){const box=new THREE.Box3();for(const group of Object.values(groups))if(group.children.length)box.union(new THREE.Box3().setFromObject(group));if(box.isEmpty())return;const center=box.getCenter(new THREE.Vector3()),size=box.getSize(new THREE.Vector3()),radius=Math.max(size.x,size.y,size.z,20)*1.65;const vectors={perspective:[1,1.25,.8],front:[1,0,.15],side:[0,1,.15],top:[0,.001,1]};/* vehicles face +X; +Y is their right */const vector=new THREE.Vector3(...(vectors[direction]||vectors.perspective)).normalize();camera.position.copy(center).addScaledVector(vector,radius);orbit.target.copy(center);camera.near=Math.max(.01,radius/1000);camera.far=Math.max(10000,radius*30);camera.updateProjectionMatrix();orbit.update();}
 function updateMeshInfo(){const values=Object.values(state.previews),triangles=values.reduce((n,v)=>n+(v.stats?.triangles||0),0),meshes=values.reduce((n,v)=>n+(v.stats?.meshes||0),0);$('mesh-info').textContent=`${meshes} piezas · ${triangles.toLocaleString('es-AR')} triángulos`;}
 function diagnosticText(d){const messages={mass_requires_component_data:'Se conserva el peso declarado del chasis. Los recursos no separan el peso de la torreta.',animation_rotation_gate:'La orientación del montaje necesita comprobarse en el juego.',wreck_runtime_gate:'Los estados de destrucción necesitan comprobarse en el juego.'};return messages[d.code]||d.message||d.code||String(d);}
 function updateDiagnostics(){$('model-diagnostics').replaceChildren();for(const data of Object.values(state.previews))for(const diagnostic of data.diagnostics||[]){const p=document.createElement('div');p.textContent=diagnosticText(diagnostic);$('model-diagnostics').append(p);}}
 function mountLabel(name){if(name==='@free')return'Libre: sobre la cubierta (no quita nada)';if(String(name).startsWith('@free:')){const spot=name.slice(6),anchor=state.previews.hull?.mounts?.find(m=>!String(m).startsWith('@free'));return spot===anchor||spot==='turret'?'Libre: sobre el techo de la torreta (gira con ella, no quita nada)':'Libre: sobre '+spot.replace(/_/g,' ')+' (escotilla, no quita nada)';}return name==='turret'?'Torreta: reemplazarla (turret)':'Reemplazar: '+String(name).replace(/_/g,' ');}
 function updateMounts(){const data=state.previews[state.edit],mounts=data?.mounts||[];$('mount-select').replaceChildren();for(const name of mounts){const option=new Option(mountLabel(name),name);$('mount-select').add(option);}if(!mounts.length)$('mount-select').add(new Option('Pieza completa (sin punto de giro)',''));$('mount-select').value=state.mounts[state.edit]||data?.anchor_name||mounts[0]||'';$('mount-select').title=state.edit==='hull'?'Dónde va el arma: en lugar de la torreta o libre sobre la cubierta, conservando todo':'Parte del donante que se traslada';const heading=$('mount-select').labels?.[0];if(heading)heading.textContent=t(state.edit==='turret'?'Punto de montaje del donante':'Punto de montaje');}
-function poseTarget(){const part=state.edit;if(part==='sight')return sight.target();if(draftEditor.active()&&part==='hull')return designFrame;return part==='towing'?towingEditor.target():part==='charge'?chargeEditor.target():part==='smoke_launchers'?smokeEditor.target():part==='rider_mgs'?riderEditor.target():part==='passenger_seats'?passengerEditor.target():part==='extra_armor'?armorEditor.target():supportEditor.active()&&part==='turret'?supportEditor.target():groups[part];}
+function poseTarget(){const part=state.edit;if(part==='sight')return sight.target();if(draftEditor.active()&&part==='hull')return designFrame;return part==='towing'?towingEditor.target():part==='charge'?chargeEditor.target():part==='smoke_launchers'?smokeEditor.target():part==='rider_mgs'?riderEditor.target():part==='mounted_weapons'?mountedEditor.target():part==='passenger_seats'?passengerEditor.target():part==='extra_armor'?armorEditor.target():supportEditor.active()&&part==='turret'?supportEditor.target():groups[part];}
 function selectEdit(part){
   qol?.select();
   if(inspector&&!inspector.navigation.accepts(part))return;
@@ -357,7 +433,7 @@ function selectEdit(part){
   if(canPlaceCrew(crewFigure,state.transform.crew_exclude||[])&&!crewHidden(state,crewPart(),crewPlace)){
     state.editSeat=crewPlace;crewPose.attach();renderCrewList();
   }
-  updateFields();updateMounts();cmdEditor.sync();armorEditor.sync();smokeEditor.sync();towingEditor.sync();chargeEditor.sync();riderEditor.sync();passengerEditor.sync();jointEditor.refresh();mobility.refresh();weaponAttributes.refresh(true);
+  updateFields();updateMounts();cmdEditor.sync();armorEditor.sync();smokeEditor.sync();towingEditor.sync();chargeEditor.sync();riderEditor.sync();mountedEditor.sync();passengerEditor.sync();extraCrew.sync();jointEditor.refresh();mobility.refresh();weaponAttributes.refresh(true);
   if(supportEditor.active())supportEditor.controls();inspector?.render();
 }
 function requireFinishedTool(){if(!inspector?.navigation.tool||inspector.navigation.tool==='operation')return true;status(t('Terminá la herramienta actual antes de cambiar de vehículo u operación.'));return false;}
@@ -368,7 +444,7 @@ async function toolOperation(run){
   try{return await run();}
   finally{
     const cancelled=state.toolController.signal.aborted;state.toolController=null;state.toolCancellable=false;
-    try{if(cancelled){toolActivity.stage('Restaurando el diseño anterior…');state.transform=before;if(selection){state.turret=selection.turret;state.pendingTurret=selection.pendingTurret;}await cmdEditor.restore();await armorEditor.restore();await smokeEditor.restore();towingEditor.restore();chargeEditor.restore();await riderEditor.restore();await passengerEditor.restore();await gunEditor.restore();await supportEditor.restore();if(selection)await state.restoreDesign?.();applyTransforms();status('Operación cancelada.');}}finally{state.inspectorPending=0;toolActivity.finish();inspector?.render();renderCrewList();if(cancelled)refreshCheck();}
+    try{if(cancelled){toolActivity.stage('Restaurando el diseño anterior…');state.transform=before;if(selection){state.turret=selection.turret;state.pendingTurret=selection.pendingTurret;}await cmdEditor.restore();await armorEditor.restore();await smokeEditor.restore();towingEditor.restore();chargeEditor.restore();await riderEditor.restore();await mountedEditor.restore();await passengerEditor.restore();extraCrew.restore();await gunEditor.restore();await supportEditor.restore();if(selection)await state.restoreDesign?.();applyTransforms();status('Operación cancelada.');}}finally{state.inspectorPending=0;toolActivity.finish();inspector?.render();renderCrewList();if(cancelled)refreshCheck();}
   }
 }
 
@@ -384,11 +460,11 @@ async function stepHistory(direction){
   const value=history.step(direction,snapshotTransform());
   if(value===null){status(t(direction==='undo'?'Sin cambios para deshacer.':'Sin cambios para rehacer.'));updateHistoryButtons();return;}
   state.transform=JSON.parse(value);const selection=state.transform._editor_selection;delete state.transform._editor_selection;if(selection){state.turret=selection.turret;state.pendingTurret=selection.pendingTurret;}state.crewVisibility=null;updateFields();applyTransforms();
-  await toolOperation(async()=>{await cmdEditor.restore();await armorEditor.restore();await smokeEditor.restore();towingEditor.restore();chargeEditor.restore();await riderEditor.restore();await passengerEditor.restore();await gunEditor.restore();await supportEditor.restore();if(draftEditor.active()&&!gunEditor.active())await draftEditor.refresh(state.pendingTurret);});
-  selectEdit(inspector.navigation.part());jointEditor.refresh();mobility.refresh();weaponAttributes.refresh(true);renderCrewList();refreshCheck();updateBuild();updateHistoryButtons();
+  await toolOperation(async()=>{await cmdEditor.restore();await armorEditor.restore();await smokeEditor.restore();towingEditor.restore();chargeEditor.restore();await riderEditor.restore();await mountedEditor.restore();await passengerEditor.restore();extraCrew.restore();await gunEditor.restore();await supportEditor.restore();if(draftEditor.active()&&!gunEditor.active())await draftEditor.refresh(state.pendingTurret);});
+  selectEdit(inspector.navigation.part());jointEditor.refresh();mobility.refresh();weaponAttributes.refresh(true);renderCrewList();refreshCheck();updateBuild();updateHistoryButtons();qol?.renderPieces();qol?.markPieces();
 }
 
-function editablePose(){if(state.edit==='sight')return sight.pose();if(draftEditor.active()&&state.edit==='turret'&&!state.pendingTurret&&!state.transform.gun_swap)return null;if(state.edit==='turret'&&(state.transform.gun_swap||Array.isArray(state.transform.gun_swaps))&&!(state.transform.gun_swap?.recipient_place&&state.transform.gun_swap?.donor_place))return null;return state.edit==='towing'?towingEditor.pose():state.edit==='charge'?chargeEditor.pose():state.edit==='smoke_launchers'?smokeEditor.pose():state.edit==='rider_mgs'?riderEditor.pose():state.edit==='passenger_seats'?passengerEditor.pose():state.edit==='extra_armor'?armorEditor.pose():supportEditor.active()&&state.edit==='turret'?supportEditor.pose():state.transform[state.edit];}
+function editablePose(){if(state.edit==='sight')return sight.pose();if(draftEditor.active()&&state.edit==='turret'&&!state.pendingTurret&&!state.transform.gun_swap)return null;if(state.edit==='turret'&&(state.transform.gun_swap||Array.isArray(state.transform.gun_swaps))&&!(state.transform.gun_swap?.recipient_place&&state.transform.gun_swap?.donor_place))return null;return state.edit==='towing'?towingEditor.pose():state.edit==='charge'?chargeEditor.pose():state.edit==='smoke_launchers'?smokeEditor.pose():state.edit==='rider_mgs'?riderEditor.pose():state.edit==='mounted_weapons'?mountedEditor.pose():state.edit==='passenger_seats'?passengerEditor.pose():state.edit==='extra_armor'?armorEditor.pose():supportEditor.active()&&state.edit==='turret'?supportEditor.pose():state.transform[state.edit];}
 function updateFields(){const pose=editablePose();if(!pose)return;for(const type of ['position','rotation'])for(let axis=0;axis<3;axis++)document.querySelector(`[data-transform="${type}"][data-axis="${axis}"]`).value=shown(pose[type][axis]);}
 for(const type of ['position','rotation'])for(let axis=0;axis<3;axis++){const div=document.createElement('div');div.className='axis-field';const label=document.createElement('label');label.textContent=['X','Y','Z'][axis];const input=document.createElement('input');input.type='number';input.step='1';input.value=0;input.dataset.transform=type;input.dataset.axis=axis;input.setAttribute('aria-label',`${type==='position'?'Posición':'Orientación'} ${label.textContent}`);input.addEventListener('focus',remember);input.addEventListener('input',()=>{const value=Number(input.value);if(inspector?.navigation.pose()&&!state.busy&&!state.inspectorPending&&editablePose()&&(!viewPieces||viewPieces.canEdit(poseTarget()))&&Number.isFinite(value)){editablePose()[type][axis]=value;applyTransforms();}});div.append(label,input);$(type+'-fields').append(div);}
 document.querySelectorAll('[data-transform]').forEach(input=>input.addEventListener('change',refreshCheck));
@@ -413,25 +489,32 @@ function updatePick(){for(const mode of ['hull','turret','edit','delete','disman
 // fill both slots (its stored recipe for workshop vehicles) and only that unit
 // is rebuilt. Leaving the mode empties the slots.
 function setPick(mode){if(state.busy||!requireFinishedTool())return;const wasEdit=['edit','delete','dismantle'].includes(state.pick);state.pick=mode;if(wasEdit!==['edit','delete','dismantle'].includes(mode)&&(state.hull||state.turret)){state.editing=null;clearPart('hull');clearPart('turret');}updatePick();updateBuild();}
-async function editVehicle(unit){if(state.tab!=='campaign'||!unit.eid){status(t('Para editar, elegí un vehículo de tu partida.'));return;}
-  try{await loading('Abriendo vehículo',async()=>{const source=await pollJob('/api/edit-source',{eid:unit.eid});state.designOrigin={eid:unit.eid,recipient:source.recipient,donor:source.donor};const tr=source.transform||{};if(tr.assembly_draft){forgetHistory();resetAssemblyExtras();state.editing={eid:unit.eid,recipe:true};state.hull={...unit,template:source.recipient};state.transform=structuredClone(tr);draftEditor.placeholder();$('operation-select').value=tr.assembly_draft.guns.length?'gun':'turret';await draftEditor.refresh();await gunEditor.restore();await cmdEditor.restore();await armorEditor.restore();await smokeEditor.restore();towingEditor.restore();chargeEditor.restore();await riderEditor.restore();await passengerEditor.restore();state.nameEdited=true;$('vehicle-name').value=unit.label||plainName(unit);updateSelection();return;}if(tr.support_vehicle){forgetHistory();resetAssemblyExtras();state.editing={eid:unit.eid,recipe:source.recipe};state.hull={...unit,template:source.recipient};state.turret={...unit,template:source.donor,label:t('Carga de apoyo')};state.transform=structuredClone(tr);state.transform.hull??={position:[0,0,0],rotation:[0,0,0]};state.transform.turret??={position:[0,0,0],rotation:[0,0,0]};await supportEditor.restore();await armorEditor.restore();await smokeEditor.restore();towingEditor.restore();chargeEditor.restore();await riderEditor.restore();await passengerEditor.restore();state.nameEdited=true;$('vehicle-name').value=unit.label||plainName(unit);updateSelection();return;}const zero=()=>({position:[0,0,0],rotation:[0,0,0]});
+// A vehicle of the Conquest shop opens the same way, from its saved recipe and
+// with catalog parts (no campaign needed): building sells the new version in
+// its place (state.shopEdit).
+async function editVehicle(unit,shop=null){if(!shop&&(state.tab!=='campaign'||!unit.eid)){status(t('Para editar, elegí un vehículo de tu partida.'));return;}
+  try{await loading('Abriendo vehículo',async()=>{const source=await pollJob('/api/edit-source',shop?{shop:shop.id}:{eid:unit.eid});if(shop)unit={template:source.recipient,label:source.name||shop.name,kind:'vehicle',creative:true,depot:'creative'};const editing=extra=>{state.shopEdit=shop?{id:shop.id,name:source.name||shop.name,recipient:source.recipient,custom_cost:source.custom_cost??null}:null;return {eid:unit.eid,...extra,...(shop?{shop:shop.id}:{})};};state.designOrigin={eid:unit.eid,recipient:source.recipient,donor:source.donor};const tr=source.transform||{};if(tr.assembly_draft){forgetHistory();resetAssemblyExtras();state.editing=editing({recipe:true});state.hull={...unit,template:source.recipient};state.transform=structuredClone(tr);draftEditor.placeholder();$('operation-select').value=tr.assembly_draft.guns.length?'gun':'turret';await draftEditor.refresh();await gunEditor.restore();await cmdEditor.restore();await armorEditor.restore();await smokeEditor.restore();towingEditor.restore();chargeEditor.restore();await riderEditor.restore();await mountedEditor.restore();await passengerEditor.restore();extraCrew.restore();state.nameEdited=true;$('vehicle-name').value=unit.label||plainName(unit);updateSelection();return;}if(tr.support_vehicle){forgetHistory();resetAssemblyExtras();state.editing=editing({recipe:source.recipe});state.hull={...unit,template:source.recipient};state.turret={...unit,template:source.donor,label:t('Carga de apoyo')};state.transform=structuredClone(tr);state.transform.hull??={position:[0,0,0],rotation:[0,0,0]};state.transform.turret??={position:[0,0,0],rotation:[0,0,0]};await supportEditor.restore();await armorEditor.restore();await smokeEditor.restore();towingEditor.restore();chargeEditor.restore();await riderEditor.restore();await mountedEditor.restore();await passengerEditor.restore();extraCrew.restore();state.nameEdited=true;$('vehicle-name').value=unit.label||plainName(unit);updateSelection();return;}const zero=()=>({position:[0,0,0],rotation:[0,0,0]});
     $('operation-select').value=(tr.gun_swap||tr.gun_swaps?.length)?'gun':'turret';gunEditor.controls();supportEditor.controls();
     const gunData=(tr.gun_swap||tr.gun_swaps?.length)?await pollJob('/api/gun-preview',{hull:source.recipient,donor:source.donor,gun_swap:tr.gun_swap,gun_swaps:tr.gun_swaps}):null;
     const hull=gunData?.hull||await pollJob('/api/preview',{template:source.recipient,part:tr.commander_only?'full':'hull',mount:tr.commander_only?undefined:tr.recipient_mount||undefined});
     const turret=gunData?.turret||(tr.commander_only?{meshes:[],seats:[],mounts:[],diagnostics:[]}:await pollJob('/api/preview',{template:source.donor,part:'turret',mount:tr.donor_mount||undefined}));
-    forgetHistory();resetAssemblyExtras();state.editing={eid:unit.eid,recipe:source.recipe};
+    forgetHistory();resetAssemblyExtras();state.editing=editing({recipe:source.recipe});
     state.hull={...unit,template:source.recipient};state.turret={...unit,template:source.donor};
     state.mounts={hull:tr.recipient_mount||hull.anchor_name||'',turret:tr.donor_mount||turret.anchor_name||''};
     state.transform={...(tr.gun_swap?{gun_swap:structuredClone(tr.gun_swap)}:{}),...(tr.gun_swaps?{gun_swaps:structuredClone(tr.gun_swaps)}:{}),hull:tr.hull||zero(),turret:tr.turret||zero(),crew_seats:tr.crew_seats||{},crew_exclude:tr.crew_exclude||[],crew_hidden:tr.crew_hidden||[],joint_limits:tr.joint_limits||{},...(tr.commander_only?{commander_only:true}:{}),...(tr.commander_mg?{commander_mg:structuredClone(tr.commander_mg)}:{})};state.editSeat=null;
     if(typeof tr.crew_static==='boolean')$('crew-static').checked=tr.crew_static;
     if(tr.source_recipe)state.transform.source_recipe=structuredClone(tr.source_recipe);
+    if(tr.removed_meshes?.length)state.transform.removed_meshes=[...tr.removed_meshes];
     if(tr.extra_armor)state.transform.extra_armor=structuredClone(tr.extra_armor);
     if(tr.smoke_launchers)state.transform.smoke_launchers=structuredClone(tr.smoke_launchers);
     if(tr.rider_mgs)state.transform.rider_mgs=structuredClone(tr.rider_mgs);
+    if(tr.mounted_weapons)state.transform.mounted_weapons=structuredClone(tr.mounted_weapons);
     if(tr.passenger_seats)state.transform.passenger_seats=structuredClone(tr.passenger_seats);
-    displayPart('hull',hull);displayPart('turret',turret);await gunEditor.restore();await cmdEditor.restore();await armorEditor.restore();await smokeEditor.restore();towingEditor.restore();chargeEditor.restore();await riderEditor.restore();await passengerEditor.restore();state.nameEdited=true;$('vehicle-name').value=unit.label||plainName(unit);updateSelection();selectEdit(tr.commander_only?'hull':'turret');
+    if(tr.extra_crew)state.transform.extra_crew=structuredClone(tr.extra_crew);
+    displayPart('hull',hull);displayPart('turret',turret);await gunEditor.restore();await cmdEditor.restore();await armorEditor.restore();await smokeEditor.restore();towingEditor.restore();chargeEditor.restore();await riderEditor.restore();await mountedEditor.restore();await passengerEditor.restore();extraCrew.restore();state.nameEdited=true;$('vehicle-name').value=unit.label||plainName(unit);updateSelection();selectEdit(tr.commander_only?'hull':'turret');
     status(t('Editando: mové o rotá el montaje y sus tripulantes, después construí. Solo cambia esta unidad.'));},'Vehículo cargado');}
-  catch(error){reportError(error);}}
+  catch(error){reportError(error);return;}
+  if(shop&&state.shopEdit)status(t('Editando un vehículo de la Tienda: al construir, la Tienda vende esta versión en lugar de la anterior.'));}
 // A saved design shows its donors, not the placeholder that stands for the next one.
 function donorNames(){if(!state.turret.designPlaceholder)return plainName(state.turret);const d=draftEditor.draft()||{};
   return [...new Set([...(d.turrets||[]),...(d.guns||[])].map(r=>{const unit=(state.campaign?.units||[]).find(u=>u.eid===r.donor_eid);return unit?plainName(unit):String(r.donor_template||'').replace(/\([^()]*\)$/,'');}).filter(Boolean))].join(' + ');}
@@ -443,17 +526,17 @@ const ROLE_NAMES={driver:'Conductor',gunner:'Artillero',commander:'Comandante',c
 function roleName(role){const base=String(role).replace(/\d+$/,'');return t(ROLE_NAMES[base]||role);}
 // Where a crew member stands cannot make a vehicle incompatible: moving one is no new check.
 // Moving armour, smoke tubes, a hook or a charge is no new check: only what is fitted and where it hangs decides if it builds.
-function checkKey(){if(!state.hull||!state.turret)return '';const {crew_seats,weapon_attributes,...checked}=checkTransform();return JSON.stringify([state.hull.template,state.turret.template,withoutPlacement(checked,LOOSE_FITTINGS)]);}
+function checkKey(){if(!state.hull||!state.turret)return '';const {crew_seats,weapon_attributes,removed_meshes,...checked}=checkTransform();return JSON.stringify([state.hull.template,state.turret.template,withoutPlacement(checked,LOOSE_FITTINGS)]);}
 function checkTransform(){if(draftEditor.active())return {...draftEditor.transform(),crew_static:$('crew-static').checked};return{...state.transform,recipient_mount:state.mounts.hull||undefined,donor_mount:state.mounts.turret||undefined,crew_static:$('crew-static').checked};}
-function resetAssemblyExtras(){delete state.transform.smoke_launchers;smokeEditor.restore();delete state.transform.towing;towingEditor.restore();delete state.transform.charge;chargeEditor.restore();delete state.transform.rider_mgs;riderEditor.restore();delete state.transform.passenger_seats;passengerEditor.restore();delete state.transform.extra_armor;armorEditor.restore();delete state.transform.crew_hidden;delete state.transform.crew_fixed;state.crewVisibility=null;crewVisibility.render();delete state.transform.commander_only;delete state.transform.commander_mg;cmdEditor.restore();if(['commander_mg','extra_armor','smoke_launchers','rider_mgs','passenger_seats'].includes(state.edit))selectEdit('hull');}
+function resetAssemblyExtras(){delete state.transform.removed_meshes;delete state.transform.smoke_launchers;smokeEditor.restore();delete state.transform.towing;towingEditor.restore();delete state.transform.charge;chargeEditor.restore();delete state.transform.rider_mgs;riderEditor.restore();delete state.transform.mounted_weapons;mountedEditor.restore();delete state.transform.passenger_seats;passengerEditor.restore();delete state.transform.extra_crew;extraCrew.restore();delete state.transform.extra_armor;armorEditor.restore();delete state.transform.crew_hidden;delete state.transform.crew_fixed;state.crewVisibility=null;crewVisibility.render();delete state.transform.commander_only;delete state.transform.commander_mg;cmdEditor.restore();if(['commander_mg','extra_armor','smoke_launchers','rider_mgs','passenger_seats'].includes(state.edit))selectEdit('hull');}
 async function refreshCheck(){if(draftEditor.active()&&!state.pendingTurret&&!state.transform.gun_swap&&state.designPreviewKey!==draftEditor.key()){if(state.designRefreshInFlight)return;state.designRefreshInFlight=true;state.userCancelled=false;updateBuild();const shown=!toolActivity.active();if(shown)toolActivity.start('Actualizando vista previa del diseño…');try{await draftEditor.refresh();}catch(error){if(error?.name==='AbortError'&&!state.userCancelled){setTimeout(()=>refreshCheck(),250);return;}reportError(error);return;}finally{state.designRefreshInFlight=false;if(shown)toolActivity.finish();updateBuild();}return refreshCheck();}if(draftEditor.active()&&(state.pendingTurret||state.transform.gun_swap)){state.check={key:checkKey(),status:'unknown',message:t('Tocá «Aplicar cambios» para guardar el cambio de torreta o de arma antes de construir.')};updateBuild();return;}if(state.crewVisibility&&state.crewVisibility.key!==visibilityKey(state)){if(!draftEditor.active())delete state.transform.crew_hidden;state.crewVisibility=null;}const key=checkKey();if(!key||(state.check?.key===key&&state.crewVisibility?.key===visibilityKey(state)))return;state.check={key,status:'pending'};const visibilityContext=visibilityKey(state);updateBuild();
-  try{const r=await compatibilityTask.run({hull:state.hull.template,donor:state.turret.template,transform:checkTransform()});if(state.check?.key!==key)return;state.check={...r,key,status:r.ok?'ok':'fail',crew:r.crew||[],message:r.message||''};if(r.ok||r.armor_hosts?.length){cmdEditor.receiveCheck(state.check);armorEditor.receiveCheck(state.check);smokeEditor.receiveCheck(state.check);towingEditor.receiveCheck(state.check);chargeEditor.receiveCheck(state.check);riderEditor.receiveCheck(state.check);passengerEditor.receiveCheck(state.check);sight.receiveCheck(state.check);if(visibilityContext===visibilityKey(state))crewVisibility.receive(r.crew_visibility);renderCrewList();}}
+  try{const r=await compatibilityTask.run({hull:state.hull.template,donor:state.turret.template,transform:checkTransform()});if(state.check?.key!==key)return;state.check={...r,key,status:r.ok?'ok':'fail',crew:r.crew||[],message:r.message||''};if(r.ok||r.armor_hosts?.length){cmdEditor.receiveCheck(state.check);armorEditor.receiveCheck(state.check);smokeEditor.receiveCheck(state.check);towingEditor.receiveCheck(state.check);chargeEditor.receiveCheck(state.check);riderEditor.receiveCheck(state.check);mountedEditor.receiveCheck(state.check);passengerEditor.receiveCheck(state.check);extraCrew.receiveCheck(state.check);sight.receiveCheck(state.check);if(visibilityContext===visibilityKey(state))crewVisibility.receive(r.crew_visibility);renderCrewList();}}
   catch(error){if(error.name==='AbortError')return;if(state.check?.key===key)state.check={key,status:'unknown',message:error.message};}updateBuild();}
 function checkHint(){const check=state.check;if(!check||check.key!==checkKey())return{text:'',blocked:false};
   if(check.status==='pending')return{text:'Revisando si esta combinación se puede construir…',blocked:true};
   if(check.status==='unknown')return{text:t(check.message||'Revisar compatibilidad'),blocked:true};
   if(check.status==='fail')return{text:'Esta combinación no se puede construir: '+t(check.message.split('\n\nDetalle técnico:')[0].replace(/^La operación no se pudo completar\..*$/s,'el taller encontró un problema'))+(check.message.includes('Detalle técnico:')?' ('+t(check.message.split('Detalle técnico:')[1].trim())+')':''),blocked:true};
-  if(check.status==='ok'){const order=['driver','commander','gunner','charger','loader','radioman'],rank=r=>{const i=order.indexOf(String(r).replace(/\d+$/,''));return i<0?99:i;};const crew=[...check.crew].sort((a,b)=>rank(a)-rank(b)||String(a).localeCompare(b)).map(roleName);return{text:t('Compatible ✓')+(crew.length?` · ${t('Tripulación')} (${crew.length}): ${crew.join(', ')}`:''),blocked:false};}
+  if(check.status==='ok'){const order=['driver','commander','gunner','charger','loader','radioman'],rank=r=>{const i=order.indexOf(String(r).replace(/\d+$/,''));return i<0?99:i;};const crew=[...(check.crew_people||check.crew)].sort((a,b)=>rank(a)-rank(b)||String(a).localeCompare(b)).map(roleName);return{text:t('Compatible ✓')+(crew.length?` · ${t('Tripulación')} (${crew.length}): ${crew.join(', ')}`:''),blocked:false};}
   return{text:'',blocked:false};}
 function updateBuild(){draftEditor.controls();templateEditor.controls();$('cancel-check').classList.toggle('hidden',state.check?.status!=='pending');$('check-again').disabled=state.busy||!state.hull||!state.turret||state.check?.status==='pending';crewVisibility.render();cmdEditor.controls();armorEditor.controls();smokeEditor.controls();towingEditor.controls();chargeEditor.controls();if(state.edit==='commander_mg'&&!state.transform.commander_mg)transformControl.detach();for(const id of ['gun-recipient','gun-donor'])$(id).disabled=state.busy||!!state.editing;const reason=buildBlocker(),hint=checkHint();$('build-button').disabled=state.busy||!!reason||hint.blocked;$('design-retry').classList.toggle('hidden',!(draftEditor.active()&&state.campaign&&!state.pendingTurret&&!state.transform.gun_swap&&state.designPreviewKey!==draftEditor.key()&&!state.designRefreshInFlight));
   // A turret or gun change still being adjusted blocks the build; save it from here (SturmDrachen).
@@ -466,7 +549,7 @@ function updateBuild(){draftEditor.controls();templateEditor.controls();$('cance
   $('build-hint').textContent=[hint.blocked?hint.text:t(reason),hint.blocked?'':hint.text,ready].filter(Boolean).join(' — ')||t('Listo.')+' '+destinationHint;
   weaponAttributes.refresh();
   if(supportEditor.active()){supportEditor.controls();$('align-button').disabled=true;}else $('align-button').disabled=inspector?.navigation.tool!=='position'||state.edit!=='turret';$('build-hint').classList.toggle('hint-error',hint.blocked);$('build-button').dataset.help=$('build-hint').textContent;inspector?.render();}
-function clearPart(part,{keepOperation=false}={}){viewPieces?.reset();if(draftEditor.active()&&part==='hull'){delete state.transform.assembly_draft;delete state.pendingTurret;state.turret=null;delete state.previews.turret;disposeGroup(groups.turret);}if(inspector?.navigation.tool!=='operation')inspector?.navigation.reset();forgetHistory();resetAssemblyExtras();state[part]=null;state.editing=null;if(!state.nameEdited)$('vehicle-name').value='';delete state.previews[part];if(part==='turret'){$('crew-static-field').classList.add('hidden');state.transform.crew_seats={};state.transform.crew_exclude=[];state.editSeat=null;renderCrewList();}disposeGroup(groups[part]);transformControl.detach();if(!keepOperation&&!state.hull&&!state.turret){delete state.transform.gun_swap;delete state.transform.gun_swaps;$('operation-select').value='turret';gunEditor.controls();supportEditor.controls();}updateSelection();if(!groups.hull.children.length&&!groups.turret.children.length)$('viewport-empty').classList.remove('hidden');}
+function clearPart(part,{keepOperation=false}={}){viewPieces?.reset();if(draftEditor.active()&&part==='hull'){delete state.transform.assembly_draft;delete state.pendingTurret;state.turret=null;delete state.previews.turret;disposeGroup(groups.turret);}if(inspector?.navigation.tool!=='operation')inspector?.navigation.reset();forgetHistory();resetAssemblyExtras();state[part]=null;state.editing=null;state.shopEdit=null;if(!state.nameEdited)$('vehicle-name').value='';delete state.previews[part];if(part==='turret'){$('crew-static-field').classList.add('hidden');state.transform.crew_seats={};state.transform.crew_exclude=[];state.editSeat=null;renderCrewList();}disposeGroup(groups[part]);transformControl.detach();if(!keepOperation&&!state.hull&&!state.turret){delete state.transform.gun_swap;delete state.transform.gun_swaps;$('operation-select').value='turret';gunEditor.controls();supportEditor.controls();}updateSelection();if(!groups.hull.children.length&&!groups.turret.children.length)$('viewport-empty').classList.remove('hidden');}
 
 function reloadText(steps){return steps&&steps.length?'\n\n'+t('Para verlo sin cerrar el juego:')+'\n'+steps.map((s,i)=>`${i+1}. ${s}`).join('\n'):'';}
 function setGameStatus(game){game=game||{};state.gameRunning=!!game.running;state.gameOpen=!!game.running&&!game.ready;if(state.config?.linux&&!game.running){$('game-status').textContent=t('Linux: no puedo ver el juego · construí con el juego en el menú o cerrado');$('game-status').title=t('En Linux el juego corre en otro entorno de Proton y la herramienta no puede saber si estás en una batalla.');$('game-dot').classList.remove('blocked','menu');updateBuild();return;}$('game-status').textContent=!game.running?t('Juego cerrado'):game.ready?t('Juego abierto en el menú · podés construir'):t('Juego en una campaña o batalla · volvé al menú');$('game-status').title=game.message||(game.ready?t('Después de construir, recargá los mods desde Extras → Aplicar (te lo indico al terminar).'):'');$('game-dot').classList.toggle('blocked',state.gameOpen);$('game-dot').classList.toggle('menu',!!game.running&&!!game.ready);updateBuild();}
@@ -476,7 +559,7 @@ function showStats(stats){state.artRevision=(state.artRevision||0)+1;$('source-c
 const dismantleEditor=dismantling({$,state,loading,pollJob,readSave,status,reportError});
 const storageEditor=vehicleStorage({$,state,t,pollJob,loading,readSave,status,reportError});
 async function readSave(path){const bar=document.querySelector('.top-actions');bar.inert=true;bar.classList.add('locked');try{return await readSaveNow(path);}finally{bar.inert=false;bar.classList.remove('locked');}}
-async function readSaveNow(path){const result=await pollJob('/api/load-save',{path});state.campaign=result.campaign;clearPart('hull');clearPart('turret');$('campaign-name').textContent=state.campaign.campaign_name||path.split(/[\\/]/).pop();const humans=state.campaign.units.filter(u=>u.kind==='human').length,vehicles=state.campaign.units.filter(u=>u.kind==='vehicle').length;$('campaign-summary').textContent=`${vehicles} vehículos · ${humans} soldados · ${state.campaign.army||''}`;showStats(result.stats);state.catalog=(await api('/api/catalog')).units;await refreshConfig();renderUnits();if(state.campaign.unresolved_mods?.length)throw new Error('La campaña requiere mods que no se encontraron: '+state.campaign.unresolved_mods.join(', '));if(state.campaign.disabled_mods?.length)status(t('El juego desactiva estos mods por la versión, y el taller también los ignora: ')+state.campaign.disabled_mods.map(m=>m.name).join(', '));if(state.campaign.repaired_save)status(`Se reparó esta partida: una versión anterior del taller la dejaba sin poder cargarse (${state.campaign.repaired_save.inventories} inventarios). Copia original: ${state.campaign.repaired_save.backup}`);if(state.campaign.crew_fitted?.length)status(t('Tripulantes que sobraban pasaron a la reserva (el vehículo ahora tiene menos puestos): ')+state.campaign.crew_fitted.map(row=>(state.campaign.units||[]).find(u=>String(u.template||'').startsWith(row.vehicle))?.label||row.vehicle).join(', '));if(state.campaign.storage_problem)status(state.campaign.storage_problem);reportModStack(state.campaign);}
+async function readSaveNow(path){const result=await pollJob('/api/load-save',{path});state.campaign=result.campaign;clearPart('hull');clearPart('turret');$('campaign-name').textContent=state.campaign.campaign_name||path.split(/[\\/]/).pop();const humans=state.campaign.units.filter(u=>u.kind==='human').length,vehicles=state.campaign.units.filter(u=>u.kind==='vehicle').length;$('campaign-summary').textContent=`${vehicles} vehículos · ${humans} soldados · ${state.campaign.army||''}`;showStats(result.stats);state.catalog=(await api('/api/catalog')).units;await refreshConfig();renderUnits();if(state.campaign.unresolved_mods?.length)throw new Error('La campaña requiere mods que no se encontraron: '+state.campaign.unresolved_mods.join(', '));if(state.campaign.disabled_mods?.length)status(t('El juego desactiva estos mods por la versión, y el taller también los ignora: ')+state.campaign.disabled_mods.map(m=>m.name).join(', '));if(state.campaign.repaired_save)status(`Se reparó esta partida: una versión anterior del taller la dejaba sin poder cargarse (${state.campaign.repaired_save.inventories} inventarios). Copia original: ${state.campaign.repaired_save.backup}`);if(state.campaign.crew_fitted?.length)status(t('Tripulantes que sobraban pasaron a la reserva (el vehículo ahora tiene menos puestos): ')+state.campaign.crew_fitted.map(row=>(state.campaign.units||[]).find(u=>String(u.template||'').startsWith(row.vehicle))?.label||row.vehicle).join(', '));if(state.campaign.storage_problem)status(state.campaign.storage_problem);if(state.campaign.mods_after_addon?.length)status(t('Estos mods cargan después de «Cursed Workshop - Built Vehicles (ACTIVATE THIS)» y pueden dejar tus vehículos sin sonido de motor o sin registrar: ')+state.campaign.mods_after_addon.join(', ')+t('. En Extras → Mods del juego, mové el mod de vehículos al final y aplicá.'));reportModStack(state.campaign);}
 // The full include check of the active mods runs in the background after the
 // campaign opens; it only warns, so the campaign is usable meanwhile.
 function reportModStack(campaign){api('/api/mod-stack').then(result=>{if(result.problem&&state.campaign===campaign)reportError(new Error(result.problem));}).catch(()=>{});}
@@ -507,7 +590,7 @@ for(let axis=0;axis<3;axis++)for(const prefix of ['mirror','crew-mirror'])$(pref
 function setTransformMode(mode){state.editPivot=false;
   if(state.busy||state.inspectorPending>0||!(inspector?.navigation.pose()||inspector?.navigation.tool==='crew'))return;
   armorEditor.stopCorners();
-  if(state.editSeat)crewPose.setMode(mode);else selectEdit(inspector.navigation.part());transformControl.setMode(mode);
+  if(state.editSeat)crewPose.setMode(mode);else if(extraCrew.placing())extraCrew.setMode(mode);else selectEdit(inspector.navigation.part());transformControl.setMode(mode);
   for(const [id,value] of [['mode-move','translate'],['mode-rotate','rotate'],['pose-move','translate'],['pose-rotate','rotate']]){
     $(id).classList.toggle('active',mode===value);$(id).setAttribute('aria-pressed',String(mode===value));
   }
@@ -519,6 +602,8 @@ $('reset-transform').onclick=()=>{if(!inspector?.navigation.pose()||!editablePos
 $('mount-select').onchange=async()=>{if(state.busy)return;const part=state.edit,unit=state[part];if(!unit)return;const mount=$('mount-select').value;if(draftEditor.active()){if(!state.pendingTurret)return;const before=state.freeAnchor;state.mounts[part]=mount;state.pendingTurret[part==='hull'?'recipient_mount':'donor_mount']=mount;try{await loading('Cargando montaje',()=>draftEditor.refresh(state.pendingTurret),'Vehículo cargado');keepFreePlace(part,before);}catch(error){reportError(error);}return;}try{await loading('Cargando montaje',async()=>{const data=await pollJob('/api/preview',{template:unit.template,part:part==='hull'?'hull':'turret',mount});state.mounts[part]=mount;if(state.transform.joint_limits)delete state.transform.joint_limits[part];displayPart(part,data);},'Vehículo cargado');}catch(error){reportError(error);}};
 // Built from catalog models (Creativo): no unit is used.
 function creativeBuild(){return !!(state.hull?.creative||(state.turret?.creative&&!state.hull?.eid));}
+// The shop vehicle this build replaces: only while its chassis is still the one open.
+function shopReplacement(){const edit=state.shopEdit;return edit&&state.hull?.creative&&state.hull.template===edit.recipient?edit:null;}
 function buildBody(){if(draftEditor.active()&&state.editing)return {name:$('vehicle-name').value.trim(),mode:'edit',eid:state.editing.eid,transform:draftEditor.transform()};if(draftEditor.active())return {name:$('vehicle-name').value.trim(),mode:'design',recipient_eid:state.hull.eid,transform:draftEditor.transform()};const h=state.hull,t=state.turret,body={name:$('vehicle-name').value.trim(),transform:{...state.transform,recipient_mount:state.mounts.hull,donor_mount:state.mounts.turret,crew_static:$('crew-static').checked}};if(state.editing)return{...body,mode:'edit',eid:state.editing.eid};if(state.transform.support_vehicle)return{...body,mode:'support',recipient_eid:h.eid};if(h.eid)body.recipient_eid=h.eid;else body.recipient_depot=h.depot;if(t.eid)body.donor_eid=t.eid;else body.donor_depot=t.depot;return body;}
 function resultRow(label,value){const div=document.createElement('div');div.className='result-stat';const strong=document.createElement('strong');strong.textContent=label;const text=document.createElement('div');text.textContent=value;div.append(strong,text);return div;}
 // Where the vehicle goes: the campaign, the Conquest shop or both. A creative
@@ -532,7 +617,7 @@ function showDestination(){const value=destination(),creative=creativeBuild();
   else if(value==='shop')notes.push(t('No se usa ninguna unidad ni se cambia tu partida. Se compra en la tienda de la Conquista de cualquier campaña que use el mod del taller.'));else if(value==='both')notes.push(t('Cambia tu partida como siempre y además se vende en la tienda de la Conquista.'));
   $('build-destination-note').textContent=notes.join(' ');}
 for(const id of ['build-to-campaign','build-to-shop'])$(id).onchange=showDestination;
-$('build-button').onclick=()=>{if(state.busy||!requireFinishedTool())return;$('build-to-campaign').checked=!!state.campaign;$('build-to-campaign').disabled=!state.campaign;$('build-to-shop').checked=!state.campaign;$('build-shop-cost').value=state.check?.shop_suggested_cost??'';showDestination();if(creativeBuild()){$('result-content').replaceChildren(resultRow(t('Vehículo nuevo'),$('vehicle-name').value.trim()||plainName(state.hull)+' + '+plainName(state.turret)),resultRow(t('Del catálogo, sin gastar unidades'),[...new Set([state.hull,state.turret,...(draftEditor.active()?[...draftEditor.turrets(),...draftEditor.draft().guns].filter(r=>r&&!r.native).map(r=>({template:r.donor_template})):[])].filter(x=>x&&!x.designPlaceholder).map(x=>plainName(x)))].join(', ')));const note=document.createElement('p');note.textContent=t('Modo creativo: no se usa ninguna unidad.');$('result-content').append(note);$('result-dialog').showModal();return;}if(draftEditor.active()&&!state.editing){const rows=[...draftEditor.turrets(),...draftEditor.draft().guns].filter(Boolean),ids=new Set(rows.map(r=>r.donor_eid).filter(Boolean)),catalog=[...new Set(rows.filter(r=>r.donor_catalog).map(r=>r.donor_template))];$('result-content').replaceChildren(resultRow(t('Vehículo nuevo'),$('vehicle-name').value.trim()||plainName(state.hull)),resultRow(t('Se usan de tu partida'),[plainName(state.hull),...[...ids].map(id=>plainName(state.campaign.units.find(u=>u.eid===id)))].join(', ')),...(catalog.length?[resultRow(t('Del catálogo, sin gastar unidades'),catalog.join(', '))]:[]),resultRow(t('Cambios de arma guardados'),String(rows.length)),resultRow(t('Torretas retiradas'),(draftEditor.draft().removals||[]).map(r=>r.mount).join(', ')||'—'));const stock=[...new Set(rows.map(r=>r.donor_depot).filter(Boolean))].map(id=>(state.campaign.depot||[]).find(p=>p.id===id)?.label||id);if(stock.length)$('result-content').append(resultRow(t('Del depósito'),stock.join(', ')));$('result-dialog').showModal();return;}if(state.transform.support_vehicle){$('result-content').replaceChildren(resultRow(t('Vehículo de apoyo'),$('vehicle-name').value.trim()||plainName(state.hull)),resultRow(t('Se reemplaza en tu partida'),plainName(state.hull)));const note=document.createElement('p');note.textContent=t('Se retira la torreta seleccionada y se conserva el casco. La torreta retirada va al depósito solo en la primera conversión. Los tripulantes sobrantes quedan en reserva. El inventario, combustible y daño conservado no se reponen. Se guarda una copia de seguridad.');$('result-content').append(note);$('result-dialog').showModal();return;}if(state.editing){$('result-content').replaceChildren(resultRow(t('Vehículo editado'),$('vehicle-name').value.trim()||plainName(state.hull)),resultRow(t('Se reemplaza en tu partida'),t('Solo esta unidad. No se usa otro vehículo y no van piezas al depósito.')));const note=document.createElement('p');note.textContent=t('El vehículo conserva su tripulación, veteranía, inventario, combustible y el daño de las piezas que siguen existiendo. Antes de cambiar la partida se guarda una copia de seguridad.');$('result-content').append(note);$('result-dialog').showModal();return;}const h=state.hull,mod=state.turret,name=x=>x.label||x.template,plain=plainName;const used=[h,mod].filter(x=>x.eid).map(name),stored=[h,mod].filter(x=>x.depot).map(name),leftovers=[];if(h.eid&&!(state.transform.gun_swap||state.transform.gun_swaps?.length))leftovers.push(t('Torreta de')+' '+name(h));if(mod.eid&&!(state.transform.gun_swap||state.transform.gun_swaps?.length))leftovers.push(t('Chasis de')+' '+name(mod));$('result-content').replaceChildren(resultRow('Vehículo nuevo',$('vehicle-name').value.trim()||plain(h)+' + '+plain(mod)),resultRow('Se usan de tu partida',used.join(t(' y '))||'—'));if(stored.length)$('result-content').append(resultRow('Del depósito',stored.join(t(' y '))));$('result-content').append(resultRow('Van al depósito',leftovers.join(t(' y '))||'—'));const note=document.createElement('p');note.textContent=t('Los vehículos usados desaparecen de tu partida y el nuevo ocupa su lugar con sus veteranos; los tripulantes que no entren quedan en reserva. Antes de cambiar la partida se guarda una copia de seguridad.')+(stored.length?' '+t('Como usás una pieza del depósito, el vehículo nuevo sale reparado y con munición completa.'):'');if(!h.eid&&!mod.eid)note.textContent=t('El vehículo se crea con puestos vacíos para la tripulación. Podés usar tus veteranos de reserva. Las piezas desmanteladas no aportan munición.');if(state.transform.gun_swap||state.transform.gun_swaps?.length)note.textContent=t('Se conserva la torreta receptora. Se consumen las dos unidades y no se depositan torretas ni chasis completos. Los veteranos sobrantes quedan en reserva.');$('result-content').append(note);$('result-dialog').showModal();};
+$('build-button').onclick=()=>{if(state.busy||!requireFinishedTool())return;const replacing=shopReplacement();$('build-to-campaign').checked=!!state.campaign&&!replacing;$('build-to-campaign').disabled=!state.campaign||!!replacing;$('build-to-shop').checked=!state.campaign||!!replacing;$('build-to-shop').disabled=!!replacing;$('build-shop-cost').value=replacing?.custom_cost??state.check?.shop_suggested_cost??'';showDestination();if(replacing){$('result-content').replaceChildren(resultRow(t('Vehículo editado'),$('vehicle-name').value.trim()||replacing.name),resultRow(t('Reemplaza en la Tienda'),replacing.name));const note=document.createElement('p');note.textContent=t('La Tienda vende esta versión en lugar de la anterior, que sale de la lista. Los vehículos que ya compraste en tus partidas se conservan como estaban.');$('result-content').append(note);$('result-dialog').showModal();return;}if(creativeBuild()){$('result-content').replaceChildren(resultRow(t('Vehículo nuevo'),$('vehicle-name').value.trim()||plainName(state.hull)+' + '+plainName(state.turret)),resultRow(t('Del catálogo, sin gastar unidades'),[...new Set([state.hull,state.turret,...(draftEditor.active()?[...draftEditor.turrets(),...draftEditor.draft().guns].filter(r=>r&&!r.native).map(r=>({template:r.donor_template})):[])].filter(x=>x&&!x.designPlaceholder).map(x=>plainName(x)))].join(', ')));const note=document.createElement('p');note.textContent=t('Modo creativo: no se usa ninguna unidad.');$('result-content').append(note);$('result-dialog').showModal();return;}if(draftEditor.active()&&!state.editing){const rows=[...draftEditor.turrets(),...draftEditor.draft().guns].filter(Boolean),ids=new Set(rows.map(r=>r.donor_eid).filter(Boolean)),catalog=[...new Set(rows.filter(r=>r.donor_catalog).map(r=>r.donor_template))];$('result-content').replaceChildren(resultRow(t('Vehículo nuevo'),$('vehicle-name').value.trim()||plainName(state.hull)),resultRow(t('Se usan de tu partida'),[plainName(state.hull),...[...ids].map(id=>plainName(state.campaign.units.find(u=>u.eid===id)))].join(', ')),...(catalog.length?[resultRow(t('Del catálogo, sin gastar unidades'),catalog.join(', '))]:[]),resultRow(t('Cambios de arma guardados'),String(rows.length)),resultRow(t('Torretas retiradas'),(draftEditor.draft().removals||[]).map(r=>r.mount).join(', ')||'—'));const stock=[...new Set(rows.map(r=>r.donor_depot).filter(Boolean))].map(id=>(state.campaign.depot||[]).find(p=>p.id===id)?.label||id);if(stock.length)$('result-content').append(resultRow(t('Del depósito'),stock.join(', ')));$('result-dialog').showModal();return;}if(state.transform.support_vehicle){$('result-content').replaceChildren(resultRow(t('Vehículo de apoyo'),$('vehicle-name').value.trim()||plainName(state.hull)),resultRow(t('Se reemplaza en tu partida'),plainName(state.hull)));const note=document.createElement('p');note.textContent=t('Se retira la torreta seleccionada y se conserva el casco. La torreta retirada va al depósito solo en la primera conversión. Los tripulantes sobrantes quedan en reserva. El inventario, combustible y daño conservado no se reponen. Se guarda una copia de seguridad.');$('result-content').append(note);$('result-dialog').showModal();return;}if(state.editing){$('result-content').replaceChildren(resultRow(t('Vehículo editado'),$('vehicle-name').value.trim()||plainName(state.hull)),resultRow(t('Se reemplaza en tu partida'),t('Solo esta unidad. No se usa otro vehículo y no van piezas al depósito.')));const note=document.createElement('p');note.textContent=t('El vehículo conserva su tripulación, veteranía, inventario, combustible y el daño de las piezas que siguen existiendo. Antes de cambiar la partida se guarda una copia de seguridad.');$('result-content').append(note);$('result-dialog').showModal();return;}const h=state.hull,mod=state.turret,name=x=>x.label||x.template,plain=plainName;const used=[h,mod].filter(x=>x.eid).map(name),stored=[h,mod].filter(x=>x.depot).map(name),leftovers=[];if(h.eid&&!(state.transform.gun_swap||state.transform.gun_swaps?.length))leftovers.push(t('Torreta de')+' '+name(h));if(mod.eid&&!(state.transform.gun_swap||state.transform.gun_swaps?.length))leftovers.push(t('Chasis de')+' '+name(mod));$('result-content').replaceChildren(resultRow('Vehículo nuevo',$('vehicle-name').value.trim()||plain(h)+' + '+plain(mod)),resultRow('Se usan de tu partida',used.join(t(' y '))||'—'));if(stored.length)$('result-content').append(resultRow('Del depósito',stored.join(t(' y '))));$('result-content').append(resultRow('Van al depósito',leftovers.join(t(' y '))||'—'));const note=document.createElement('p');note.textContent=t('Los vehículos usados desaparecen de tu partida y el nuevo ocupa su lugar con sus veteranos; los tripulantes que no entren quedan en reserva. Antes de cambiar la partida se guarda una copia de seguridad.')+(stored.length?' '+t('Como usás una pieza del depósito, el vehículo nuevo sale reparado y con munición completa.'):'');if(!h.eid&&!mod.eid)note.textContent=t('El vehículo se crea con puestos vacíos para la tripulación. Podés usar tus veteranos de reserva. Las piezas desmanteladas no aportan munición.');if(state.transform.gun_swap||state.transform.gun_swaps?.length)note.textContent=t('Se conserva la torreta receptora. Se consumen las dos unidades y no se depositan torretas ni chasis completos. Los veteranos sobrantes quedan en reserva.');$('result-content').append(note);$('result-dialog').showModal();};
 function shopPrice(){const text=$('build-shop-cost').value.trim();if(!text||$('build-shop-price').classList.contains('hidden'))return null;const cost=Number(text);
   if(!Number.isInteger(cost)||cost<0||cost>2147483647)throw new Error(t('El precio debe ser un número entero de 0 a 2147483647.'));
   // The suggested price left as it is stays the suggested one: it follows the parts' prices.
@@ -542,9 +627,11 @@ $('install-button').onclick=async()=>{
   $('result-dialog').close();const path=state.campaign?.source_path;
   try{
     const to=destination();
-    if(creativeBuild()&&to==='shop'){const body=buildBody();
-      const r=await operation('/api/creative',{recipient:state.hull.template,donor:state.turret.template,transform:body.transform,name:body.name,shop_cost:shopPrice()},'Construyendo en modo creativo');
-      $('error-title').textContent=t('Vehículo en la tienda');$('error-message').textContent=r.name+(r.offer?`\n${t('Precio')}: ${r.offer.cost}`:'')+reloadText(r.reload_steps);
+    if(creativeBuild()&&to==='shop'){const body=buildBody(),replacing=shopReplacement();
+      const r=await operation('/api/creative',{recipient:state.hull.template,donor:state.turret.template,transform:body.transform,name:body.name,shop_cost:shopPrice(),...(replacing?{replace:replacing.id}:{})},replacing?'Actualizando el vehículo de la tienda':'Construyendo en modo creativo');
+      // The edited version is the one sold now: building again replaces it in turn.
+      if(replacing&&r.new_template)state.shopEdit={...replacing,id:r.new_template,name:r.name};
+      $('error-title').textContent=t(replacing?'Tienda actualizada':'Vehículo en la tienda');$('error-message').textContent=r.name+(r.offer?`\n${t('Precio')}: ${r.offer.cost}`:'')+(r.replaced_name?`\n${t('Reemplaza a')}: ${r.replaced_name}`:'')+reloadText(r.reload_steps);
       $('error-dialog').showModal();await refreshConfig();return;}
     // A creative build names only catalog models; in the campaign it is a new unit.
     const base=buildBody(),body=creativeBuild()?{name:base.name,mode:'creative',recipient_template:state.hull.template,donor_template:state.turret.template,
@@ -567,7 +654,7 @@ $('install-button').onclick=async()=>{
   }catch(error){reportError(error);}
 };
 $('repair-button').onclick=async()=>{if(state.busy)return;if(!state.campaign){reportError(new Error(t('Seleccioná primero una campaña.')));$('save-select').focus();return;}if(!confirm(t('Actualizar vehículos vuelve a armar únicamente los vehículos presentes en la partida abierta. Se guarda una copia del mod anterior. ¿Continuar?')))return;try{const r=await operation('/api/repair',{source_hash:state.campaign.source_hash},'Actualizando vehículos');const portraits=await regeneratePortraits(true,r.rebuilt);const label=id=>(r.labels||{})[id]||id;$('error-title').textContent='Vehículos actualizados';$('error-message').textContent=(r.rebuilt.length?`Actualizados (${r.rebuilt.length}):\n${r.rebuilt.map(id=>'· '+label(id)).join('\n')}`:'No se actualizó ningún vehículo.')+(r.skipped.length?`\n\nSe dejaron como estaban:\n${r.skipped.map(x=>'· '+label(x.id)+': '+x.reason).join('\n')}`:'')+'\n\n'+portraitSummary(portraits,false)+reloadText([...new Set([...(r.reload_steps||[]),...(portraits.reload_steps||[])])])+(r.crew_fitted?.length?'\n\n'+t('Tripulantes que sobraban pasaron a la reserva (el vehículo ahora tiene menos puestos): ')+r.crew_fitted.map(row=>label(row.vehicle)).join(', '):'')+(r.backup?`\n\nCopia del mod anterior: ${r.backup}`:'');$('error-dialog').showModal();await refreshConfig();}catch(error){reportError(error);}};
-shopEditor({state,$,api,operation,artwork:shopArtwork,svgVehicle,reportError,refreshConfig,reloadText});
+shopEditor({state,$,api,operation,artwork:shopArtwork,svgVehicle,reportError,refreshConfig,reloadText,edit:vehicle=>{if(!requireFinishedTool())return;return editVehicle(null,vehicle);}});
 for(const id of ['catalog-nation','catalog-kind','depot-type','depot-nation','depot-origin'])$(id).onchange=()=>renderUnits();
 $('design-retry').onclick=()=>{if(!state.busy)refreshCheck().catch(reportError);};
 $('portraits-button').onclick=async()=>{try{const r=await regeneratePortraits();$('error-title').textContent='Retratos regenerados';$('error-message').textContent=portraitSummary(r);$('error-dialog').showModal();}catch(error){reportError(error);}};
@@ -599,6 +686,8 @@ start();
 
 // ---- View options: original textures, crew/passenger seats, part visibility, capture ----
 const textureMaterials=new Map();
+// Plain colors per kind of part, from Settings (see part-colors.js).
+let viewColorValue=viewColors();
 const texturePending=new Set();
 // Portraits always use the compiler's complete model, including vehicles made
 // from other workshop vehicles. This scene owns its meshes/materials/textures:
@@ -737,10 +826,14 @@ function texturedMaterial(mtl,token=''){
   texturePending.add(pending);
   return material;
 }
-function applyTextures(){applyModelTextures(groups,state.show.textures,texturedMaterial,state.wire);armorLayer?.sync();}
+function applyTextures(){applyModelTextures(groups,state.show.textures,texturedMaterial,state.wire,(part,mesh)=>plainColor(part,mesh,viewColorValue));armorLayer?.sync();updateKindLegend();}
+function updateKindLegend(){const plain=!state.show.textures&&viewColorValue.by_kind;for(const node of document.querySelectorAll('.kind-legend'))node.classList.toggle('hidden',!plain);}
 const seatGeometry={body:new THREE.CylinderGeometry(3.2,3.6,15,10),head:new THREE.SphereGeometry(3.1,12,10)};
 const seatMaterials={crew:new THREE.MeshStandardMaterial({color:0x6fc3df,roughness:.6,transparent:true,opacity:.92}),passenger:new THREE.MeshStandardMaterial({color:0x9ccf7a,roughness:.6,transparent:true,opacity:.92})};
 for(const m of Object.values(seatMaterials))m.userData.shared=true;
+viewColorSettings({$,storage:uiStorage,save:patch=>saveUISettings(patch).catch(reportError),onChange:value=>{viewColorValue=value;
+  for(const [kind,color] of Object.entries(value.colors))document.documentElement.style.setProperty('--kind-'+kind,color);
+  seatMaterials.crew.color.set(value.colors.crew);seatMaterials.passenger.color.set(value.colors.passenger);applyTextures();}});
 // A real crew member (one generic soldier) in each seat's pose, replacing the
 // placeholder capsules once the server has posed it.
 const soldierModels=new Map();
@@ -773,11 +866,13 @@ function applyShow(){viewPieces?.restore();updateStaticSeats();weaponView?.refre
   applyTextures();const internal=Object.values(state.previews).reduce((n,p)=>n+(p.internal_crew||0),0);
   $('legend-crew').classList.toggle('hidden',!show.crew);$('legend-passengers').classList.toggle('hidden',!show.passengers);
   $('legend-internal').classList.toggle('hidden',!show.crew||!internal);$('legend-internal').textContent=internal?`${internal} dentro del vehículo (sin asiento visible)`:'';
-  document.querySelectorAll('[data-show]').forEach(input=>input.checked=!!show[input.dataset.show]);}
+  document.querySelectorAll('[data-show]').forEach(input=>input.checked=!!show[input.dataset.show]);marks?.refresh();}
 $('view-button').onclick=event=>{event.stopPropagation();$('view-panel').classList.toggle('hidden');$('view-button').classList.toggle('active',!$('view-panel').classList.contains('hidden'));$('view-button').setAttribute('aria-expanded',String(!$('view-panel').classList.contains('hidden')));};
 document.addEventListener('click',event=>{if(!event.target.closest('.view-menu')){$('view-panel').classList.add('hidden');$('view-button').classList.remove('active');$('view-button').setAttribute('aria-expanded','false');}});
 document.querySelectorAll('[data-show]').forEach(input=>input.onchange=()=>{state.show[input.dataset.show]=input.checked;try{localStorage.setItem('mw-show',JSON.stringify(state.show));}catch{}applyShow();});
-try{Object.assign(state.show,JSON.parse(localStorage.getItem('mw-show')||'{}'));}catch{}applyShow();
+// The chassis and turret are always drawn: the View menu no longer hides them, so an
+// old saved choice must not leave a part invisible with no way back.
+try{Object.assign(state.show,JSON.parse(localStorage.getItem('mw-show')||'{}'));}catch{}state.show.hull=state.show.turret=true;applyShow();
 $('capture').onclick=async()=>{const helper=transformControl.getHelper(),helperVisible=helper.visible;helper.visible=false;renderer.setClearColor(0x19272e,1);updateSeatFrames(groups,camera);renderer.render(scene,camera);const image=renderer.domElement.toDataURL('image/png');helper.visible=helperVisible;renderer.setClearColor(0x19272e,0);
   try{const r=await api('/api/screenshot',{image,name:$('vehicle-name').value.trim()||'vehiculo'});status('Captura guardada: '+r.path);}catch(error){reportError(error);}};
 // With "Tripulantes fijos" a carried gun's loaders stand inside the chassis
@@ -789,17 +884,30 @@ var crewPose=crewPoseEditor({control:transformControl,state,$,figure:()=>state.e
 function crewPart(){return crewGroup()===groups.hull?'hull':'turret';}
 function seatFigure(place){let found=null;crewGroup().traverse(node=>{if(!found&&node.userData?.weapon&&node.name===place)found=node;});return found;}
 function moduleCrew(){const rows=[];crewGroup().traverse(node=>{if(node.userData?.weapon&&node.userData.seat)rows.push(node);});return rows;}
-function selectSeat(place){if((state.pendingTurret&&!state.pendingTurret.native)||state.busy||state.inspectorPending>0||inspector?.navigation.tool!=='crew')return;const figure=seatFigure(place);if(!canPlaceCrew(figure,state.transform.crew_exclude||[])||crewHidden(state,crewPart(),place))return;
+function selectSeat(place){if((state.pendingTurret&&!state.pendingTurret.native)||state.busy||state.inspectorPending>0||inspector?.navigation.tool!=='crew')return;const figure=seatFigure(place);if(!canPlaceCrew(figure,[...excludedCrew()])||crewHidden(state,crewPart(),place))return;
   if(!state.show.crew){state.show.crew=true;try{localStorage.setItem('mw-show',JSON.stringify(state.show));}catch{}applyShow();}
   state.editSeat=place;crewPose.setMode('translate');renderCrewList();status(t('Mové al tripulante con las flechas o usá Girar para ajustar su orientación.'));}
-function renderCrewList(){crewVisibility.render();const field=$('crew-field'),list=$('crew-list');if(!field||!list)return;const crew=moduleCrew(),pending=!!state.pendingTurret&&!state.pendingTurret.native;$('crew-pending-field').classList.toggle('hidden',!pending);$('crew-apply-mount').disabled=state.busy||state.inspectorPending>0;field.classList.toggle('hidden',!crew.length||pending);list.replaceChildren();
-  const excluded=new Set(state.transform.crew_exclude||[]),manual=state.transform.crew_seats||{};
-  for(const figure of crew){const place=figure.name,row=document.createElement('div');row.className='crew-row'+(state.editSeat===place?' active':'');
-    const box=document.createElement('input');box.type='checkbox';const locked=figure.userData.aims||figure.userData.required;box.checked=locked||!excluded.has(place);box.disabled=locked;box.title=figure.userData.aims?t('El que apunta el arma siempre va.'):figure.userData.required?t('El cañón necesita a este tripulante: sin él, el juego se cierra al usarlo.'):t('Destildalo para que se quede en reserva.');
-    box.setAttribute('aria-label',roleName(place));box.onchange=()=>{remember();const set=new Set(state.transform.crew_exclude||[]);if(box.checked)set.delete(place);else{set.add(place);if(state.transform.crew_fixed)delete state.transform.crew_fixed[place];if(state.editSeat===place){state.editSeat=null;selectEdit(state.edit);}}state.transform.crew_exclude=[...set];updateStaticSeats();applyShow();renderCrewList();refreshCheck();};
+// A towed gun's operators always board: the build ignores them in crew_exclude
+// (a design saved before they were locked may list one), so the view must too.
+// crew_exclude names the finished vehicle's places: it hides those seats in every
+// drawn part that uses those names (a design's chassis stays drawn while one of its
+// turrets is adjusted), never a donor's own seat that only shares the name.
+function exclusionParts(){return vehiclePlaceParts(state)||[crewPart()];}
+function excludedCrew(){const required=new Set();for(const part of exclusionParts())groups[part].traverse(node=>{if(node.userData?.weapon&&node.userData.seat&&node.userData.required)required.add(node.name);});
+  return new Set((state.transform.crew_exclude||[]).filter(place=>!required.has(place)));}
+function markExcludedCrew(){const excluded=excludedCrew(),parts=exclusionParts();
+  for(const part of ['hull','turret'])groups[part].traverse(node=>{if(node.userData?.weapon)node.userData.excluded=parts.includes(part)&&excluded.has(node.name);});
+  return excluded;}
+function renderCrewList(){crewVisibility.render();extraCrew?.render();weaponOperators?.render();const field=$('crew-field'),list=$('crew-list');if(!field||!list)return;const crew=moduleCrew(),pending=!!state.pendingTurret&&!state.pendingTurret.native;$('crew-pending-field').classList.toggle('hidden',!pending);$('crew-apply-mount').disabled=state.busy||state.inspectorPending>0;field.classList.toggle('hidden',!crew.length||pending);list.replaceChildren();
+  const excluded=excludedCrew(),manual=state.transform.crew_seats||{};
+  for(const figure of crew){const place=figure.name,row=document.createElement('div');row.className='crew-row'+(state.editSeat===place?' active':'');row.dataset.mark=JSON.stringify({crew:place,part:crewPart()});
+    // Anyone can stay in reserve: the weapons he works pass to someone still aboard.
+    const aims=weaponOperators?.aims(place)??figure.userData.aims;
+    const box=document.createElement('input');box.type='checkbox';const locked=figure.userData.required;box.checked=locked||!excluded.has(place);box.disabled=locked;box.title=figure.userData.required?t('El cañón necesita a este tripulante: sin él, el juego se cierra al usarlo.'):aims?t('Destildalo para que se quede en reserva; sus armas pasan a otro tripulante.'):t('Destildalo para que se quede en reserva.');
+    box.setAttribute('aria-label',roleName(place));box.onchange=()=>{remember();const set=new Set(state.transform.crew_exclude||[]);if(box.checked)set.delete(place);else{set.add(place);forgetOperator(state.transform,place);if(state.transform.crew_fixed)delete state.transform.crew_fixed[place];if(state.editSeat===place){state.editSeat=null;selectEdit(state.edit);}}state.transform.crew_exclude=[...set];updateStaticSeats();applyShow();renderCrewList();refreshCheck();};
     const pin=document.createElement('input');pin.type='checkbox';pin.checked=state.transform.crew_fixed?.[place]??figure.userData.fixed;pin.disabled=state.busy||excluded.has(place);pin.setAttribute('aria-label',t('Fijar al chasis')+' '+roleName(place));pin.title=t('Fijar este tripulante al chasis');pin.onchange=()=>{remember();state.transform.crew_fixed={...state.transform.crew_fixed,[place]:pin.checked};refreshCheck();};
     const pinLabel=document.createElement('label');pinLabel.className='crew-fixed-toggle';pinLabel.append(pin,document.createTextNode(t('Fijar al chasis')));
-    const label=document.createElement('span');label.textContent=roleName(place)+(figure.userData.aims?' · '+t('apunta'):manual[place]?' · '+t('a mano'):'');
+    const label=document.createElement('span');label.textContent=roleName(place)+(aims?' · '+t('apunta'):manual[place]?' · '+t('a mano'):'');
     const locate=document.createElement('button');locate.className='small';locate.textContent=t('Ubicar');locate.setAttribute('aria-label',t('Ubicar')+' '+roleName(place));locate.disabled=!canPlaceCrew(figure,[...excluded])||crewHidden(state,crewPart(),place);locate.onclick=()=>selectSeat(place);
     const reset=document.createElement('button');reset.className='small subtle';reset.textContent='↺';reset.title=t('Volver a la ubicación automática');reset.disabled=!manual[place];
     reset.onclick=()=>{remember();const next={...(state.transform.crew_seats||{})};delete next[place];state.transform.crew_seats=next;updateStaticSeats();renderCrewList();refreshCheck();};
@@ -810,13 +918,17 @@ function renderCrewList(){crewVisibility.render();const field=$('crew-field'),li
 {let down=null;renderer.domElement.addEventListener('pointerdown',event=>{down=[event.clientX,event.clientY];});
   renderer.domElement.addEventListener('pointerup',event=>{if(state.busy||inspector?.navigation.tool!=='crew'||!down||Math.hypot(event.clientX-down[0],event.clientY-down[1])>4||transformControl.dragging||transformControl.axis)return;down=null;
     const rect=renderer.domElement.getBoundingClientRect(),pointer=new THREE.Vector2((event.clientX-rect.left)/rect.width*2-1,-(event.clientY-rect.top)/rect.height*2+1);
-    const ray=new THREE.Raycaster();ray.setFromCamera(pointer,camera);const targets=[];crewGroup().traverse(node=>{const figure=owningSeat(node);if(node.isMesh&&figure?.visible&&canPlaceCrew(figure,state.transform.crew_exclude||[]))targets.push(node);});
+    const ray=new THREE.Raycaster();ray.setFromCamera(pointer,camera);const targets=[];crewGroup().traverse(node=>{const figure=owningSeat(node);if(node.isMesh&&figure?.visible&&canPlaceCrew(figure,[...excludedCrew()]))targets.push(node);});
     const hit=ray.intersectObjects(targets,false)[0];if(hit)selectSeat(owningSeat(hit.object).name);});}
 function updateStaticSeats(){const fixed=$('crew-static').checked&&state.previews.turret?.carried;groups.turret.updateMatrixWorld(true);groups.hull.updateMatrixWorld(true);
   const box=new THREE.Box3();groups.hull.traverse(node=>{if(node.userData?.mesh)box.expandByObject(node);});
-  const excluded=new Set(state.transform.crew_exclude||[]),manual=state.transform.crew_seats||{};
-  const frame=crewGroup();frame.traverse(node=>{if(!node.userData?.weapon)return;node.userData.excluded=excluded.has(node.name);if(node.userData.seat)node.visible=state.show.crew&&!node.userData.excluded&&!crewHidden(state,crewPart(),node.name);
-    placeCrewFigure(node,frame,manual[node.name],typeof state.transform.crew_fixed?.[node.name]==='boolean'?false:fixed,box,groups.hull,state.previews.hull?.hull_floor);});}
+  markExcludedCrew();const frame=crewGroup();
+  // Placed seats name the vehicle's places too: a donor still being tried keeps its own spots.
+  const named=exclusionParts().includes(crewPart()),manual=named?state.transform.crew_seats||{}:{},pinned=named?state.transform.crew_fixed||{}:{};
+  // Where the module sits before it is moved, on this hull: the compiler fits a carried gun's loaders there.
+  const seated=frame===groups.turret&&!supportEditor.active()?groups.hull.matrixWorld.clone().multiply(new THREE.Matrix4().makeTranslation(...moduleBase())):null;
+  frame.traverse(node=>{if(!node.userData?.weapon)return;if(node.userData.seat)node.visible=state.show.crew&&!node.userData.excluded&&!crewHidden(state,crewPart(),node.name);
+    placeCrewFigure(node,frame,manual[node.name],typeof pinned[node.name]==='boolean'?false:fixed,box,groups.hull,state.previews.hull?.hull_floor,seated);});}
 $('crew-static').addEventListener('change',()=>{updateStaticSeats();renderCrewList();refreshCheck();});
 $('crew-apply-mount').onclick=()=>toolOperation(()=>draftEditor.saveTurret()).catch(reportError);
 transformControl.addEventListener('objectChange',()=>updateStaticSeats());
@@ -837,7 +949,7 @@ inspector=inspectorMenus({state,support:()=>supportEditor.active(),gun:()=>gunEd
     // Gun placement opens a saved gun change to move it. "Back to menu keeps the
     // design": put that change back (as adjusted, or as it was if left incomplete)
     // instead of leaving it out of the design, which showed the original gun again.
-    if(gunEditor.active()&&state.transform.gun_edit)(!$('gun-save').disabled?gunEditor.save():$('gun-discard').onclick()).catch?.(reportError);state.editPivot=false;transformControl.detach();state.editSeat=null;armorEditor.deactivate();smokeEditor.deactivate();towingEditor.deactivate();chargeEditor.deactivate();riderEditor.deactivate();passengerEditor.deactivate();cmdEditor.sync();jointEditor.sync();renderCrewList();if(native)draftEditor.refresh().catch(reportError);refreshCheck();},
+    if(gunEditor.active()&&state.transform.gun_edit)(!$('gun-save').disabled?gunEditor.save():$('gun-discard').onclick()).catch?.(reportError);state.editPivot=false;transformControl.detach();state.editSeat=null;armorEditor.deactivate();smokeEditor.deactivate();towingEditor.deactivate();chargeEditor.deactivate();riderEditor.deactivate();mountedEditor.deactivate();passengerEditor.deactivate();extraCrew.stop();cmdEditor.sync();jointEditor.sync();renderCrewList();if(native)draftEditor.refresh().catch(reportError);refreshCheck();},
   onChange(){
     const editable=(inspector?.navigation.pose()&&!!editablePose())||inspector?.navigation.tool==='crew';
     for(const id of ['mode-move','mode-rotate'])$(id).disabled=state.busy||state.inspectorPending>0||!editable;
@@ -881,12 +993,20 @@ async function restoreDraft(saved){
     if(!saved.transform.assembly_draft)for(const [part,unit] of [['hull',hull],['turret',turret]])if(unit&&!unit.designPlaceholder)previews[part]=await pollJob('/api/preview',{template:unit.template,part,mount:saved.mounts?.[part]||undefined});
     state.hull=hull;state.turret=turret;state.mounts=structuredClone(saved.mounts||{hull:'',turret:''});state.editing=saved.editing;state.pendingTurret=saved.pendingTurret;
     state.transform=structuredClone(saved.transform);state.editSeat=null;$('operation-select').value=saved.operation||'turret';$('crew-static').checked=saved.crewStatic!==false;
-    if(state.transform.assembly_draft)await applyDesign(state.transform);
-    else{for(const [part,data] of Object.entries(previews))displayPart(part,data);await applyRecipe(state.transform);}
+    // A copy: both first clear the editors' extras from the current transform,
+    // which must not be the recovered one (its fittings and removed pieces).
+    if(state.transform.assembly_draft)await applyDesign(structuredClone(state.transform));
+    else{for(const [part,data] of Object.entries(previews))displayPart(part,data);await applyRecipe(structuredClone(state.transform));}
     state.pendingTurret=saved.pendingTurret;if(state.pendingTurret&&state.transform.assembly_draft)await draftEditor.refresh(state.pendingTurret);state.nameEdited=true;$('vehicle-name').value=saved.name||'';forgetHistory();updateSelection();applyTransforms();fitView();
   });
 }
-viewPieces=pieceVisibility({groups,data:()=>state.transform,changed:()=>{viewPieces.restore();viewPieces.apply();if(!viewPieces.canEdit(state.editSeat?seatFigure(state.editSeat):poseTarget()))transformControl.detach();qol?.renderPieces();wakeView();}});
+// Pieces taken off the built vehicle are named by the bones the finished
+// vehicle keeps: the chassis as drawn (a design's saved turrets included) and
+// a turret drawn from the vehicle's own model. A donor's turret still carries
+// its source names until its change is applied.
+const ownTurret=()=>!!state.previews.turret?.native_module||(!draftEditor.active()&&!gunEditor.active()&&!supportEditor.active()&&!!state.turret?.template&&state.turret.template===state.hull?.template);
+viewPieces=pieceVisibility({groups,data:()=>state.transform,removed:()=>state.transform.removed_meshes||[],removablePart:part=>part==='hull'||(part==='turret'&&ownTurret()),
+  setRemoved:list=>{remember();if(list.length)state.transform.removed_meshes=list;else delete state.transform.removed_meshes;updateBuild();},changed:()=>{viewPieces.restore();viewPieces.apply();if(!viewPieces.canEdit(state.editSeat?seatFigure(state.editSeat):poseTarget()))transformControl.detach();qol?.renderPieces();wakeView();}});
 state.qolCanEdit=()=>viewPieces.canEdit(state.editSeat?seatFigure(state.editSeat):poseTarget());
 const attachControl=transformControl.attach.bind(transformControl);
 transformControl.attach=object=>state.qolCanEdit()?attachControl(object):transformControl;
@@ -894,6 +1014,7 @@ recovery=draftRecovery({api,snapshot:recoverySnapshot,enabled:()=>qol?.options.a
   ready:()=>!!state.token&&!state.busy&&!state.inspectorPending&&!transformControl.dragging,
   onStatus:message=>{if(!state.busy)status(message);}});
 qol=editorQoL({$,control:transformControl,controls:[transformControl,armorEditor.cornerControl],visibility:viewPieces,target:()=>state.editSeat?seatFigure(state.editSeat):poseTarget(),reselect:()=>selectEdit(state.edit),reportError,status,recovery,restore:restoreDraft,
+  mark:objects=>{try{objects?highlight.showObjects(objects):highlight.clear();}catch(error){console.warn('piece highlight',error);highlight.clear();}},
   actions:{blocked:()=>state.busy||state.inspectorPending>0,move:()=>setTransformMode('translate'),rotate:()=>setTransformMode('rotate'),
     search:()=>{$('unit-search').focus();$('unit-search').select();},help:()=>$('help-dialog').showModal(),frame:()=>fitView(),space:()=>$('space-'+(transformControl.space==='world'?'local':'global')).click(),
     undo:()=>stepHistory('undo'),redo:()=>stepHistory('redo'),save:()=>recovery.save(true),

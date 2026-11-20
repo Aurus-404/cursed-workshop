@@ -1,7 +1,8 @@
 """Resizable steel fittings with matching visible and collision boundaries.
 
 Legacy rectangular plates retain their box volumes. Shaped plates and hollow
-cylinders use a single closed surface with native steel armor properties.
+cylinders show a single joined surface; the game gets one convex solid per cell
+(several around an opening or along a cylinder), each with native steel armor.
 """
 import hashlib
 import math
@@ -166,16 +167,20 @@ def volume_bytes(vertices, triangles):
             +b'SIDE'+struct.pack('<I',len(triangles))+bytes(len(triangles)))
 
 
+def cell_faces(value, polygon):
+    """The outward faces of one convex cell, each as its corner points."""
+    points, _ = cell_mesh(value, polygon)
+    n = len(polygon)
+    boundary = [list(range(n-1,-1,-1)),list(range(n,n*2))]
+    boundary += [[i,(i+1)%n,(i+1)%n+n,i+n] for i in range(n)]
+    return [[points[i] for i in face] for face in boundary]
+
+
 def surface_mesh(value):
-    """Join adjacent cells and discard their shared internal walls."""
+    """Join adjacent cells and discard their shared internal walls (the visible mesh)."""
     faces = {}
     for polygon in sections(value):
-        points, _ = cell_mesh(value, polygon)
-        n = len(polygon)
-        boundary = [list(range(n-1,-1,-1)),list(range(n,n*2))]
-        boundary += [[i,(i+1)%n,(i+1)%n+n,i+n] for i in range(n)]
-        for face in boundary:
-            coordinates = [points[i] for i in face]
+        for coordinates in cell_faces(value, polygon):
             key = tuple(sorted(tuple(round(x,8) for x in p) for p in coordinates))
             if key in faces:
                 del faces[key]
@@ -187,6 +192,26 @@ def surface_mesh(value):
         vertices.extend(face)
         triangles.extend((base,base+i,base+i+1) for i in range(1,len(face)-1))
     return vertices, triangles
+
+
+def collision_meshes(value):
+    """One closed convex solid per cell, its corners shared like the game's own
+    volumes. Every native volume is a solid without a through-hole; joined into
+    one ring, a plate with an opening or a hollow cylinder protected nothing
+    in battle (0 mm). Cells that touch only meet face to face."""
+    result = []
+    for polygon in sections(value):
+        vertices, index, triangles = [], {}, []
+        for face in cell_faces(value, polygon):
+            corners = []
+            for p in face:
+                key = tuple(round(x, 8) for x in p)
+                if key not in index:
+                    index[key] = len(vertices); vertices.append(p)
+                corners.append(index[key])
+            triangles.extend((corners[0],corners[i],corners[i+1]) for i in range(1,len(corners)-1))
+        result.append((vertices, triangles))
+    return result
 
 
 def sizes(value):
@@ -337,15 +362,17 @@ def attach(root, final, host, prefix, pose, value, files, flipped, set_matrix):
     set_matrix(bone, pose)
     host.append(bone)
     if any(key in value for key in ('shape', 'corners', 'hole')):
-        vertices, triangles = surface_mesh(value)
-        volume = prefix+'v0'
-        path = name.removesuffix('.ply')+'_0.vol'
-        if flipped:
-            triangles = [(a,c,b) for a,b,c in triangles]
-        files[path] = volume_bytes(vertices, triangles)
-        final['document'].append(block('{volume '+quote(volume)+' {polyhedron '+quote(path)+'} {bone '+quote(prefix+'root')+'}}'))
-        behavior = block(contract(value)); behavior.atoms[1].set(volume); root.append(behavior)
-        return [prefix+'root'], {'plate': volume}
+        made = {}
+        for k, (vertices, triangles) in enumerate(collision_meshes(value)):
+            volume = prefix+'v'+str(k)
+            path = name.removesuffix('.ply')+'_'+str(k)+'.vol'
+            if flipped:
+                triangles = [(a,c,b) for a,b,c in triangles]
+            files[path] = volume_bytes(vertices, triangles)
+            final['document'].append(block('{volume '+quote(volume)+' {polyhedron '+quote(path)+'} {bone '+quote(prefix+'root')+'}}'))
+            behavior = block(contract(value)); behavior.atoms[1].set(volume); root.append(behavior)
+            made['plate' if k == 0 else 'plate'+str(k)] = volume
+        return [prefix+'root'], made
     volume = prefix+'v0'
     final['document'].append(block('{volume '+quote(volume)+' {box '+' '.join('%.4f' % s for s in sizes(value))+'} {bone '+quote(prefix+'root')+'}}'))
     behavior = block(contract(value)); behavior.atoms[1].set(volume); root.append(behavior)

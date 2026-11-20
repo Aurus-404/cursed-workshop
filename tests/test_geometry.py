@@ -35,6 +35,10 @@ class GeometryTests(unittest.TestCase):
         self.assertIn('turret', data['mounts'])
         self.assertNotIn('basis', data['mounts'])
         self.assertEqual([m['bone'] for m in data['meshes']], ['body1'])
+        # A whole vehicle (Edit) draws its own turret: its meshes say so, for the turret color.
+        full = build_preview(Resources(), 'test', 'full')
+        self.assertEqual({m['bone']: bool(m.get('turret_branch')) for m in full['meshes']}, {'body1': False, 'turret': True})
+        self.assertFalse(any(m.get('turret_branch') for m in data['meshes']))
 
     def test_structural_rotation_frame_is_never_a_replaceable_turret(self):
         from workshop.geometry import replaceable_mounts, recipient_mount_name, build_preview

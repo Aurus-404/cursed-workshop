@@ -21,6 +21,7 @@ export async function loadUISettings(){
   uiStorage.setItem('cw.completionSound',saved.sound===false?'off':'on');
   uiStorage.setItem('cw.favorites',JSON.stringify(saved.favorites||{}));
   uiStorage.setItem('cw.editorOptions',JSON.stringify(saved.editor_options||{}));
+  uiStorage.setItem('cw.viewColors',JSON.stringify(saved.view_colors||{}));
 }
 export function saveUISettings(patch){
   // Keep rapid changes ordered, and let the next user action recover after an error.

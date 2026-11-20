@@ -235,7 +235,7 @@ def _profile(profile: dict | None) -> dict:
                "weaponry_policy", "weapon_places", "inventory_policy", "compatible_recipient_inventory",
                "removed_module_bones", "removed_module_volumes", "donor_module_bones",
                "donor_module_volumes", "allowed_damage_ids", "damage_id_mapping",
-               "hull_authority", "turret_authority", "commander_mg", "retired_inventory_users", "gun_swap", "smoke_launchers", "rider_mgs",
+               "hull_authority", "turret_authority", "commander_mg", "retired_inventory_users", "gun_swap", "smoke_launchers", "rider_mgs", "mounted_weapons",
                "weapon_copy_places", "ammo_totals"}
     if set(profile) - allowed:
         raise CampaignError(f"Unknown state profile fields: {sorted(set(profile) - allowed)}")
@@ -281,6 +281,13 @@ def _profile(profile: dict | None) -> dict:
                 not isinstance(m, dict) or any(not isinstance(m.get(key), str) or not m[key]
                                               for key in ('slot', 'item', 'initial_item', 'ammo_item')) for m in mounts):
             raise CampaignError('El perfil de inventario de las MG de pasajero no es válido.')
+    mounted = profile.get('mounted_weapons')
+    if mounted is not None:
+        mounts = mounted.get('mounts') if isinstance(mounted, dict) else None
+        if not isinstance(mounts, list) or any(
+                not isinstance(m, dict) or any(not isinstance(m.get(key), str) or not m[key]
+                                              for key in ('slot', 'item', 'initial_item', 'ammo_item')) for m in mounts):
+            raise CampaignError('El perfil de inventario de las armas montadas no es válido.')
     mount = profile.get('commander_mg')
     if mount is not None:
         if not isinstance(mount, dict) or any(not isinstance(mount.get(key), str) or not mount[key]
@@ -1188,7 +1195,8 @@ def apply_plan(snapshot: CampaignSnapshot, plan: dict) -> dict[str, bytes]:
             for user in copied.walk('user'):
                 if user.args == [previous_slot]:
                     user.atoms[1].set(mount['slot'])
-    for rider in ((plan['state_profile'].get('rider_mgs') or {}).get('mounts', []) if has_inventory else []):
+    for rider in ([*(plan['state_profile'].get('rider_mgs') or {}).get('mounts', []),
+                   *(plan['state_profile'].get('mounted_weapons') or {}).get('mounts', [])] if has_inventory else []):
         # Same rule as the commander's mount: a slot already holding the chosen
         # gun keeps it with its rounds; anything else there becomes cargo.
         box_node = copied.find('box')

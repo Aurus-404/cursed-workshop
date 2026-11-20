@@ -31,6 +31,23 @@ def active_mods(options_path: Path) -> list[str]:
     return mods.args if mods else []
 
 
+def mods_after_addon(options_path: str | Path | None) -> list[str]:
+    """Mods the game loads after the workshop addon, from the profile's list.
+
+    A later mod that ships the shared registries (entity.set: engine and other
+    sounds, the roster) replaces the addon's copy: a tester's vehicles lost
+    their engine sound with Horten's Frontline loaded after it. Empty when the
+    addon is last or not active (other checks cover that)."""
+    if options_path is None or not Path(options_path).is_file():
+        return []
+    try:
+        mods = active_mods(Path(options_path))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return []
+    own = [index for index, mod in enumerate(mods) if is_own_mod(mod)]
+    return [mod for mod in mods[own[-1] + 1:] if not is_own_mod(mod)] if own else []
+
+
 def planned_mod_order(options_path: str | Path | None, required: list[str]) -> list[str]:
     """The mod list options.set will have after activation, which is the order
     the game mounts them in: mods already active keep their place, the

@@ -115,6 +115,11 @@ def rebuild_registrations(index: ResourceIndex, addon: str | Path, *, identifier
     if any(is_own_mod(source["id"]) for source in index.sources):
         raise RegistrationError("Rebuild needs an index without the workshop addon")
     selected=set(identifiers) if identifiers is not None else None
+    if selected is not None and recorded_stack(addon)!=stack_signature(index):
+        # The other variants were registered for other mods: refreshing only
+        # some and recording this stack would hide the rest from every later
+        # check (the shop update did, and a tester's game crashed).
+        selected=None
     preserved={}
     if selected is not None:
         # Globals are shared, but other campaigns' own registrations stay intact.
@@ -493,6 +498,35 @@ def _interaction_defines(records):
     for name,macros in classes.items():
         if len({m.render() for m in macros})==1:definitions.setdefault(name,macros[0])
     return definitions
+
+
+def missing_interaction_macros(records):
+    """Macros the workshop's own interaction records call that the loaded files
+    cannot provide: [(path, name)]. The game stops loading the mod list with
+    "define not found" (a tester's Mobelwagen kept ("2cm_Flakvierling") from
+    MACE after he switched to Horten's Frontline).
+
+    A name counts as provided when any loaded file defines it, at any depth, or
+    when a native record calls it too (the engine's own functions, such as
+    (mod a b), are never defined)."""
+    def calls(node,found):
+        for child in node.children:
+            if getattr(child,'opener','')=='(':
+                # A call's own (name value) arguments are parameters, not calls.
+                if child.head:found.append(child.head)
+            else:
+                calls(child,found)
+        return found
+    provided,own=set(),[]
+    for path,record in records:
+        provided.update(n.args[0].casefold() for n in [record,*record.walk()] if n.head.casefold()=='define' and n.args)
+        if 'modular_workshop/' in str(path).replace(chr(92),'/'):own.append((path,record))
+        else:provided.update(name.casefold() for name in calls(record,[]))
+    missing=[]
+    for path,record in own:
+        for name in dict.fromkeys(calls(record,[])):
+            if name.casefold() not in provided:missing.append((path,name))
+    return missing
 
 
 def _interaction_events(node, defines, stack=()):
@@ -1299,6 +1333,44 @@ def _native_camera_profile(index, template):
     return materialize(node), provenance
 
 
+def _clip_distance_min(profile):
+    clip = profile.find('clip')
+    node = clip.find('distanceMin') if clip is not None else None
+    try:
+        return float(node.args[0]) if node is not None and node.args else None
+    except ValueError:
+        return None
+
+
+def fit_camera_clip(profile, limit=None):
+    """Keep the clip's minimum distance at or below every aiming level's activation distance.
+
+    Each aiming level's {distance} is the camera distance at which it activates;
+    the native sights that sit on a camera bone ({distance 1}, offset 0) pair it
+    with {clip {distanceMin 1}} (sdkfz251.17, kubel, hanomag, kwk39). A chassis
+    clip of 200 under such a transplanted sight lets the zoom wheel pull the
+    camera back to 200/20 = 10 m behind the sight bone at full zoom, showing the
+    vehicle from behind under the reticle. ``limit`` is the donor's own minimum.
+    """
+    clip = profile.find('clip')
+    node = clip.find('distanceMin') if clip is not None else None
+    current = _clip_distance_min(profile)
+    if node is None or current is None:
+        return profile
+    wanted = current if limit is None else min(current, limit)
+    for level in profile.find_all('level')[1:]:
+        distance = level.find('distance')
+        try:
+            value = float(distance.args[0]) if distance is not None and distance.args else None
+        except ValueError:
+            value = None
+        if value is not None and value < wanted and value <= 1:
+            wanted = value
+    if wanted < current:
+        node.atoms[1].set(format(wanted, 'g'))
+    return profile
+
+
 def _compose_camera(index, vehicle_scope, recipient, donor, new_id, bone_mapping):
     """Keep chassis external camera and transplant verified donor aiming levels."""
     materialize, provenance, profiles = _camera_profiles(index, vehicle_scope)
@@ -1332,6 +1404,7 @@ def _compose_camera(index, vehicle_scope, recipient, donor, new_id, bone_mapping
         recipient_profile.remove(level)
     for level in aiming:
         recipient_profile.append(level.clone())
+    fit_camera_clip(recipient_profile, _clip_distance_min(donor_profile))
     return recipient_profile, {"chassis": recipient, "turret": donor, "aiming_transferred": True,
                                "source_hashes": provenance}, []
 
@@ -1354,6 +1427,8 @@ def _resize_roster_crew(entry, roles):
     Work after roster macro expansion: inherited/default counts and previously
     generated entries must obey the same capacity as explicit crew(...) calls.
     Preserve native breeds, but retire a breed when fewer seats than breeds remain.
+    roles: the crew places, or the number of soldiers (crew_slots) when a towed
+    gun's push and tow places belong to someone already counted.
     """
     if roles is None:
         return entry
@@ -1362,7 +1437,7 @@ def _resize_roster_crew(entry, roles):
     counts = [int(m[2] or 1) for _, matches in fields for m in matches]
     if not counts:
         return entry  # No known native crew content; never invent a breed.
-    delta = len(roles) - sum(counts)
+    delta = (roles if isinstance(roles, int) else len(roles)) - sum(counts)
     if delta > 0:
         counts[0] += delta
     else:
@@ -1439,6 +1514,13 @@ def register_variant(index: ResourceIndex, compilation_result: dict, output_dir:
     if metadata.get('weapon_effects') and sound is None:
         sound = block('{' + quote(new_id) + '}')
     sound = install(sound, metadata.get('weapon_effects') or [], index)
+    if metadata.get('renamed_crew'):
+        # Seats the workshop named run no other seat's hatch script (crew_hatches).
+        from .crew_hatches import neutralize
+        records, _ = _load_include_graph(index, "set/interaction_entity/entity.set")
+        record = sound if sound is not None else block('{' + quote(new_id) + '}')
+        if neutralize(record, metadata['renamed_crew'], [node for _, node in records]) and sound is None:
+            sound = record
     if metadata.get('commander_mg'):
         from .commander_mg import add_interactions
         if sound is None:
@@ -1449,6 +1531,11 @@ def register_variant(index: ResourceIndex, compilation_result: dict, output_dir:
         from .commander_mg import add_mountable_fire
         if sound is None:sound=block('{'+quote(new_id)+'}')
         for mount in metadata['rider_mgs']['mounts']:add_mountable_fire(sound,mount['slot'])
+    if (metadata.get('mounted_weapons') or {}).get('mounts'):
+        from .mounted_weapons import add_interactions as add_mounted_interactions
+        if sound is None:sound=block('{'+quote(new_id)+'}')
+        add_mounted_interactions(sound,metadata['mounted_weapons'])
+        warnings.append('Mounted weapons: weapon placement, slot swapping and hull turning require battle acceptance.')
     if sound is not None or metadata.get('smoke_launchers'):
         from .smoke_launchers import add_interactions as add_smoke_interactions
         if sound is None: sound = block('{' + quote(new_id) + '}')
@@ -1499,7 +1586,12 @@ def register_variant(index: ResourceIndex, compilation_result: dict, output_dir:
         variants = [_offer_in_shop(_expand_macros(variants[0], defines), offer, side, armies, periods)]
     else:
         variants = [_hide_from_shop(roster, defines, _roster_side(roster) or side, armies) for roster in variants]
-    variants = [_resize_roster_crew(roster, metadata.get('crew_roles')) for roster in variants]
+    # A towed gun's push and tow places are the same two men (crew_slots), not
+    # six more: sizing by places spawned four extra soldiers on foot.
+    people = metadata.get('crew_slots')
+    if isinstance(people, bool) or not isinstance(people, int):
+        people = metadata.get('crew_roles')
+    variants = [_resize_roster_crew(roster, people) for roster in variants]
     # Reserve squads are named by army+breed+size, so several variants share
     # one. They live in a single shared file built from every manifest: one
     # definition per squad (no "Localization key redefinition"), and it
@@ -1586,6 +1678,7 @@ def register_variant(index: ResourceIndex, compilation_result: dict, output_dir:
         materialize, _, _ = _camera_profiles(index, vehicle_scope)
         camera = materialize(camera)
         camera_override(camera, metadata['sight'])
+        fit_camera_clip(camera)
         camera_provenance['custom_sight'] = metadata['sight']
     if model_path.is_file():
         from .geometry import parse_model

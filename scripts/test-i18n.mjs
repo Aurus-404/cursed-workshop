@@ -18,7 +18,7 @@ for(const [language,dict] of [['zh-CN',CHINESE],['ru',RU]]){
 const html=fs.readFileSync('frontend/index.html','utf8');
 // Check actual source call sites as well as dictionary-to-dictionary coverage.
 // A table can be complete while a newly added editor label is absent from it.
-const tables=new Set(['i18n.js','ru.js','zh-cn.js','ui-copy.js','armor-copy.js','support-copy.js','smoke-copy.js','rider-copy.js','passenger-copy.js','locale-extra.js']);
+const tables=new Set(['i18n.js','ru.js','zh-cn.js','ui-copy.js','armor-copy.js','support-copy.js','smoke-copy.js','rider-copy.js','passenger-copy.js','mounted-copy.js','locale-extra.js']);
 for(const file of fs.readdirSync('frontend').filter(name=>name.endsWith('.js')&&!tables.has(name))){
   const code=fs.readFileSync('frontend/'+file,'utf8');
   for(const m of code.matchAll(/\bt\(\s*(['"])((?:\\.|(?!\1)[^\\])*?)\1\s*\)/g)){

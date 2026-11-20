@@ -1,7 +1,8 @@
 import * as THREE from 'three';
 
-// Marks a part of the vehicle in the 3D view while the player points at it in
-// any list that picks a part (mount, bone, weapon place, attachment host...).
+// Marks a part of the vehicle, or a crewman, in the 3D view while the player
+// points at it in any list that picks one (mount, bone, weapon, attachment
+// host, crew place...: see hover-marks.js).
 // The part's meshes and everything hanging from it get a see-through tint (no
 // box: its lines cluttered the view); a part without geometry (dummy01, an empty locator) gets a marker on
 // its position, so every choice is visible.
@@ -42,7 +43,9 @@ export function partHighlight({scene,groups,previews}){
     clear();if(!spec)return false;
     const parts=spec.parts||['hull','turret'];
     let meshes=[];
-    if(spec.whole){groups[spec.whole]?.traverse(node=>{if(node.isMesh&&node.userData?.mesh&&node.visible!==false)meshes.push(node);});}
+    // A whole part means its model: the crew riding it are not what the choice changes.
+    const seated=node=>{for(let n=node;n;n=n.parent)if(n.userData?.seat)return true;return false;};
+    if(spec.whole){groups[spec.whole]?.traverse(node=>{if(node.isMesh&&node.userData?.mesh&&node.visible!==false&&!seated(node))meshes.push(node);});}
     else for(const part of parts){
       const names=spec.subtree===false?new Set(spec.bones):subtree(part,spec.bones||[]);
       meshes.push(...meshesOf(part,names));
@@ -61,5 +64,23 @@ export function partHighlight({scene,groups,previews}){
     if(point){marker(point);return true;}
     return false;
   }
-  return {show,clear};
+  // The viewport pieces list names objects, not bones: tint what they draw.
+  // A piece that is hidden (or taken off the vehicle) still gets a marker
+  // where it sits, so the player sees which one the row means.
+  function showObjects(objects){
+    clear();const meshes=[],box=new THREE.Box3();
+    for(const object of objects||[]){
+      object.updateWorldMatrix(true,true);box.expandByObject(object);
+      let shown=true;for(let n=object;n;n=n.parent)if(n.visible===false){shown=false;break;}
+      if(shown)object.traverseVisible(node=>{if(node.isMesh&&node.userData?.mesh)meshes.push(node);});
+    }
+    for(const mesh of meshes){
+      const overlay=new THREE.Mesh(mesh.geometry,tint);overlay.renderOrder=999;overlay.userData.keepGeometry=true;overlay.raycast=()=>{};
+      mesh.add(overlay);overlays.push(overlay);
+    }
+    if(meshes.length)return true;
+    if(box.isEmpty())return false;
+    marker(box.getCenter(new THREE.Vector3()));return true;
+  }
+  return {show,showObjects,clear};
 }

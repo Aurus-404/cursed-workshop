@@ -1,6 +1,6 @@
 import {t} from './i18n.js';
 
-export function shopEditor({state,$,api,operation,artwork,svgVehicle,reportError,refreshConfig,reloadText,confirm=(...ask)=>globalThis.confirm(...ask)}) {
+export function shopEditor({state,$,api,operation,artwork,svgVehicle,reportError,refreshConfig,reloadText,edit=null,confirm=(...ask)=>globalThis.confirm(...ask)}) {
   let controls=[];
   const dirty=row=>row.archived!==row.originalArchived || row.box.checked!==row.originalOn || (row.box.checked && (row.needsUpdate || row.price.value!==row.originalPrice || row.reset));
   const refresh=()=>{$('shop-apply').disabled=!controls.some(dirty);};
@@ -24,7 +24,10 @@ export function shopEditor({state,$,api,operation,artwork,svgVehicle,reportError
         const reset=document.createElement('button');reset.type='button';reset.className='text-button';reset.textContent=t('Usar sugerido');
         const remove=document.createElement('button');remove.type='button';remove.className='shop-remove';remove.textContent=t('Eliminar de la lista');
         remove.title=t('Lo saca de la tienda y de esta lista. Los vehículos que ya tenés en tus partidas se conservan.');
-        field.append(title,price,hint);row.append(box,icon,name,field,reset,remove);
+        // Reopens its saved design in the editor; building it sells the new version instead.
+        const change=document.createElement('button');change.type='button';change.className='shop-edit';change.textContent=t('Editar');
+        change.title=t('Abre su diseño en el editor. Al construir, la Tienda vende la versión cambiada en lugar de esta. Los vehículos que ya compraste se conservan.');
+        field.append(title,price,hint);row.append(box,icon,name,field,reset,...(edit?[change]:[]),remove);
         // Built with mods that are not active now: it cannot be put on sale,
         // but it can still be taken off sale or removed from the list.
         if(vehicle.unavailable){
@@ -32,7 +35,7 @@ export function shopEditor({state,$,api,operation,artwork,svgVehicle,reportError
           row.classList?.add('unavailable');
           const note=document.createElement('small');note.className='shop-note';
           note.textContent=t('Hecho con mods que no están activos. No se puede vender así.');note.title=vehicle.unavailable;
-          row.append(note);
+          change.disabled=true;row.append(note);
         }
         $('shop-list').append(row);
         const control={id:vehicle.id,name:vehicle.name,box,price,originalOn:box.checked,originalPrice:price.value,
@@ -43,6 +46,11 @@ export function shopEditor({state,$,api,operation,artwork,svgVehicle,reportError
           if(!confirm(t('¿Eliminar «{name}» de la lista de la Tienda de la Conquista?\n\nDeja de venderse y no vuelve a aparecer en esta lista. Los vehículos que ya tenés en tus partidas se conservan.').replace('{name}',vehicle.name)))return;
           control.archived=true;box.checked=false;
           if(!await apply()){control.archived=false;box.checked=control.originalOn;}
+        };
+        change.onclick=async()=>{
+          if(state.busy||!edit)return;
+          if(controls.some(dirty)&&!confirm(t('Hay cambios de la Tienda sin aplicar. Editar este vehículo los descarta. ¿Continuar?')))return;
+          $('shop-dialog').close();await edit(vehicle);
         };
         box.onchange=()=>{price.disabled=!box.checked;refresh();};
         price.oninput=()=>{control.reset=false;refresh();};

@@ -29,6 +29,23 @@ class FakeResources:
 
 
 class CrewModelTests(unittest.TestCase):
+    def test_a_clip_keeps_the_mirror_of_a_mirrored_rest_bone(self):
+        # The soldier's left leg sits mirrored under its mirrored body; clips
+        # key only its turn. Dropping the mirror skinned the leg inside out.
+        import math
+        from workshop.crew_model import _posed_worlds
+        from workshop.geometry import parse_model, linear_determinant
+        model=parse_model(b'{skeleton {bone "basis" {bone "leg" {orientation 1 0 0 0 1 0 0 0 -1}{bone "shin" {position 0 0 5}}}}}')
+        rest=_posed_worlds(model,{})
+        posed=_posed_worlds(model,{'leg':(None,(0.0,0.0,0.0))})
+        for name in ('leg','shin'):
+            self.assertEqual([[round(v,6) for v in row] for row in posed[name]],
+                             [[round(v,6) for v in row] for row in rest[name]],f'{name}: the rest turn keyed is the rest pose')
+        s=math.sin(math.pi/4)
+        turned=_posed_worlds(model,{'leg':(None,(0.0,0.0,s))})
+        self.assertLess(linear_determinant(turned['leg']),0,'the mirror survives a turn')
+        self.assertEqual([round(turned['shin'][r][3],6) for r in range(3)],[0,0,-5],'children hang where the rest pose puts them')
+
     def test_boarded_actor_discards_the_animated_root_in_every_pose(self):
         from unittest.mock import patch
         from workshop.geometry import euler_matrix

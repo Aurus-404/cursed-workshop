@@ -18,18 +18,20 @@ export function previewMesh(mesh, material) {
   const object=new THREE.Mesh(geometry,material);object.userData={mesh,flat:material};return object;
 }
 
-export function applyModelTextures(groups, enabled, materialFor, wire) {
+// Textures off: every piece in the plain color of its kind (`colorFor`), a
+// custom plate's paint included. Seat figures, ghost candidates and marked
+// native slots keep the material they were given.
+export function applyModelTextures(groups, enabled, materialFor, wire, colorFor=null) {
   for(const [part,group] of Object.entries(groups))group.traverse(child=>{
-    if(child.userData?.customArmor){
-      child.material=child.userData.flat;child.material.wireframe=wire;return;
-    }
-    const mesh=child.userData?.mesh;if(!mesh)return;
-    if(enabled&&mesh.uv?.length&&mesh.submeshes?.some(s=>s.mtl)){
+    const mesh=child.userData?.mesh,flat=child.userData?.flat;if(!mesh||!flat||!child.isMesh)return;
+    if(enabled&&!child.userData.customArmor&&mesh.uv?.length&&mesh.submeshes?.some(s=>s.mtl)){
       child.geometry.clearGroups();
-      child.material=mesh.submeshes.map((s,i)=>{child.geometry.addGroup(s.start,s.count,i);return s.mtl?materialFor(s.mtl,s.texture_token):child.userData.flat;});
+      child.material=mesh.submeshes.map((s,i)=>{child.geometry.addGroup(s.start,s.count,i);return s.mtl?materialFor(s.mtl,s.texture_token):flat;});
     }else{child.geometry.clearGroups();
-      if(!enabled&&child.userData.flat.map){child.userData.untextured??=child.userData.flat.clone();child.userData.untextured.map=null;if(['smoke_launchers','extra_armor'].includes(part))child.userData.untextured.color.set(0xc5a36b);child.userData.untextured.needsUpdate=true;}
-      child.material=!enabled&&child.userData.untextured||child.userData.flat;}
+      const keep=flat.userData?.shared||flat.userData?.keepColor||flat.transparent;
+      if(enabled||keep||!colorFor&&!flat.map)child.material=flat;
+      else{const plain=child.userData.untextured??=flat.clone();plain.map=null;
+        plain.color.set(colorFor?colorFor(part,mesh):0xc5a36b);plain.needsUpdate=true;child.material=plain;}}
     for(const material of [child.material].flat())material.wireframe=wire;
   });
 }

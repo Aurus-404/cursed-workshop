@@ -9,6 +9,7 @@ game picks the face thickness; measured on native hulls: 1 front, 2 top,
 from __future__ import annotations
 
 import math
+import re
 import struct
 
 from .geometry import identity, multiply, node_matrix, point, resolve_path
@@ -135,5 +136,31 @@ def armor_volumes(resources, root, model, path, keep, adjustment=None):
             "high_hardness": definition.find("HighHardness") is not None,
             "component": next((c.args[0] for c in definition.find_all("component") if c.args), None),
             "positions": positions, "indices": indices, "faces": faces,
+            "_cells": _plate_cells(bone, shape.args[0] if kind == "polyhedron" else None),
         })
+    return _join_plate_cells(result)
+
+
+def _plate_cells(bone, path):
+    """A workshop plate's convex cells share one mesh name: "cw_plate_<id>_<cell>.vol"."""
+    match = re.fullmatch(r"(cw_plate_[0-9a-f]+(?:_f)?)_\d+\.vol", (path or "").replace("\\", "/").rsplit("/", 1)[-1])
+    return (bone, match[1]) if match else None
+
+
+def _join_plate_cells(volumes):
+    """The game needs a plate with an opening (or a hollow cylinder) as several
+    convex solids; the view shows and names it as the one plate it is."""
+    result, joined = [], {}
+    for volume in volumes:
+        key = volume.pop("_cells")
+        if key is None or key not in joined:
+            result.append(volume)
+            if key is not None:
+                joined[key] = volume
+            continue
+        plate = joined[key]
+        base = len(plate["positions"]) // 3
+        plate["positions"] = plate["positions"] + volume["positions"]
+        plate["indices"] = plate["indices"] + [i + base for i in volume["indices"]]
+        plate["faces"] = plate["faces"] + volume["faces"]
     return result

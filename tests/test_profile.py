@@ -52,3 +52,21 @@ class PlannedOrderTests(unittest.TestCase):
             order = planned_mod_order(options, ["mod_2926397026:0", "mod_2905667604:0", "mod_3792487101:0", "modular_workshop:0"])
             self.assertEqual(order, ["mod_2905667604:0", "mod_2926397026:0", "mod_3792487101:0", "modular_workshop:0"])
             self.assertEqual(planned_mod_order(None, ["b:0", "a:0"]), ["b:0", "a:0", "modular_workshop:0"])
+
+
+class ModsAfterAddonTests(unittest.TestCase):
+    def test_mods_loaded_after_the_vehicles_mod_are_reported(self):
+        # A tester's engines went quiet: Horten's Frontline loaded after the addon
+        # and replaced its entity.set.
+        import tempfile
+        from pathlib import Path
+        from workshop.profile import mods_after_addon
+        with tempfile.TemporaryDirectory() as folder:
+            options = Path(folder) / 'options.set'
+            options.write_text('{options {mods "mod_1:0" "modular_workshop:0" "mod_3359417100:0" "mod_3831696729:0"}}', encoding='utf-8')
+            self.assertEqual(mods_after_addon(options), ['mod_3359417100:0', 'mod_3831696729:0'])
+            options.write_text('{options {mods "mod_1:0" "modular_workshop:0"}}', encoding='utf-8')
+            self.assertEqual(mods_after_addon(options), [])
+            options.write_text('{options {mods "mod_1:0"}}', encoding='utf-8')
+            self.assertEqual(mods_after_addon(options), [])
+        self.assertEqual(mods_after_addon(None), [])

@@ -24,7 +24,7 @@ def design_turrets(draft):
     return rows if isinstance(rows,list) else []
 
 
-EXTRAS=('commander_mg','extra_armor','smoke_launchers','towing','charge','rider_mgs','passenger_seats','crew_hidden','crew_seats','crew_exclude','crew_static','crew_fixed','joint_limits','mobility')
+EXTRAS=('commander_mg','extra_armor','smoke_launchers','towing','charge','rider_mgs','passenger_seats','extra_crew','mounted_weapons','crew_hidden','crew_seats','crew_exclude','weapon_operators','crew_static','crew_fixed','joint_limits','mobility')
 
 
 def weapon_identity(transform):
@@ -106,7 +106,21 @@ def specification(transform):
     return draft
 
 
-def compile_draft(resources,recipient,donor,transform,output,identifier):
+def follow_crew(module_crew,metadata):
+    """Carry each saved turret's crew names through a later step.
+
+    crew_exclude, crew_seats and weapon_operators name the finished vehicle's
+    places. A later step may still rename places the vehicle already has (a new
+    main gun takes "gunner"): its crew rows say so (part "hull", the name before
+    the step as source_place). A place a step drops keeps its last name.
+    """
+    renamed={row['source_place']:row['place'] for row in metadata.get('crew_visibility') or []
+             if row.get('part')=='hull' and row.get('source_place') and row.get('place')}
+    for names in module_crew.values():
+        for local,place in names.items():names[local]=renamed.get(place,place)
+
+
+def compile_draft(resources,recipient,donor,transform,output,identifier,module_crew=None):
     from .compiler import compile_assembly
     from .gun_assembly import compile_guns
     # A reopened vehicle moved its inherited fittings to this design: without its
@@ -117,6 +131,9 @@ def compile_draft(resources,recipient,donor,transform,output,identifier):
     draft=specification(transform);output=Path(output);steps=[];hashes={};views=[];view=resources;current=recipient;seed_camera={};seed_interaction=None;removals=[];assemblies=[]
     if draft.get('removals'):
         return _compile_removed_design(resources,recipient,donor,transform,output,identifier,draft)
+    # {design mount: {donor's own place: its place on the finished vehicle}}: the
+    # editor reopens a saved turret on its own and must show its crew by these names.
+    module_crew=copy.deepcopy(module_crew or {})
     extras={k:copy.deepcopy(transform[k]) for k in EXTRAS if k in transform}
     def remember(result,kind,source=None):
         metadata=result['metadata']
@@ -138,7 +155,9 @@ def compile_draft(resources,recipient,donor,transform,output,identifier):
         try:
             seed=draft.get('seed')
             if seed:
-                core={k:v for k,v in seed['transform'].items() if k not in ('commander_mg','extra_armor','smoke_launchers','rider_mgs','passenger_seats','crew_hidden','weapon_attributes','sight')}
+                # Pieces taken off the model stay editable on the design: the
+                # seed keeps them, the finished vehicle drops them.
+                core={k:v for k,v in seed['transform'].items() if k not in ('commander_mg','extra_armor','smoke_launchers','rider_mgs','passenger_seats','extra_crew','mounted_weapons','crew_hidden','weapon_attributes','sight','removed_meshes')}
                 initial=compile_assembly(view,seed['recipient'],seed['donor'],core,temp/'seed','mw_draft_seed')
                 seed_interaction=initial['metadata'].get('interaction_donor')
                 seed_camera={k:copy.deepcopy(initial['metadata'][k]) for k in
@@ -154,6 +173,9 @@ def compile_draft(resources,recipient,donor,transform,output,identifier):
             # vehicle the previous ones left: a Nb.Fz can take three donors.
             turrets=draft.get('turrets') or [];main=None
             module_roots={}
+            # Weapon places the saved turrets brought: each later step decides
+            # again whether they turn the hull (limits set later still count).
+            design_guns=set()
             limits=extras.get('joint_limits') or {}
             if turrets and 'joint_limits' in extras:extras['joint_limits']={k:v for k,v in limits.items() if k!='turret'}
             for number,turret in enumerate(turrets):
@@ -172,10 +194,16 @@ def compile_draft(resources,recipient,donor,transform,output,identifier):
                     tr={'commander_only':True,'module_poses':{turret['recipient_mount']:turret.get('pose') or {}}}
                     if turret.get('mount_parent'):tr['module_parents']={turret['recipient_mount']:turret['mount_parent']}
                     if own:tr['joint_limits']={'hull':own}
+                if design_guns:tr['_design_guns']=sorted(design_guns)
                 initial=compile_assembly(view,current,current if native else turret['donor_template'],tr,temp/f'turret{number}',f'mw_draft_turret{number}')
                 if native:
                     initial['metadata']['state_profile'].update(weaponry_policy='recipient',inventory_policy='recipient')
                 module_roots[turret.get('recipient_mount') or 'turret']=turret['recipient_mount'] if native else initial['metadata']['bone_mapping'].get(tr['donor_mount'],initial['metadata']['donor_mount'])
+                follow_crew(module_crew,initial['metadata'])
+                if not native:design_guns.update(initial['metadata'].get('module_places') or [])
+                if not native:
+                    module_crew[turret.get('recipient_mount') or 'turret']={row['source_place']:row['place']
+                        for row in initial['metadata'].get('crew_visibility') or [] if row.get('part')=='turret' and row.get('source_place')}
                 remember(initial,'module_edit' if native else 'turret',turret);overlay(initial)
                 if initial['metadata'].get('weapon_assembly'):assemblies.append(initial['metadata']['weapon_assembly'])
                 if not native and (main is None or (turret.get('recipient_mount') or 'turret')=='turret'):main=(turret,initial)
@@ -193,21 +221,22 @@ def compile_draft(resources,recipient,donor,transform,output,identifier):
                     frames[row['place']]=model['bones'][spec['pivot']]['world']
             assembled=temp/'assembled' if move_hull else output
             if guns:
-                result=compile_guns(view,current,guns[0]['donor_template'],{**extras,'_design_crew':True,'gun_swaps':guns},assembled,identifier,stage_profiles=True)
+                result=compile_guns(view,current,guns[0]['donor_template'],{**extras,'_design_crew':True,'gun_swaps':guns,**({'_design_guns':sorted(design_guns)} if design_guns else {})},assembled,identifier,stage_profiles=True)
                 for row,entry in zip(guns,result['metadata']['gun_profiles']):
                     steps.append({'kind':'gun','donor_template':entry['donor_template'],'donor_eid':row.get('donor_eid'),'donor_depot':row.get('donor_depot'),'donor_catalog':bool(row.get('donor_catalog')),
                         'profile':entry['profile'],'inventory_boxes':[]})
             else:
-                result=compile_assembly(view,current,current,{**extras,'commander_only':True},assembled,identifier)
+                result=compile_assembly(view,current,current,{**extras,'commander_only':True,**({'_design_guns':sorted(design_guns)} if design_guns else {})},assembled,identifier)
+            follow_crew(module_crew,result['metadata'])
             if move_hull:
                 original_metadata=copy.deepcopy(result['metadata']);overlay(result)
-                placed=compile_assembly(view,current,current,{'commander_only':True,'hull':hull_pose},output,identifier)
+                placed=compile_assembly(view,current,current,{'commander_only':True,'hull':hull_pose,**({'_design_guns':sorted(design_guns)} if design_guns else {})},output,identifier)
                 final_metadata=placed['metadata']
                 placed['metadata']={**original_metadata,**{k:final_metadata[k] for k in ('file_hashes','validation')}}
                 placed['diagnostics']=[*result['diagnostics'],*placed['diagnostics']];result=placed
             metadata=result['metadata'];hashes.update({p:h for p,h in metadata['source_hashes'].items() if '/workshop/mw_draft_' not in p})
             metadata.update(recipient=recipient,donor=donor,transform=copy.deepcopy(transform),draft_steps=steps,
-                draft_frames=frames,source_hashes=hashes,draft_module_roots=module_roots)
+                draft_frames=frames,source_hashes=hashes,draft_module_roots=module_roots,draft_module_crew=module_crew)
             if removals:
                 # No transient overlay may become a depot/recipe dependency.
                 for row in removals:row['template']=recipient
@@ -257,12 +286,14 @@ def _compile_removed_design(resources,recipient,donor,transform,output,identifie
         temp=Path(temporary);snapshot=compile_draft(resources,recipient,donor,core,temp/'parts',identifier+'_parts')
         view=resources.with_overlay(temp/'parts');views.append(view);current=snapshot['id']
         removed=[];steps=copy.deepcopy(snapshot['metadata']['draft_steps'])
+        module_crew=copy.deepcopy(snapshot['metadata'].get('draft_module_crew') or {})
         try:
             for number,row in enumerate(draft['removals']):
                 mount=snapshot['metadata'].get('draft_module_roots',{}).get(row['mount'],row['mount'])
                 last=number==len(draft['removals'])-1;target=output if last and not deferred else temp/str(number)
                 result=compile_assembly(view,current,current,{'remove_module':{'schema':1,'mount':mount}},target,
                     identifier if last and not deferred else 'mw_draft_remove'+str(number))
+                module_crew.pop(row['mount'],None);follow_crew(module_crew,result['metadata'])
                 contract=copy.deepcopy(result['metadata']['removed_module'])
                 contract.update(template=snapshot['id'],source_mount=mount,design_mount=row['mount'])
                 removed.append(contract)
@@ -271,14 +302,15 @@ def _compile_removed_design(resources,recipient,donor,transform,output,identifie
                 if not last or deferred:
                     view=view.with_overlay(target);views.append(view);current=result['id']
             if deferred:
-                result=compile_draft(view,current,donor,{'assembly_draft':{'schema':1,'turrets':deferred,'guns':[]}},output,identifier)
+                result=compile_draft(view,current,donor,{'assembly_draft':{'schema':1,'turrets':deferred,'guns':[]}},output,identifier,module_crew=module_crew)
                 steps.extend(result['metadata']['draft_steps'])
+                module_crew=result['metadata'].get('draft_module_crew') or module_crew
             metadata=result['metadata'];base=snapshot['metadata'];final_profile=metadata['state_profile']
             retired={p for row in removed for p in row['removed_places']}
             profile=copy.deepcopy(base['state_profile']);profile.update(final_profile)
             profile['retired_inventory_users']=sorted(retired|set(final_profile.get('retired_inventory_users',[])))
             final=parse_model((output/'resource'/result['model_path']).read_bytes());bones=set(final['bones']);slots=set(profile['weapon_places'])
-            for field in ('commander_mg','smoke_launchers','rider_mgs'):
+            for field in ('commander_mg','smoke_launchers','rider_mgs','mounted_weapons'):
                 contract=copy.deepcopy(base.get(field))
                 if not contract:continue
                 if field=='commander_mg':
@@ -290,7 +322,9 @@ def _compile_removed_design(resources,recipient,donor,transform,output,identifie
                 if field in profile:profile[field]=contract
             metadata.update(recipient=recipient,donor=donor,transform=copy.deepcopy(transform),state_profile=profile,
                 draft_steps=steps,draft_frames=base.get('draft_frames',{}),removed_modules=removed,
-                draft_module_roots=base.get('draft_module_roots',{}),source_hashes={**base['source_hashes'],
+                # Deck mounts fitted after the cut are design modules too.
+                draft_module_roots={**base.get('draft_module_roots',{}),**((metadata.get('draft_module_roots') or {}) if deferred else {})},
+                draft_module_crew=module_crew,source_hashes={**base['source_hashes'],
                     **{p:h for p,h in metadata['source_hashes'].items() if '/workshop/mw_draft_' not in p and '/workshop/'+snapshot['id']+'/' not in p}})
             metadata['state_profile'].update(hull_authority=recipient,turret_authority=donor)
             metadata['extra_armor']=[m for m in base.get('extra_armor') or [] if set(m.get('bones',[]))<=bones]

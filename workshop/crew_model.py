@@ -20,7 +20,7 @@ import re
 import struct
 
 from .compiler import _animation_map, _legacy_layout, _legacy_matrix, _quat_matrix
-from .geometry import inverse, multiply, parse_model, resolve_path, attached_actor_frame, identity, point
+from .geometry import inverse, multiply, parse_model, resolve_path, attached_actor_frame, identity, point, linear_determinant
 from .syntax import parse
 
 SOLDIER = "entity/humanskin/[germans]/ger_heer_43_panzer/ger_heer_43_pzwaffe_1.mdl"
@@ -108,8 +108,13 @@ def _posed_worlds(model, clip):
         matrix = [row[:] for row in rest]
         if rotation is not None:
             rotated = _quat_matrix(rotation)
+            # A clip keys only the turn. A mirrored rest bone (the soldier's
+            # left leg under its mirrored body) is that turn with its local Z
+            # negated; dropping the mirror skinned the leg inside out, so its
+            # faces were lit from behind and the trousers looked washed out.
+            mirror = -1.0 if linear_determinant(rest) < 0 else 1.0
             for r in range(3):
-                matrix[r][:3] = rotated[r][:3]
+                matrix[r][:3] = [rotated[r][0], rotated[r][1], rotated[r][2] * mirror]
         if position is not None:
             for r in range(3):
                 matrix[r][3] = position[r]

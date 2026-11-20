@@ -10,10 +10,20 @@ export function visibilityKey(state){
 export function visibilityRows(state){
   return state.crewVisibility?.key===visibilityKey(state)?state.crewVisibility.rows:[];
 }
+// Crew settings (crew_exclude, crew_hidden, crew_seats) name the finished
+// vehicle's places. In a design the preview says which drawn parts already use
+// those names: the compiled chassis, a turret of its own cut from it, a saved
+// donor reopened unchanged. A donor still being tried shows its own names, so no
+// setting may touch its seats through a name it only happens to share.
+// null outside a design: a plain combination draws its two source models.
+export function vehiclePlaceParts(state){
+  if(!state.transform?.assembly_draft)return null;
+  return ['hull','turret'].filter(part=>state.previews?.[part]?.vehicle_places);
+}
 export function crewHidden(state,part,place){
-  const hidden=new Set(state.transform.crew_hidden||[]);
+  const hidden=new Set(state.transform.crew_hidden||[]),final=vehiclePlaceParts(state);
   return visibilityRows(state).some(row=>hidden.has(row.place)&&
-    (part==='commander_mg'?row.place==='commander':state.transform.assembly_draft&&!state.pendingTurret?row.place===place:row.part===part&&row.source_place===place));
+    (part==='commander_mg'?row.place==='commander':final?final.includes(part)&&row.place===place:row.part===part&&row.source_place===place));
 }
 export function crewVisibilityEditor({state,$,remember,applyShow,refreshCheck,roleName,detachHidden}){
   function render(){
@@ -27,8 +37,11 @@ export function crewVisibilityEditor({state,$,remember,applyShow,refreshCheck,ro
       reset.onclick=()=>{remember();delete state.transform.crew_hidden;applyShow();render();refreshCheck();};
       list.append(reset);
     }
+    const final=vehiclePlaceParts(state);
     for(const row of rows){
       const label=document.createElement('label');label.className='crew-row';
+      // Pointing at the row marks that crewman (a marker where he works when he has no seat).
+      label.dataset.mark=JSON.stringify(final?{crew:row.place}:{crew:row.source_place,part:row.part});
       const box=document.createElement('input');box.type='checkbox';box.checked=hidden.has(row.place);
       box.disabled=state.busy||!row.can_hide;
       box.title=t(row.native_internal?'Este puesto ya es interno; no tiene un modelo visible.':

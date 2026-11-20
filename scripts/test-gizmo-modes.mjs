@@ -11,15 +11,18 @@ let part='turret';const state={busy:false,inspectorPending:0};
 const inspector={navigation:{pose:()=>true,part:()=>part}};
 let cornersStopped=0;
 const armorEditor={stopCorners(){cornersStopped++;}};
-new Function('state','inspector','selectEdit','transformControl','$','armorEditor',source)(state,inspector,p=>controls.attach(targets[p]),controls,$,armorEditor);
+let placingCrew=false;const crewModes=[];const extraCrew={placing:()=>placingCrew,setMode:mode=>crewModes.push(mode)};
+new Function('state','inspector','selectEdit','transformControl','$','armorEditor','extraCrew',source)(state,inspector,p=>controls.attach(targets[p]),controls,$,armorEditor,extraCrew);
 for(part of ['turret','extra_armor','smoke_launchers']){
   $('pose-rotate').onclick();assert.equal(controls.getMode(),'rotate');assert.equal(controls.object,targets[part]);
   const colors=new Set();controls.getHelper().traverse(n=>{if(n.material?.color)colors.add(n.material.color.getHex());});
   assert.ok(colors.has(0xff0000)&&colors.has(0x00ff00)&&colors.has(0x0000ff),'native color rings are present');
   $('pose-move').onclick();assert.equal(controls.getMode(),'translate');
 }
+// Placing an extra crewman keeps the gizmo on him instead of re-selecting the part.
+placingCrew=true;controls.attach(targets.smoke_launchers);$('mode-rotate').onclick();assert.deepEqual(crewModes,['rotate']);assert.equal(controls.object,targets.smoke_launchers);placingCrew=false;$('mode-move').onclick();
 state.inspectorPending=1;$('mode-rotate').onclick();assert.equal(controls.getMode(),'translate');
-assert.equal(cornersStopped,6,'Whole-piece movement and rotation leave corner editing');
+assert.equal(cornersStopped,8,'Whole-piece movement and rotation leave corner editing');
 console.log('Gizmo modes: real Three.js controls rotate guns, armor and smoke, retaining async locks.');
 
 const html=fs.readFileSync('frontend/index.html','utf8');

@@ -95,24 +95,62 @@ class CustomArmorTests(unittest.TestCase):
             source=custom_armor.plate(plate(shape=shape))
             corners=[[x+5,y-3] for x,y in custom_armor.outline(source)]
             variants.append({'shape':shape,'corners':corners})
+        def solid(points, triangles):
+            """Signed volume of a closed mesh (divergence theorem)."""
+            total = 0
+            for a, b, c in triangles:
+                p, q, r = points[a], points[b], points[c]
+                total += (p[0]*(q[1]*r[2]-q[2]*r[1]) - p[1]*(q[0]*r[2]-q[2]*r[0]) + p[2]*(q[0]*r[1]-q[1]*r[0]))/6
+            return total
         for changes in variants:
             with self.subTest(changes=changes):
                 fitting = plate(**changes)
                 result, root, model, recipe, files = self.compile({'extra_armor': [fitting]})
                 value = custom_armor.plate(fitting)
-                volumes = [v for key, v in model['volumes'].items() if key.startswith('mw_armor_')]
-                self.assertEqual(len(volumes), 1)
-                for volume in volumes:
+                volumes = {key: v for key, v in model['volumes'].items() if key.startswith('mw_armor_')}
+                self.assertEqual(len(volumes), len(custom_armor.sections(value)), 'one solid per convex cell')
+                visible = solid(*custom_armor.surface_mesh(value))
+                covered = 0
+                for name, volume in volumes.items():
                     path = volume['node'].find('polyhedron').args[0]
                     points, indices, _ = read_volume_mesh(files[path])
-                    expected, triangles = custom_armor.surface_mesh(value)
-                    self.assertEqual(len(indices), len(triangles)*3)
-                    for actual, wanted in zip(points, expected):
-                        for a, b in zip(actual, wanted):
-                            self.assertAlmostEqual(a, b, places=4)
+                    triangles = [indices[i:i+3] for i in range(0, len(indices), 3)]
                     self.assertTrue(all(math.isfinite(n) for p in points for n in p))
+                    edges = {tuple(sorted(e)) for a, b, c in triangles for e in ((a, b), (b, c), (c, a))}
+                    self.assertEqual(len(points) - len(edges) + len(triangles), 2,
+                                     'a closed solid with shared corners and no through-hole, like every native volume')
+                    for a, b, c in triangles:
+                        u = [points[b][i]-points[a][i] for i in range(3)]; w = [points[c][i]-points[a][i] for i in range(3)]
+                        normal = [u[1]*w[2]-u[2]*w[1], u[2]*w[0]-u[0]*w[2], u[0]*w[1]-u[1]*w[0]]
+                        side = [sum(normal[i]*(p[i]-points[a][i]) for i in range(3)) for p in points]
+                        self.assertFalse(max(side) > 1e-6 and min(side) < -1e-6, 'every collision solid is convex')
+                    part = solid(points, triangles)
+                    self.assertGreater(part * (covered or part), 0, 'every cell faces the same way')
+                    covered += part
+                    contract = next(v for v in root.find_all('volume') if v.args == [name])
+                    self.assertEqual((contract.find('thickness').args, contract.find('tags').args), (['40'], ['armor']))
+                self.assertAlmostEqual(abs(covered), abs(visible), places=3, msg='the solids fill exactly the visible plate')
                 again = self.compile(recipe['metadata']['transform'])[0]
                 self.assertEqual(result['metadata']['file_hashes'], again['metadata']['file_hashes'])
+
+    def test_a_plate_with_an_opening_and_a_hollow_cylinder_protect_with_their_thickness(self):
+        """TheOppsAreOntoMe: a 40 mm plate with a circular opening read 0 mm in battle and every
+        round went through; joined into one ring, its collision had a through-hole no game volume has."""
+        from workshop.armor_view import armor_volumes
+        for changes in ({'hole': {'x': 268, 'y': 745, 'diameter': 180}, 'width': 440, 'height': 1080}, {'shape': 'cylinder'}):
+            with self.subTest(changes=changes):
+                result, root, model, _, files = self.compile({'extra_armor': [plate(**changes)]})
+                names = sorted(v for v in model['volumes'] if v.startswith('mw_armor_0_'))
+                self.assertGreater(len(names), 1)
+                self.assertTrue(set(names) <= set(result['metadata']['state_profile']['allowed_damage_ids']))
+                self.assertEqual(sorted(result['metadata']['extra_armor'][0]['volumes'].values()), names)
+                class Folder:
+                    def read(self, path): return files[path.rsplit('/', 1)[-1]]
+                    def exists(self, path): return path.rsplit('/', 1)[-1] in files
+                shown = [v for v in armor_volumes(Folder(), root, model, 'x/mw_plate.mdl', lambda bone: True)
+                         if v['name'].startswith('mw_armor_')]
+                self.assertEqual([v['name'] for v in shown], ['mw_armor_0_v0'], 'the armour view shows one plate, not its cells')
+                self.assertEqual(shown[0]['thickness'], {'default': 40.0})
 
     def test_invalid_corners_openings_and_cylinder_walls_are_rejected(self):
         invalid = [

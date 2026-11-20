@@ -22,7 +22,7 @@ export function passengerEditor({state,$,groups,scene,job,loading,remember,selec
   function tidy(){const value=state.transform.passenger_seats;if(!value)return;
     if(!value.added?.length)delete value.added;if(value.native&&!Object.keys(value.native).length)delete value.native;
     if(!value.added&&!value.native)delete state.transform.passenger_seats;}
-  function dispose(node){node.traverse(n=>{if(!n.userData.keepGeometry)n.geometry?.dispose();for(const m of [n.material].flat())if(m&&!m.userData?.shared)m.dispose();});node.removeFromParent();}
+  function dispose(node){node.traverse(n=>{if(!n.userData.keepGeometry)n.geometry?.dispose();for(const m of new Set([n.userData?.flat,n.userData?.untextured,...[n.material].flat()]))if(m&&!m.userData?.shared)m.dispose();});node.removeFromParent();}
   function sync(){for(const host of group.children){const row=rows()[host.userData.seatIndex];if(!row)continue;
     const parent=hosts.find(p=>p.name===row.parent);host.visible=!!parent;host.userData.hostBone=parent?.name;if(parent)host.matrix.copy(matrix(parent.matrix));applyPose(host.children[0],row);}
     group.updateMatrixWorld(true);}

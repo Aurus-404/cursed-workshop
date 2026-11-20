@@ -18,6 +18,37 @@ view.restore();view.showAll();view.isolate(c);view.apply();assert.equal(a.visibl
 view.restore();view.showAll();view.lock(c);assert.equal(view.canEdit(c),false);view.lock(c);assert.equal(view.canEdit(c),true);
 assert.equal(c.userData.locked,undefined,'view state never enters model data');
 view.reset();assert.equal(view.canEdit(hull),true);
+// Pieces taken off the built vehicle: model meshes of a removable part only.
+{
+  const hull=new THREE.Group(),turret=new THREE.Group(),armor=new THREE.Group(),seats=new THREE.Group(),figure=new THREE.Group();
+  const box=new THREE.Mesh(),host=new THREE.Mesh(),carried=new THREE.Mesh(),soldier=new THREE.Mesh(),hatch=new THREE.Mesh(),plate=new THREE.Mesh();
+  box.userData.mesh={bone:'detail1',path:'entity/tank/detail1.ply'};host.userData.mesh={bone:'body',path:'entity/tank/body.ply'};
+  carried.userData.mesh={bone:'body',path:'entity/mg/mg.ply',attached_weapon:true};
+  figure.userData.seat='crew';soldier.userData.mesh={bone:'head',path:'entity/humanskin/head.ply'};figure.add(soldier);seats.add(figure);
+  hatch.userData.mesh={bone:'hatch1',path:'entity/donor/hatch1.ply'};plate.userData.mesh={};
+  hull.add(box,host,carried,seats);turret.add(hatch);armor.add(plate);
+  let recipe={},changes=0;
+  const removed=pieceVisibility({groups:{hull,turret,extra_armor:armor},removed:()=>recipe.removed_meshes||[],
+    setRemoved:list=>{if(list.length)recipe.removed_meshes=list;else delete recipe.removed_meshes;},removablePart:part=>part==='hull',changed:()=>changes++});
+  const row=key=>removed.rows().find(r=>r.key===key);
+  assert.equal(row('hull:detail1').removable,true);
+  assert.equal(row('hull:head').removable,false,'crew figures are not pieces of the vehicle model');
+  assert.equal(row('hull:head').reason,'fitting');
+  assert.equal(row('turret:hatch1').removable,false,'a donor turret keeps its source names until applied');
+  assert.equal(row('turret:hatch1').reason,'donor');
+  assert.equal(removed.rows().find(r=>r.part==='extra_armor').removable,false);
+  assert.equal(removed.toggleRemoved('turret:hatch1'),false);assert.equal(recipe.removed_meshes,undefined);
+  assert.equal(removed.toggleRemoved('hull:detail1'),true);assert.deepEqual(recipe.removed_meshes,['detail1']);assert.equal(changes,1);
+  assert.equal(row('hull:detail1').removed,true);
+  removed.apply();assert.equal(box.visible,false,'a removed piece leaves the drawn vehicle');assert.equal(host.visible,true);
+  assert.equal(removed.toggleRemoved('hull:body'),true);assert.deepEqual(recipe.removed_meshes,['detail1','body']);
+  removed.restore();removed.apply();assert.equal(host.visible,false);assert.equal(carried.visible,true,'a weapon carried on a removed bone keeps its own tool');
+  removed.toggleRemoved('hull:detail1');assert.deepEqual(recipe.removed_meshes,['body']);
+  removed.toggleRemoved('hull:body');assert.equal(recipe.removed_meshes,undefined,'putting every piece back leaves no recipe field');
+  removed.restore();removed.apply();assert.equal(box.visible,true);assert.equal(host.visible,true);
+  removed.showAll();assert.equal(recipe.removed_meshes,undefined,'Show all only clears view masks');
+  removed.toggleRemoved('hull:detail1');removed.showAll();assert.deepEqual(recipe.removed_meshes,['detail1'],'view masks never put a removed piece back');
+}
 let current={schema:1,hull:{template:'tank'},transform:{}},stored=null,fail=false;
 const calls=[],api=async(path,body)=>{if(!body)return {draft:stored};if(fail)throw Error('disk');calls.push(body.draft);stored=structuredClone(body.draft);};
 const recovery=draftRecovery({api,snapshot:()=>current});

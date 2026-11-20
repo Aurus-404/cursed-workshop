@@ -18,7 +18,9 @@ const VALUE=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value')
 const INDEX=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'selectedIndex');
 let open=null;
 let generatedId=0;
-const widgets=new WeakMap();
+const widgets=new WeakMap(),owners=new WeakMap();
+// The native list a visible field stands for (the keyboard focus lands on the field).
+export function selectOfButton(button){return owners.get(button)||null;}
 
 // Move the visible control together with its native authority and label.
 // Moving only the hidden SELECT leaves the working selector in the old panel.
@@ -178,7 +180,7 @@ export function searchableSelect(select){
   select.addEventListener('change',refresh);
   new MutationObserver(()=>{refresh();if(open===api)paint();}).observe(select,{childList:true,subtree:true,characterData:true,attributes:true,attributeFilter:['disabled']});
   const api={close,show,refresh};
-  widgets.set(select,{button,label});
+  widgets.set(select,{button,label});owners.set(button,select);
   refresh();return api;
 }
 

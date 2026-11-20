@@ -5,6 +5,7 @@ are retained. Vehicle crew, yaw, mobility and boarding remain recipient-owned.
 Runtime acceptance is deliberately independent of structural validation.
 """
 import hashlib
+import re
 import json
 import struct
 import posixpath
@@ -390,10 +391,19 @@ def _ammo_definition(resources,item,from_path=None):
     names=_stuff_names(resources)
     matches=names.get(stem.casefold()+'.ammo',[])
     if not matches:
-        # An item without its shell type ({item "bulletrus_305" 50}, MB-2-12)
-        # is the family's only ammunition (bulletrus_305.he.ammo).
-        prefix=stem.casefold()+'.'
-        matches=[path for name,paths in names.items() if name.startswith(prefix) and name.endswith('.ammo') for path in paths]
+        # The game finds ammunition by tags, not by exact name: {item
+        # "bulletrus_305" 50} is bulletrus_305.he.ammo (MB-2-12), and MACE's
+        # "bullet_37x257 ap" is bullet_37x257.eng.ap or .fin.ap.
+        wanted=set(stem.casefold().split('.'))
+        matches=sorted(path for name,paths in names.items() if name.endswith('.ammo')
+                       and wanted<=set(name[:-len('.ammo')].split('.')) for path in paths)
+        if len(matches)>1:
+            # Tag matches that differ only in their shell model (one per
+            # nation) fire the same: any of them gives the gun its ballistics.
+            def ballistics(path):
+                text=re.sub(r'\{entity\s+"[^"]*"\s*\}','',resources.read(path).decode('utf-8','replace'))
+                return ''.join(text.split())
+            if len({ballistics(path) for path in matches})==1:matches=matches[:1]
     if not matches:return None
     if len(matches)!=1:
         raise GunError('GunAssembly: La munición no tiene una definición efectiva inequívoca.\n'+item)
@@ -558,7 +568,7 @@ def compile_gun(resources, recipient, donor, transform, output, identifier, *, r
     if not isinstance(spec,dict) or spec.get('schema',1)!=1:
         raise GunError('GunAssembly: La versión de receta no está admitida.')
     hull=transform.get('hull') or {}
-    if any(hull.get('position',[0,0,0])) or any(hull.get('rotation',[0,0,0])) or ((transform.get('crew_seats') or transform.get('crew_exclude') or transform.get('crew_fixed')) and not transform.get('_design_crew')):
+    if any(hull.get('position',[0,0,0])) or any(hull.get('rotation',[0,0,0])) or ((transform.get('crew_seats') or transform.get('crew_exclude') or transform.get('crew_fixed') or transform.get('weapon_operators')) and not transform.get('_design_crew')):
         raise GunError('GunAssembly: Conservá la posición y los tripulantes del receptor; ajustá solamente el cañón elegido.')
     ri,rd,rr,rm,rp,rs=selected(resources,recipient,spec.get('recipient_place'))
     native_optics={(p.args[0],head.casefold(),n.args[0]) for p in _places(rr) if _commander_optic(p)
@@ -938,6 +948,15 @@ def compile_gun(resources, recipient, donor, transform, output, identifier, *, r
     rider_mgs = apply_riders(resources, rr, rm, fittings.get('rider_mgs'), assets, diagnostics)
     from .passenger_seats import apply as apply_passengers
     passenger_seats = apply_passengers(resources, rr, rm, transform.get('passenger_seats'), assets, diagnostics)
+    from .extra_crew import apply as apply_extra_crew
+    extra_crew = apply_extra_crew(resources, rr, rm, transform.get('extra_crew'), assets, diagnostics)
+    from .mounted_weapons import apply as apply_mounted_weapons
+    mounted_weapons = apply_mounted_weapons(resources, rr, rm, transform.get('mounted_weapons'), diagnostics, transform)
+    if extra_crew:
+        # Counted with the crew: each one is a soldier and a squad slot.
+        added = {row['place'] for row in extra_crew['added']}
+        roles = set(roles) | added
+        people = set(people) | added
     from .extra_armor import apply as apply_extra_armor
     armor_fittings = apply_extra_armor(resources, rr, rm, fittings.get('extra_armor'), assets, diagnostics)
     from .crew_attachment import apply_crew_fixed
@@ -956,7 +975,8 @@ def compile_gun(resources, recipient, donor, transform, output, identifier, *, r
     from .compiler import _apply_traverse_class, _guns_first
     rm = parse_model(rm['document'].render())
     _guns_first(resources, rr)
-    _apply_traverse_class(resources, rr, rm)
+    # A design's earlier turret steps fitted these guns: limits set later still decide them.
+    _apply_traverse_class(resources, rr, rm, added=set(transform.get('_design_guns') or ()))
     assets.prune(rm['document'])
     if any(d.get('code')=='animation_tracks_dropped' for d in diagnostics):
         raise GunError('GunAssembly: No se pueden adaptar todas las pistas de animación necesarias.')
@@ -1020,6 +1040,13 @@ def compile_gun(resources, recipient, donor, transform, output, identifier, *, r
         profile['rider_mgs']=rider_mgs
     if passenger_seats:
         metadata['passenger_seats']=passenger_seats
+    if extra_crew:metadata['extra_crew']=extra_crew
+    if mounted_weapons:
+        metadata['mounted_weapons']=mounted_weapons
+        profile['mounted_weapons']=mounted_weapons
+    from .crew_hatches import carry, inherited
+    renamed_crew=carry(inherited(resources,recipient),roles,added=[row['place'] for row in (extra_crew or {}).get('added',[])])
+    if renamed_crew:metadata['renamed_crew']=renamed_crew
     if armor_fittings is not None:metadata['extra_armor']=armor_fittings
     for n,raw in list(files.items()):
         if n.endswith(('.def','.mdl','.ext','.mtl')):files[n]=raw.replace(b'\r\n',b'\n').replace(b'\n',b'\r\n')

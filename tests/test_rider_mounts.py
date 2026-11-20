@@ -16,6 +16,19 @@ except ImportError:
 
 
 class RiderMountTests(unittest.TestCase):
+    def test_the_gunner_of_any_machine_gun_lends_his_pose(self):
+        # The Fi 156's rear MG 15 is no mountable weapon, but seat_fi156_gunner is an
+        # MG operator's pose: dropping it stopped vehicles built with it from updating.
+        from types import SimpleNamespace
+        from workshop.rider_mg import _any_machine_gun
+        index=SimpleNamespace(entries={p:SimpleNamespace(path=p) for p in ('set/stuff/mgun/mg15','set/stuff/gun/pak40')})
+        place=lambda weapons:block('{place "mgun4" %s {gunner "gunner"}}'%''.join('{weapon "%s"}'%w for w in weapons))
+        self.assertTrue(_any_machine_gun(index,place(['mg15'])))
+        self.assertFalse(_any_machine_gun(index,place(['pak40'])))
+        self.assertFalse(_any_machine_gun(index,place(['mg15','pak40'])))
+        self.assertFalse(_any_machine_gun(index,place(['unknown'])))
+        self.assertFalse(_any_machine_gun(index,place([])))
+
     def test_native_slots_reserve_existing_inventory_and_numeric_aliases(self):
         root=block('{game_entity {Weaponry {place "MGUN01"}} {extender "inventory" {weapon "mgun2" {mask "mountable"}}}}')
         self.assertEqual(mountable_slot(root),'mgun3')

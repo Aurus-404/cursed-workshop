@@ -23,7 +23,7 @@ export function riderEditor({state,$,groups,scene,job,loading,remember,selectEdi
   const editing=()=>candidate||rows()[selected];
   const support=id=>catalog?.supports.find(s=>s.id===id);
   const label=row=>(support(row.support)?.label||row.support)+' · '+(catalog?.weapons.find(w=>w.id===row.item)?.label||row.item);
-  function dispose(node){node.traverse(n=>{if(!n.userData.keepGeometry)n.geometry?.dispose();for(const m of [n.material].flat())if(m&&!m.userData?.shared)m.dispose();});node.removeFromParent();}
+  function dispose(node){node.traverse(n=>{if(!n.userData.keepGeometry)n.geometry?.dispose();for(const m of new Set([n.userData?.flat,n.userData?.untextured,...[n.material].flat()]))if(m&&!m.userData?.shared)m.dispose();});node.removeFromParent();}
   function clear(){for(const n of [...group.children])dispose(n);candidate=null;}
   function sync(){for(const host of group.children){const row=host.userData.candidate?candidate:rows()[host.userData.riderIndex];
     if(!row)continue;const parent=hosts.find(p=>p.name===parentName(row));host.visible=!!parent;

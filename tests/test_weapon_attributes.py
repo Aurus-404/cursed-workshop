@@ -19,13 +19,13 @@ class Stuff:
                 (define "velocity m/s" {parameters "ap" {speed (* 0.75 %ap)}} {parameters "he" {speed (* 0.75 %he)}})
                 (define "penetration_medium" {parameters "%shell"
                     {projectileDamageTable {10 %a} {100 %b} {%range %c} {(+ %range 15) 0}} {range %range %range}})''',
-            'set/stuff/gun/gun.pattern': '{weapon_bullet {rechargeTime 5} {range 15 25} {healthDamage (* 1 2500)} {FiringTimeout 0.35 0.15}}',
+            'set/stuff/gun/gun.pattern': '{weapon_bullet {tag "weapon build_in gun bullet tank_gun"} {rechargeTime 5} {range 15 25} {healthDamage (* 1 2500)} {FiringTimeout 0.35 0.15}}',
             'set/stuff/gun/basegun': '''{from "pattern gun" ("reload time" seconds(7)) ("range_200")
                 ("velocity m/s" ap(750) he(570)) ("penetration_medium" shell(ap) range(200) a(100) b(80) c(60))
                 {filling "shell_75"}
                 {parameters "ap" {spreading {radiusTable {0 0} {100 1} {(- 200 0.01) 2} {(+ 200 50) 10}}}}}''',
             'set/stuff/gun/mygun': '{from "basegun"}',
-            'set/stuff/mgun/mg.pattern': '{weapon_bullet {burst {short 6 1} {long 7 2} {rangeKoef 0.5}} {FiringTimeout 1.75 0.5} {spreading {SpreadRadius 5}} {range 120 120}}',
+            'set/stuff/mgun/mg.pattern': '{weapon_bullet {tag "weapon mgun bullet"} {burst {short 6 1} {long 7 2} {rangeKoef 0.5}} {FiringTimeout 1.75 0.5} {spreading {SpreadRadius 5}} {range 120 120}}',
             'set/stuff/mgun/mg': '{from "pattern mg" {filling "mgun_x" 100} ("fire rate" rpm(600)) {rechargeTime 8}}',
         }
         self.entries = {key: Entry(key) for key in self.files}
@@ -134,6 +134,17 @@ class WeaponAttributeTests(unittest.TestCase):
         self.assertEqual((edited['fields']['reload_time'], edited['fields']['range']), (3, 300))
         self.assertEqual(edited['shells'][0]['velocity'], 800)
 
+    def test_extra_loaders_shorten_the_native_or_edited_reload(self):
+        from workshop.weapon_attributes import apply
+        files, renamed, _ = apply(self.stuff, self.root, None, 'mw_load', [], {'gun': 0.7})
+        self.assertEqual(renamed, ['gun'])
+        self.assertIn('{rechargeTime 4.9}', files['resource/set/stuff/gun/mw_load_gun'])
+        root = entity_root(parse(VEHICLE))
+        diagnostics = []
+        files, _, _ = apply(self.stuff, root, {'places': {'gun': {'reload_time': 3}}}, 'mw_both', diagnostics, {'gun': 0.5})
+        self.assertIn('{rechargeTime 1.5}', files['resource/set/stuff/gun/mw_both_gun'])
+        self.assertIn('extra_loader_reload', [d['code'] for d in diagnostics])
+
     def test_a_weapon_copy_shows_the_original_name(self):
         from workshop.weapon_attributes import apply
         self.stuff.files['localizations/default/interface/text/desc/w.pot'] = 'msgctxt "desc/weapon/mygun"\nmsgid "5cm PaK 38"\nmsgstr ""\n'
@@ -147,6 +158,46 @@ class WeaponAttributeTests(unittest.TestCase):
         po = files['localizations/es/interface/text/desc/modular_workshop_mw_abc_weapons.po']
         self.assertIn('msgctxt "desc/weapon/mw_abc_gun"\nmsgid "5cm PaK 38"', pot)
         self.assertIn('msgstr "PaK 38 de 5 cm"', po)
+
+    def test_a_copy_of_a_typed_or_unnamed_weapon_shows_the_original_name(self):
+        """The Wanze's {weapon "weapon panzershreck_54_x6" filled}: a .weapon is
+        a weapon by its file type, its copy (a file without one) only by tags,
+        so the game names the copy desc/stuff/<copy>. panzershreck_54_x6 has
+        no name of its own unless a mod gives it one: it shows its parent's."""
+        from workshop.weapon_attributes import apply
+        vehicle = '{game_entity {Weaponry {place "gun" {weapon "weapon panzershreck_54_x6" filled}}}}'
+        pot_path = 'localizations/default/interface/text/desc/modular_workshop_mw_abc_weapons.pot'
+        po_path = 'localizations/es/interface/text/desc/modular_workshop_mw_abc_weapons.po'
+        mace = 'msgctxt "desc/weapon/panzershreck_54_x6"\nmsgid "Panzerschrecks RPZB 54 x6"\nmsgstr "{}"\n'
+        for own, english, spanish in ((False, 'Panzerschreck RPZB 54', 'Panzerschreck RPZB 54 (es)'),
+                                      (True, 'Panzerschrecks RPZB 54 x6', 'Panzerschrecks RPZB 54 x6')):
+            with self.subTest(own_name=own):
+                self.stuff.files.update({
+                    'set/stuff/bazooka/rpg_weapon.pattern': '{weapon_bullet {tag "rocketlauncher to_hand ap cannot_lie"} {range 170 170} {rechargeTime 10}}',
+                    'set/stuff/bazooka/panzershreck_54.weapon': '{from "pattern rpg_weapon" {tag "rocketlauncher_fx"} {filling "ammo panzershreck" 1}}',
+                    'set/stuff/bazooka/panzershreck_54_x6.weapon': '{from "weapon panzershreck_54" {filling "ammo panzershreck" 6} {rechargeTime 15}}',
+                    'localizations/default/interface/text/desc/w.pot': 'msgctxt "desc/weapon/panzershreck_54"\nmsgid "Panzerschreck RPZB 54"\nmsgstr ""\n'
+                                                                        + ('\n' + mace.format('') if own else ''),
+                    'localizations/es/interface/text/desc/w.po': 'msgctxt "desc/weapon/panzershreck_54"\nmsgid "Panzerschreck RPZB 54"\nmsgstr "Panzerschreck RPZB 54 (es)"\n'
+                                                                 + ('\n' + mace.format('Panzerschrecks RPZB 54 x6') if own else ''),
+                })
+                for key in self.stuff.files:
+                    entry = self.stuff.entries[key] = Entry(key)
+                    entry.priority = 0
+                self.stuff.read_text = lambda path: self.stuff.files[path]
+                self.stuff.__dict__.pop('_weapon_names', None)
+                files, renamed, _ = apply(self.stuff, entity_root(parse(vehicle)), {'places': {'gun': {'range': 300}}}, 'mw_abc')
+                self.assertEqual(renamed, ['gun'])
+                self.assertIn('{from "weapon panzershreck_54_x6"', files['resource/set/stuff/bazooka/mw_abc_gun'])
+                self.assertIn('msgctxt "desc/stuff/mw_abc_gun"\nmsgid "%s"' % english, files[pot_path])
+                self.assertIn('msgctxt "desc/stuff/mw_abc_gun"\nmsgid "%s"\nmsgstr "%s"' % (english, spanish), files[po_path])
+                self.assertNotIn('desc/weapon/mw_abc_gun', files[pot_path])
+        # Nothing in the chain has a name: the copy shows the original's identifier, not its own key.
+        for path in ('localizations/default/interface/text/desc/w.pot', 'localizations/es/interface/text/desc/w.po'):
+            self.stuff.files[path] = ''
+        self.stuff.__dict__.pop('_weapon_names', None)
+        files, _, _ = apply(self.stuff, entity_root(parse(vehicle)), {'places': {'gun': {'range': 300}}}, 'mw_abc')
+        self.assertIn('msgctxt "desc/stuff/mw_abc_gun"\nmsgid "panzershreck_54_x6"', files[pot_path])
 
     def test_values_out_of_bounds_or_unknown_fields_are_refused(self):
         from workshop.weapon_attributes import WeaponAttributeError, validate

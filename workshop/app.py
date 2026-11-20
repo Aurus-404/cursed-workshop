@@ -40,6 +40,17 @@ from .diagnostics import Diagnostics, timing_job
 
 GAME_FOLDER = 'Call to Arms - Gates of Hell'
 WEB_ROOT = Path(__file__).parent / 'web'
+# Fixed types for the bundled UI: mimetypes reads the Windows registry, and a PC
+# where .js is registered as text/plain would block the module script (nosniff),
+# leaving the version label blank and every button dead.
+WEB_TYPES = {'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8',
+             '.mjs':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8',
+             '.json':'application/json','.png':'image/png','.svg':'image/svg+xml',
+             '.ico':'image/x-icon','.woff2':'font/woff2','.dds':'application/octet-stream'}
+
+
+def web_type(name):
+    return WEB_TYPES.get(Path(name).suffix.lower()) or mimetypes.guess_type(name)[0] or 'application/octet-stream'
 FAVORITE_LISTS, FAVORITES_PER_LIST = 200, 5000
 
 def app_directory() -> Path:
@@ -268,11 +279,19 @@ class AppState:
             return (isinstance(value,dict) and len(value)<=FAVORITE_LISTS and all(
                 isinstance(k,str) and 0<len(k)<=80 and isinstance(v,list) and len(v)<=FAVORITES_PER_LIST
                 and all(isinstance(x,str) and 0<len(x)<=400 for x in v) for k,v in value.items()))
+        def view_colors(value):
+            # Plain 3D colors per kind of part: {"by_kind": bool, "colors": {kind: "#rrggbb"}}.
+            kinds={'chassis','turret','weapon','tracks','armor','accessory','crew','passenger'}
+            colors=value.get('colors') if isinstance(value,dict) else None
+            return (isinstance(value,dict) and set(value)<={'by_kind','colors'} and type(value.get('by_kind',True)) is bool
+                    and isinstance(colors,dict) and set(colors)<=kinds
+                    and all(isinstance(c,str) and re.fullmatch(r'#[0-9a-fA-F]{6}',c) for c in colors.values()))
         def valid(key,value):
             if key=='editor_options':
                 from .editor_draft import valid_options
                 return valid_options(value)
             if key=='favorites':return favorites(value)
+            if key=='view_colors':return view_colors(value)
             return (isinstance(value,str) and value in choices[key]) if key in choices else key in booleans and type(value) is bool
         with self.lock:
             saved=self.settings.get('ui_preferences',{})
@@ -569,6 +588,15 @@ class AppState:
         self.stack_check()  # read in the background; /api/mod-stack reports it
         data['repaired_save']=repaired
         data['crew_fitted']=fitted
+        try:
+            from .profile import mods_after_addon
+            def shown(mod):
+                key=str(mod).rsplit(':',1)[0];bare=key.removeprefix('mod_').casefold()
+                match=next((m for m in installed if m['id'].casefold() in (key.casefold(),bare)),None)
+                return match['name'] if match else key
+            data['mods_after_addon']=[shown(mod) for mod in mods_after_addon(profile_for_save(path))]
+        except Exception as error:
+            logging.warning('Mod order not checked for %s: %s',path,error);data['mods_after_addon']=[]
         self.unresolved_mods=missing
         with self.lock: self.campaign_view=data
         return {'campaign':self.campaign_data(),'stats':self.index.stats}
@@ -1130,6 +1158,18 @@ class AppState:
         if self.index is None: self.index_resources()
         return {'poses':load(self.index,'passenger_poses',self.catalog_folder()),'runtime_verified':False}
 
+    def mounted_weapon_catalog(self,body=None):
+        from .mounted_weapons import catalog
+        from .catalog_cache import load
+        if self.index is None: self.index_resources()
+        load(self.index,'commander_weapons',self.catalog_folder())
+        return {'weapons':catalog(self.index),'dlc':self.index.dlc_availability().public(),'runtime_verified':False}
+
+    def mounted_weapon_preview(self,body):
+        from .mounted_weapons import preview
+        if self.index is None: self.index_resources()
+        return preview(self.index,body)
+
     def rider_preview(self,body):
         from .rider_mg import preview
         if self.index is None: self.index_resources()
@@ -1211,6 +1251,7 @@ class AppState:
                     from .syntax import parse, entity_root
                     from .compiler import _explicit_weapon_operators
                     from .commander_mg import operator_weapon_problem, operator_loader_warning
+                    from .weapon_operators import listing as operator_listing
                     final_root=entity_root(parse((Path(result['output_dir'])/'resource'/result['definition_path']).read_bytes()))
                     _explicit_weapon_operators(self.index,final_root)
                     commander_problem=''
@@ -1218,7 +1259,9 @@ class AppState:
                         commander_problem=operator_weapon_problem(final_root)
                     from .sights import initial as initial_sight
                     sight_default=initial_sight(self.index,result['metadata'],model)
-                    value={'ok':True,'crew':result.get('metadata',{}).get('crew_roles') or [], 'hosts':hosts,
+                    from .compiler import _crew_people
+                    crew_roles=result.get('metadata',{}).get('crew_roles') or []
+                    value={'ok':True,'crew':crew_roles,'crew_people':sorted(_crew_people(final_root,set(crew_roles))),'hosts':hosts,
                            'sight_default':sight_default,
                            'sight_hosts':[{'name':name,'matrix':multiply(display_frame,bone['world'])} for name,bone in model['bones'].items() if not name.startswith('cw_sight_')],
                            'commander_problem':commander_problem,
@@ -1230,7 +1273,10 @@ class AppState:
                            'passengers':self.passenger_listing(final_root,model,display_frame),
                            'commander_position':point(display_frame,point(locator['world'],[0,0,2]) if locator else model['anchor']),
                            'shop_suggested_cost':self.suggested_shop_cost(result.get('metadata') or {}),
-                           'weapons':self.weapon_listing(final_root)}
+                           'weapons':self.weapon_listing(final_root),
+                           'operators':[{**row,'added':True} if row['place'] in {m['slot'] for m in (result.get('metadata',{}).get('mounted_weapons') or {}).get('mounts',[]) if m.get('added')} else row
+                                        for row in self.operator_listing(final_root,operator_listing,model)],
+                           'mount_slots':self.mount_slot_listing(final_root,model,display_frame,result.get('metadata') or {})}
                     register_variant(self.index,result,Path(temp)/ADDON_ID,'mw_check','check')
                 except Exception as error:
                     from .cancellation import JobCancelled
@@ -1345,7 +1391,9 @@ class AppState:
         from .draft import compile_draft
         if self.index is None:self.index_resources()
         # Weapon attributes change nothing drawn: the same preview serves them all.
-        transform={k:v for k,v in body['transform'].items() if k!='weapon_attributes'};body={**body,'transform':transform}
+        # Pieces taken off the model are masked by the editor; the preview keeps
+        # them so they can be put back.
+        transform={k:v for k,v in body['transform'].items() if k not in ('weapon_attributes','removed_meshes')};body={**body,'transform':transform}
         signature=copy.deepcopy(transform)
         hull=signature.get('hull') or {}
         from .pivots import pose_matrix
@@ -1405,6 +1453,43 @@ class AppState:
         logging.info('Play: started %s',exe)
         return {'started':True,'via':'exe'}
 
+    def operator_listing(self,root,listing,model=None):
+        """Who works each weapon (Crew tool), with each weapon's shown name per
+        language and the bone it hangs from (the editor marks it in 3D)."""
+        from .weapon_attributes import weapon_names
+        from .weapon_binding import weapon_link
+        from .weapon_operators import weapon_places
+        rows=listing(root);places={p.args[0]:p for p in weapon_places(root) if p.args}
+        for row in rows:
+            try:row['names']=weapon_names(self.index,row['weapon'])
+            except Exception:row['names']={}
+            if model and row['place'] in places:
+                try:row['bone']=weapon_link(places[row['place']],model)
+                except Exception:row['bone']=None
+        return rows
+
+    def mount_slot_listing(self,root,model,frame,metadata):
+        """Weapon places that can take an infantry weapon (Mounted weapons tool).
+
+        A place the design already turned into a slot is listed by the place it
+        had, hanging from the same joint, so the editor can draw and change it.
+        """
+        from .mounted_weapons import slot_candidates
+        from .geometry import multiply
+        from .weapon_operators import _slot_item
+        added={m['slot'] for m in (metadata.get('mounted_weapons') or {}).get('mounts',[]) if m.get('added')}
+        converted={m['slot']:m for m in (metadata.get('mounted_weapons') or {}).get('mounts',[]) if not m.get('added')}
+        rows=[]
+        for row in slot_candidates(root,model):
+            if row['place'] in added:continue
+            mount=converted.get(row['place'])
+            if mount:row={**row,'weapon':mount.get('weapon') or row['weapon'],'mountable':bool(mount.get('native_slot')),'host':mount.get('host') or row['host']}
+            if row['host'] not in model['bones']:continue
+            link=row['link'] if row['link'] in model['bones'] else row['host']
+            rows.append({**row,'item':_slot_item(root,row['place']),'matrix':multiply(frame,model['bones'][row['host']]['world']),
+                         'link_matrix':multiply(frame,model['bones'][link]['world'])})
+        return rows
+
     def weapon_listing(self,root):
         """The vehicle's weapons and their native values (Weapon attributes tool)."""
         from .weapon_attributes import describe
@@ -1450,6 +1535,8 @@ class AppState:
         # Crew movement is applied locally over the original sockets.
         body['transform'].pop('crew_seats',None)
         body['transform'].pop('crew_exclude',None)
+        # Who works each weapon changes nothing drawn; the check reports it.
+        body['transform'].pop('weapon_operators',None)
         hull_pose=body['transform'].get('hull') or {}
         from .pivots import pose_matrix
         pose_matrix(hull_pose)
@@ -1490,6 +1577,7 @@ class AppState:
         limit_body=body
         excluded=set((body.get('transform') or {}).get('crew_exclude') or [])
         body=self.design_display_body(body)
+        full=body  # the whole design, before a changed mount is cut out of it
         pending=body.get('pending')
         if pending and pending['kind'] in ('turret','native'):
             # The other saved turrets stay; the mount being changed shows bare.
@@ -1551,6 +1639,8 @@ class AppState:
         for mount in (metadata.get('rider_mgs') or {}).get('mounts',[]):editable_bones.update(mount.get('bones',{}).values())
         for seat in (metadata.get('passenger_seats') or {}).get('added',[]):
             if seat.get('bone'):editable_bones.add(seat['bone'])
+        for seat in (metadata.get('extra_crew') or {}).get('added',[]):
+            if seat.get('bone'):editable_bones.add(seat['bone'])
         for part in ('hull','turret'):
             parents={b['name']:b.get('parent') for b in result[part].get('bones',[])}
             def editable(name):
@@ -1567,11 +1657,45 @@ class AppState:
         result['saved_weapons']=[{'recipient_place':c['recipient']['place'],'donor_place':c['donor']['place'],
             'donor_template':c['donor'].get('template'),'label':index.weapon_label(c['donor']['weapon'])}
             for c in context['result']['metadata'].get('gun_assemblies',[])]
+        # Crew settings (crew_exclude, crew_seats, crew_hidden...) name the finished
+        # vehicle's places. Say which drawn part already uses those names: the
+        # compiled chassis always does, a turret of its own cut from it too, and a
+        # saved donor reopened unchanged once its seats carry them.
+        result['hull']['vehicle_places']=True
+        # Where each design mount's module now hangs in the drawn chassis.
+        result['hull']['module_roots']=dict(metadata.get('draft_module_roots') or {})
+        # The editor draws extra crew itself, in order: their places on the vehicle.
+        result['hull']['extra_crew_places']=[row['place'] for row in (metadata.get('extra_crew') or {}).get('added',[])]
+        if pending and pending['kind']=='native':result['turret']['vehicle_places']=True
+        elif pending and pending['kind']=='turret':
+            # As the editor sent it: a complete assembly resolves its donor mount above.
+            names=self.reopened_crew(full,limit_body,limit_body.get('pending') or {})
+            if names is not None:
+                for seat in [*result['turret'].get('seats',[]),*result['turret'].get('internal_seats',[])]:seat['place']=names.get(seat['place'],seat['place'])
+                result['turret']['vehicle_places']=True
         result.update(preview_valid=True,runtime_verified=False,crew_visibility=metadata.get('crew_visibility',[]))
         if len(displays)>=2:displays.pop(next(iter(displays)))
         displays[display_key]=copy.deepcopy(result)
         result['crew_visibility']=[r for r in result['crew_visibility'] if r['place'] not in excluded]
         return self.display_joint_limits(result,limit_body)
+
+    def reopened_crew(self,full,body,pending):
+        """{donor's own place: its place on the vehicle} for a saved turret reopened
+        unchanged (only its pose or limits are being adjusted), else None.
+
+        The reopened donor is drawn from its own model, under its own crew names,
+        while the design's crew settings name the finished vehicle's places: a
+        loader left in reserve would show again until the change is applied.
+        """
+        from .draft import design_turrets
+        mount=pending.get('recipient_mount') or 'turret'
+        if pending.get('original')!=mount:return None
+        rows=design_turrets((body.get('transform') or {}).get('assembly_draft') or {})
+        row=next((r for r in rows if (r.get('recipient_mount') or 'turret')==mount and not r.get('native')),None)
+        identity=('donor_template','donor_eid','donor_depot','donor_catalog','donor_mount','assembly_scope')
+        if row is None or any(row.get(k)!=pending.get(k) for k in identity):return None
+        names=((self.design_context(full,display=True)['result']['metadata'].get('draft_module_crew') or {}).get(mount))
+        return dict(names) if names else None
 
     def clear_gun_preview(self):
         draft=self.__dict__.pop('gun_draft_preview',None)
@@ -1586,6 +1710,7 @@ class AppState:
         compiler as a combination, and only this unit is replaced.
         """
         from .geometry import parse_model
+        if body.get('shop') is not None:return self.shop_edit_source(body['shop'])
         if self.snapshot is None: raise ValueError('Abrí una campaña y sus recursos primero.')
         # Publishing the addon (Shop, Update vehicles) drops the index: the next operation reads it again.
         if self.index is None: self.index_resources()
@@ -1595,23 +1720,7 @@ class AppState:
         template=re.sub(r'\([^()]*\)$','',unit['template'])
         recipe=self.addon_root()/f'assembly_{template}.json'
         if re.fullmatch(r'mw_[A-Za-z0-9_-]+',template) and recipe.is_file():
-            metadata=json.loads(recipe.read_text(encoding='utf-8')).get('metadata') or {}
-            transform=dict(metadata.get('transform') or {})
-            recipient,donor=metadata.get('recipient'),metadata.get('donor')
-            recipient=recipient.get('id') if isinstance(recipient,dict) else recipient
-            donor=donor.get('id') if isinstance(donor,dict) else donor
-            transform['recipient_mount']=transform.get('recipient_mount') or metadata.get('recipient_mount')
-            transform['donor_mount']=transform.get('donor_mount') or metadata.get('donor_mount')
-            from .editable_recipe import reopen
-            from .registration import _recipes
-            recipes=_recipes(self.addon_root())
-            reopened,commander,smoke=transform,metadata.get('commander_mg'),metadata.get('smoke_launchers')
-            if recipient in recipes:
-                info=self.index.resolve_entity(template)
-                model=parse_model(self.index.read(info['model_path']))
-                reopened,commander,smoke=reopen({**metadata,'transform':transform},recipes,model)
-            return {'eid':unit['eid'],'recipient':recipient,'donor':donor,'recipe':True,
-                    'commander_mg':commander, 'smoke_launchers':smoke, 'transform':reopened}
+            return {'eid':unit['eid'],**self.reopen_recipe(template)}
         info=self.index.resolve_entity(template)
         anchor=parse_model(self.index.read(info['model_path']))['anchor_name']
         if not anchor:
@@ -1619,6 +1728,69 @@ class AppState:
                     'transform':{'commander_only':True},'recipe':False,'full_vehicle':True}
         return {'eid':unit['eid'],'recipient':template,'donor':template,
                 'transform':{'recipient_mount':anchor,'donor_mount':anchor},'recipe':False}
+
+    def reopen_recipe(self,template):
+        """The stored recipe of a workshop vehicle (original parts and
+        transform, with fittings inherited from its build history)."""
+        from .geometry import parse_model
+        from .editable_recipe import reopen
+        from .registration import _recipes
+        recipe=self.addon_root()/f'assembly_{template}.json'
+        metadata=json.loads(recipe.read_text(encoding='utf-8')).get('metadata') or {}
+        transform=dict(metadata.get('transform') or {})
+        recipient,donor=metadata.get('recipient'),metadata.get('donor')
+        recipient=recipient.get('id') if isinstance(recipient,dict) else recipient
+        donor=donor.get('id') if isinstance(donor,dict) else donor
+        transform['recipient_mount']=transform.get('recipient_mount') or metadata.get('recipient_mount')
+        transform['donor_mount']=transform.get('donor_mount') or metadata.get('donor_mount')
+        recipes=_recipes(self.addon_root())
+        reopened,commander,smoke=transform,metadata.get('commander_mg'),metadata.get('smoke_launchers')
+        if recipient in recipes:
+            info=self.index.resolve_entity(template)
+            model=parse_model(self.index.read(info['model_path']))
+            reopened,commander,smoke=reopen({**metadata,'transform':transform},recipes,model)
+        return {'recipient':recipient,'donor':donor,'recipe':True,
+                'commander_mg':commander,'smoke_launchers':smoke,'transform':reopened}
+
+    def shop_vehicle(self,identifier):
+        """The manifest of a vehicle listed in the Conquest shop dialog, or an
+        error a player can act on."""
+        from .registration import _recipes
+        addon=self.addon_root()
+        if not isinstance(identifier,str) or not re.fullmatch(r'mw_[A-Za-z0-9_-]+',identifier):
+            raise ValueError('Vehículo del taller inválido.')
+        path=addon/f'workshop_manifest_{identifier}.json'
+        if not (addon/'mod.info').is_file() or not path.is_file() or identifier not in _recipes(addon):
+            raise ValueError('Ese vehículo ya no está en la Tienda. Abrí la Tienda de nuevo.')
+        data=json.loads(path.read_text(encoding='utf-8'))
+        if data.get('shop_archived'):raise ValueError('Ese vehículo ya no está en la Tienda. Abrí la Tienda de nuevo.')
+        try:skipped={row['id'] for row in json.loads((addon/'workshop_stack.json').read_text(encoding='utf-8')).get('skipped',[])}
+        except (OSError,ValueError,KeyError,TypeError,AttributeError):skipped=set()
+        if identifier in skipped:
+            raise ValueError('Ese vehículo se hizo con mods que no están activos. Activalos para editarlo.')
+        return data
+
+    def shop_edit_source(self,identifier):
+        """Reopen a vehicle of the Conquest shop in the editor, without any
+        campaign: its stored recipe with every part taken from the catalog,
+        as in creative mode. Building it (creative with "replace") sells the
+        new version instead of this one."""
+        data=self.shop_vehicle(identifier)
+        if self.index is None:self.index_resources()
+        source=self.reopen_recipe(identifier)
+        for template in (source['recipient'],source['donor']):
+            if not isinstance(template,str) or not self.index.has_entity(template):
+                raise ValueError('Una pieza de ese vehículo no está en el catálogo con los mods activos.')
+        # Units of the campaign it was first built in do not exist here: each
+        # donor of a saved design is its catalog model, as in creative mode.
+        draft=(source['transform'] or {}).get('assembly_draft')
+        if isinstance(draft,dict):
+            for row in [*(draft.get('turrets') or []),*([draft['turret']] if isinstance(draft.get('turret'),dict) else []),*(draft.get('guns') or [])]:
+                if not isinstance(row,dict) or row.get('native'):continue
+                row.pop('donor_eid',None);row.pop('donor_depot',None);row['donor_catalog']=True
+        stored=data.get('shop') or {}
+        return {**source,'shop':identifier,'name':data.get('display_name') or identifier,
+                'on':bool(stored),'custom_cost':stored.get('cost')}
 
     def generate(self,body):
         from .compiler import compile_assembly
@@ -2085,13 +2257,15 @@ class AppState:
         self.prune_old_operations()
         return previous
 
-    def catalog_transform(self,transform):
+    def catalog_transform(self,transform,reopened=False):
         """Creative mode does everything: the vehicle is only models. A part
         taken from a campaign or its depot is used as its catalog model and
-        spends nothing; unsaved changes are dropped."""
+        spends nothing; unsaved changes are dropped. A reopened shop vehicle
+        keeps its recipe: its installed gun, removed turret and build history
+        are what it is made of, not unsaved changes."""
         transform=copy.deepcopy(transform or {})
         if not isinstance(transform,dict):raise ValueError('El diseño no es válido.')
-        for key in ('gun_swap','gun_edit','remove_module','source_recipe'):transform.pop(key,None)
+        for key in (() if reopened else ('gun_swap','gun_edit','remove_module','source_recipe')):transform.pop(key,None)
         draft=transform.get('assembly_draft')
         if draft is not None:
             if not isinstance(draft,dict):raise ValueError('El diseño no es válido.')
@@ -2119,7 +2293,10 @@ class AppState:
         for template in (recipient,donor):
             if not isinstance(template,str) or not template or not self.index.has_entity(template):
                 raise ValueError('Elegí un chasis y una torreta del catálogo.')
-        transform=self.catalog_transform(body.get('transform'))
+        # Editing a vehicle of the shop: the new version is sold instead of it.
+        replace=body.get('replace')
+        replaced=self.shop_vehicle(replace) if replace is not None else None
+        transform=self.catalog_transform(body.get('transform'),reopened=replaced is not None)
         name=str(body.get('name') or '').strip()[:100]
         fingerprint=hashlib.sha256(json.dumps({'hull':recipient,'module':donor,'transform':transform,'creative':True,
             'sources':self.index.sources},sort_keys=True).encode()).hexdigest()[:12]
@@ -2153,14 +2330,39 @@ class AppState:
             shop={'parts':vehicle_parts(result.get('metadata') or {})}
             if body.get('shop_cost') is not None:shop['cost']=shop_cost(body['shop_cost'])
             registration=register_variant(self.index,result,staging,new_id,name,shop=shop)
+        if replaced is not None:
+            with self.phase('Creative: take the previous version out of the shop'):
+                self.retire_from_shop(staging,replace,new_id)
         describe_addon(staging);write_stack(staging,self.index,(rebuilt or {}).get('skipped'))
         game=self.closed() or {}
         previous=self._publish_addon(operation,staging,original)
         offer=(registration.get('shop') or {}).get('offer')
-        self.record_history('creative',{'vehicle':new_id,'name':name,'recipient':recipient,'donor':donor,'offer':offer,
-                                         'transform':(result.get('metadata') or {}).get('transform')})
+        self.record_history('shop_edit' if replaced is not None else 'creative',{'vehicle':new_id,'name':name,'recipient':recipient,'donor':donor,'offer':offer,
+                                         'transform':(result.get('metadata') or {}).get('transform'),**({'replaced':replace} if replaced is not None else {})})
         return {'new_template':new_id,'name':name,'offer':offer,'backup':str(previous) if previous.is_dir() else None,
-                'reload_steps':self.reload_steps(game),'diagnostics':result.get('diagnostics',[])}
+                'reload_steps':self.reload_steps(game),'diagnostics':result.get('diagnostics',[]),
+                **({'replaced':replace,'replaced_name':replaced.get('display_name') or replace} if replaced is not None else {})}
+
+    def retire_from_shop(self,staging,identifier,successor):
+        """Take a shop vehicle out of the shop and its list once its edited
+        version is sold. Its entity and recipe stay registered, as with
+        "Eliminar de la lista": units already bought keep working and designs
+        built on it still build."""
+        from .registration import rebuild_registrations
+        from .resources import ResourceIndex
+        path=staging/f'workshop_manifest_{identifier}.json'
+        data=json.loads(path.read_text(encoding='utf-8'))
+        data.pop('shop',None);data['shop_archived']=True;data['shop_replaced_by']=successor
+        path.write_text(json.dumps(data,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+        roots=[root for root in self.settings.get('mod_roots',[]) if not is_own_mod(Path(root).name)]
+        base=ResourceIndex(self.settings['game_root'],roots).build()
+        try:registrations=rebuild_registrations(base,staging,identifiers={identifier})
+        finally:base.close()
+        # Unregistered, the units already bought would break: publish nothing.
+        failed=[row for row in registrations.get('skipped',[]) if row.get('id') in (identifier,successor)]
+        if failed:
+            raise ValueError('No se pudo reemplazar el vehículo en la tienda: '+'; '.join(str(row.get('reason')) for row in failed)
+                             +'. No se cambió nada.')
 
     def set_shop(self,body):
         """Put workshop vehicles up for sale in their army's Conquest shop, or
@@ -2490,7 +2692,14 @@ class AppState:
         if include_generated and source is not index:
             for start in self.GLOBAL_FILES:
                 if not exists(start):continue
-                try:_load_include_graph(index,start,generated=True)
+                try:
+                    records,_=_load_include_graph(index,start,generated=True)
+                    if start=='set/interaction_entity/entity.set':
+                        from .registration import missing_interaction_macros
+                        missing=missing_interaction_macros(records)
+                        if missing:
+                            logging.warning('Workshop interaction macros missing in this mod stack: %s',missing[:10])
+                            raise FileNotFoundError(missing[0][1])
                 except FileNotFoundError:
                     return ('El addon local «Cursed Workshop - Built Vehicles (ACTIVATE THIS)» conserva referencias de otra combinación de mods. '
                             'Pulsá «Actualizar vehículos» para reconstruirlo con los mods actuales. Se conserva una copia de recuperación.')
@@ -2831,7 +3040,7 @@ class Handler(BaseHTTPRequestHandler):
         relative=unquote(path).lstrip('/') or 'index.html'
         target=(WEB_ROOT/relative).resolve()
         if not target.is_relative_to(WEB_ROOT.resolve()) or not target.is_file(): return self.send_json({'error':'Archivo inexistente'},404)
-        data=target.read_bytes(); self.send_response(200); self.send_header('Content-Type',mimetypes.guess_type(target.name)[0] or 'application/octet-stream')
+        data=target.read_bytes(); self.send_response(200); self.send_header('Content-Type',web_type(target.name))
         self.send_header('Content-Length',str(len(data))); self.send_header('Cache-Control','no-cache'); self.send_header('X-Content-Type-Options','nosniff')
         self.send_header('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
         self.end_headers(); self.wfile.write(data)
@@ -2881,6 +3090,8 @@ class Handler(BaseHTTPRequestHandler):
             actions['/api/rider-catalog']=('Leer MG de pasajero disponibles',self.state.rider_catalog)
             actions['/api/rider-preview']=('Cargar MG de pasajero',self.state.rider_preview)
             actions['/api/passenger-catalog']=('Leer poses de pasajeros',self.state.passenger_catalog)
+            actions['/api/mounted-weapon-catalog']=('Leer armas montables',self.state.mounted_weapon_catalog)
+            actions['/api/mounted-weapon-preview']=('Cargar arma montable',self.state.mounted_weapon_preview)
             actions['/api/remove-vehicle']=('Quitar de la campaña',self.state.remove_vehicle)
             actions['/api/dismantle-preview']=('Revisando componentes',self.state.dismantle_preview)
             actions['/api/dismantle-vehicle']=('Desmantelando vehículo',self.state.dismantle_vehicle)
@@ -2898,7 +3109,8 @@ class Handler(BaseHTTPRequestHandler):
                 lane=route if route in ('/api/check','/api/commander-mg-preview','/api/gun-preview','/api/design-preview','/api/design-catalog') else None
                 cancellable=route in ('/api/preview','/api/free-anchor','/api/edit-source','/api/gun-catalog','/api/commander-catalog',
                     '/api/support-catalog','/api/armor-catalog','/api/smoke-preview','/api/armor-preview','/api/support-preview',
-                    '/api/rider-catalog','/api/rider-preview','/api/passenger-catalog')
+                    '/api/rider-catalog','/api/rider-preview','/api/passenger-catalog',
+                    '/api/mounted-weapon-catalog','/api/mounted-weapon-preview')
                 return self.send_json(self.state.job(label,lambda:action(body),lane=lane,cancellable=cancellable),202)
             if route=='/api/screenshot':
                 return self.send_json(self.state.screenshot(body))

@@ -3,7 +3,7 @@ import {t} from './i18n.js';
 const zero=()=>({position:[0,0,0],rotation:[0,0,0]});
 const mountOf=row=>row?.recipient_mount||'turret';
 // Fittings the editor draws itself: where they sit, and a plate's size, change nothing in the drawn vehicle.
-export const DRAWN_FITTINGS=['extra_armor','smoke_launchers','towing','charge','rider_mgs','passenger_seats','commander_mg','sight'];
+export const DRAWN_FITTINGS=['extra_armor','smoke_launchers','towing','charge','rider_mgs','mounted_weapons','passenger_seats','extra_crew','commander_mg','sight'];
 // Of those, the ones nothing else hangs from: moving them cannot change whether the vehicle builds.
 export const LOOSE_FITTINGS=['extra_armor','smoke_launchers','towing','charge'];
 const unplaced=value=>Array.isArray(value)?value.map(unplaced):value&&typeof value==='object'?
@@ -30,7 +30,7 @@ export function vehicleDesign({state,$,job,displayPart,updateSelection,remember,
     const actual=hull?.eid&&(state.campaign?.units||[]).find(u=>u.eid===hull.eid)||hull;
     state.hull=actual;state.editing=null;
     state.transform={...old,hull:zero(),turret:zero(),assembly_draft:{schema:1,guns:[],turrets:[],...(seed?{seed}:{})}};
-    if(seed)for(const k of ['crew_seats','crew_exclude','joint_limits','source_recipe'])delete state.transform[k];
+    if(seed)for(const k of ['crew_seats','crew_exclude','weapon_operators','joint_limits','source_recipe'])delete state.transform[k];
     delete state.transform.gun_swap;delete state.transform.gun_swaps;delete state.transform.support_vehicle;
     placeholder();
   }
@@ -50,7 +50,8 @@ export function vehicleDesign({state,$,job,displayPart,updateSelection,remember,
   // Crew are placed over the drawn vehicle: moving one is no new preview.
   // Fittings the editor draws itself (armour, smoke tubes, hooks, charges, mounted MGs, seats):
   // where they sit, and a plate's size, change nothing in the drawn vehicle.
-  const key=()=>{const value=body();delete value.transform.crew_seats;delete value.transform.weapon_attributes;
+  // Pieces taken off the built vehicle are masked by the editor, never drawn again.
+  const key=()=>{const value=body();delete value.transform.crew_seats;delete value.transform.weapon_attributes;delete value.transform.weapon_operators;delete value.transform.removed_meshes;
     return JSON.stringify({...value,transform:withoutPlacement(value.transform,DRAWN_FITTINGS)});};
   // The chassis' own turrets name the targets: they keep their names however
   // many of them the design already replaced.
@@ -64,14 +65,27 @@ export function vehicleDesign({state,$,job,displayPart,updateSelection,remember,
       // mounted on another turret is independently editable. The backend
       // identifies those module roots from the weapon paths, not name prefixes.
       const top=data?.module_mounts||usable.filter(m=>{let parent=parents.get(m);while(parent){if(usable.includes(parent))return false;parent=parents.get(parent);}return true;});
-      if(state.hull?.template===template)chassis={template,mounts:[...top,...(data?.mounts||[]).filter(m=>String(m).startsWith('@free'))],preferred:data.anchor_name||''};
+      if(state.hull?.template===template)chassis={template,mounts:[...top,...(data?.mounts||[]).filter(m=>String(m).startsWith('@free'))],preferred:data.anchor_name||'',parents};
       controls();
     }).finally(()=>{if(loading?.promise===promise)loading=null;});
     loading={template,promise};return promise;
   }
-  const target=()=>{const unused=chassis.mounts.filter(m=>!turrets().some(r=>mountOf(r)===m));
-    return state.designTarget&&chassis.mounts.includes(state.designTarget)?state.designTarget:
-      unused.includes(chassis.preferred)?chassis.preferred:unused[0]||chassis.mounts[0]||'@free';};
+  // A mount inside a module that a donor replaced, or that was retired, went with
+  // it: the cupola MG of a replaced turret is no longer on the vehicle, so no list
+  // offers it (there is nothing to mark, adjust or replace). A deck spot on the
+  // replaced module itself stays: the donor sits there now.
+  function gone(mount){
+    const spot=String(mount).replace(/^@free:/,'');if(spot.startsWith('@')||!chassis.parents)return false;
+    const cut=new Set([...turrets().filter(r=>!r.native).map(mountOf),...removals().map(r=>r.mount),
+      ...(state.pendingTurret&&!state.pendingTurret.native?[mountOf(state.pendingTurret)]:[])]);
+    if(String(mount).startsWith('@free:')&&removals().some(r=>r.mount===spot))return true;
+    const seen=new Set();for(let parent=chassis.parents.get(spot);parent&&!seen.has(parent);parent=chassis.parents.get(parent)){seen.add(parent);if(cut.has(parent))return true;}
+    return false;
+  }
+  const present=()=>chassis.mounts.filter(m=>!gone(m));
+  const target=()=>{const unused=present().filter(m=>!turrets().some(r=>mountOf(r)===m));
+    return state.designTarget&&present().includes(state.designTarget)?state.designTarget:
+      unused.includes(chassis.preferred)?chassis.preferred:unused[0]||present()[0]||'@free';};
   function label(name){
     const aux=/^aux_turret(\d+)$/.exec(name||'');
     return name==='turret'?t('Torreta principal'):aux?t('Torreta auxiliar')+' '+aux[1]:t(mountLabel(name));
@@ -143,7 +157,7 @@ export function vehicleDesign({state,$,job,displayPart,updateSelection,remember,
     const row=rows.find(r=>mountOf(r)===mount);
     if(row?.native||!row){
       await loadChassis();mount??=state.designTarget||chassis.preferred;
-      if(!chassis.mounts.includes(mount)||String(mount).startsWith('@')||removals().some(r=>r.mount===mount))return false;
+      if(!present().includes(mount)||String(mount).startsWith('@')||removals().some(r=>r.mount===mount))return false;
       if(state.pendingTurret?.native)settleNative();
       const own=turrets().find(r=>mountOf(r)===mount&&r.native);
       state.designTarget=mount;placeholder();state.pendingTurret={kind:'native',native:true,recipient_mount:mount,original:mount,...(own?.mount_parent?{mount_parent:own.mount_parent}:{})};
@@ -184,7 +198,7 @@ export function vehicleDesign({state,$,job,displayPart,updateSelection,remember,
   async function retireTurret(){
     if(!state.hull||state.busy)return;
     await loadChassis();const mount=target();
-    if(!chassis.mounts.includes(mount)||mount.startsWith('@'))throw Error(t('Elegí una torreta separable para retirar.'));
+    if(!present().includes(mount)||mount.startsWith('@'))throw Error(t('Elegí una torreta separable para retirar.'));
     if(!confirm(t('La torreta y todas sus armas instaladas se guardarán en el depósito al construir. Los tripulantes sobrantes quedarán en reserva. ¿Continuar?')))return;
     const before=structuredClone(state.transform),pending=state.pendingTurret,unit=state.turret;
     remember();ensure();settleNative();
@@ -220,9 +234,10 @@ export function vehicleDesign({state,$,job,displayPart,updateSelection,remember,
     $('turret-undo-removal').disabled=state.busy||changing||!removals().length;
     if(shown){
       const rows=turrets(),current=state.pendingTurret?mountOf(state.pendingTurret):target();
-      $('turret-target').replaceChildren(...chassis.mounts.map(m=>new Option(label(m)+(rows.some(r=>mountOf(r)===m)?' · '+t('cambiada'):''),m)));
-      if(chassis.mounts.includes(current))$('turret-target').value=current;
-      $('turret-target').disabled=state.busy||!chassis.mounts.length;
+      const mounts=present();
+      $('turret-target').replaceChildren(...mounts.map(m=>new Option(label(m)+(rows.some(r=>mountOf(r)===m)?' · '+t('cambiada'):''),m)));
+      if(mounts.includes(current))$('turret-target').value=current;
+      $('turret-target').disabled=state.busy||!mounts.length;
       // Choosing a free spot only says where the next donor goes: say so, or it reads as done.
       $('turret-target-hint').classList.toggle('hidden',!!state.pendingTurret||!String(current).startsWith('@')||rows.some(r=>mountOf(r)===current));
       const chosen=$('turret-saved').value;
@@ -235,7 +250,7 @@ export function vehicleDesign({state,$,job,displayPart,updateSelection,remember,
       $('turret-remove-change').disabled=state.busy||!$('turret-saved').value;
     }else $('design-edit-turret').classList.toggle('hidden',true);
     // Position and limits pick which design turret they adjust.
-    const rows=active()?turrets():[],pending=state.pendingTurret,focus=[...new Set([...chassis.mounts.filter(m=>!m.startsWith('@')&&!removals().some(r=>r.mount===m)),...rows.map(mountOf).filter(m=>!removals().some(r=>r.mount===m))])];
+    const rows=active()?turrets():[],pending=state.pendingTurret,focus=[...new Set([...present().filter(m=>!m.startsWith('@')&&!removals().some(r=>r.mount===m)),...rows.map(mountOf).filter(m=>!removals().some(r=>r.mount===m))])];
     if(pending&&!focus.includes(mountOf(pending)))focus.push(mountOf(pending));
     for(const id of ['design-turret-pos','design-turret-limits','design-module-crew']){
       $(id+'-field').classList.toggle('hidden',!active()||!focus.length);
@@ -275,5 +290,5 @@ export function vehicleDesign({state,$,job,displayPart,updateSelection,remember,
     if(!await editTurret(mount))controls();});
   $('turret-saved').onchange=()=>{if(!state.pendingTurret&&$('turret-saved').value)state.designTarget=$('turret-saved').value;controls();};
   return {active,draft,turrets,ensure,placeholder,body,key,transform,refresh,switchMode,select,saveTurret,editTurret,removeTurret,discard,controls,settleNative,loadChassis,
-    moduleChoices:()=>chassis.mounts.filter(m=>!m.startsWith('@')&&!removals().some(r=>r.mount===m)).map(m=>({value:m,label:label(m)}))};
+    moduleChoices:()=>present().filter(m=>!m.startsWith('@')&&!removals().some(r=>r.mount===m)).map(m=>({value:m,label:label(m)}))};
 }

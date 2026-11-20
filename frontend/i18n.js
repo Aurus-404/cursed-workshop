@@ -1,6 +1,8 @@
 import {SMOKE_EN,SMOKE_ZH} from './smoke-copy.js';
 import {RIDER_EN,RIDER_ZH} from './rider-copy.js';
 import {PASSENGER_EN,PASSENGER_ZH} from './passenger-copy.js';
+import {MOUNTED_EN,MOUNTED_ZH} from './mounted-copy.js';
+import {VIEW_COLORS_EN,VIEW_COLORS_ZH} from './view-colors-copy.js';
 import {ZH} from './zh-cn.js';
 import {EXTRA_EN,EXTRA_ZH} from './ui-copy.js';
 import {uiStorage,saveUISettings} from './ui-settings.js';
@@ -9,7 +11,7 @@ import {RU,russianPatterns} from './ru.js';
 // Spanish is the source language. Static and dynamic text share these tables;
 // names and identifiers supplied by the game remain literal data.
 
-export const CHINESE={...ZH,...EXTRA_ZH,...SMOKE_ZH,...RIDER_ZH,...PASSENGER_ZH,...LOCALE_ZH};
+export const CHINESE={...ZH,...EXTRA_ZH,...SMOKE_ZH,...RIDER_ZH,...PASSENGER_ZH,...MOUNTED_ZH,...VIEW_COLORS_ZH,...LOCALE_ZH};
 export const EN={
 ...LOCALE_EN,
 "No se pudo completar la operación.":"Could not complete the operation.",
@@ -22,6 +24,16 @@ export const EN={
   "Bloquear selección":"Lock selection",
   "Mostrar todo":"Show all",
   "Solo cambia la vista del editor.":"Only changes the editor view.",
+  "Ocultar, aislar y bloquear solo cambian la vista del editor.":"Hide, isolate and lock only change the editor view.",
+  "Quitar en la partida":"Remove in game",
+  "Devolver a la partida":"Put back in game",
+  "Quitada en la partida":"Removed in game",
+  "Saca la pieza elegida del vehículo construido. Solo se quita lo visible: el blindaje y los daños no cambian.":"Takes the chosen piece off the built vehicle. Only what is visible goes: armour and damage stay the same.",
+  "Quitadas en la partida: {count}. Solo se quita lo visible; el blindaje no cambia.":"Removed in game: {count}. Only what is visible goes; armour stays the same.",
+  "Aplicá el cambio de torreta para quitar piezas de la torreta donante: después aparecen en el chasis.":"Apply the turret change to remove pieces of the donor turret: they then show up in the chassis.",
+  "Esta pieza no es del modelo del vehículo: se cambia desde su propia herramienta.":"This piece is not part of the vehicle's model: change it with its own tool.",
+  "La pieza no va a estar en el vehículo construido.":"The piece will not be on the built vehicle.",
+  "La pieza vuelve al vehículo construido.":"The piece is back on the built vehicle.",
   "Hay un borrador recuperable.":"A recoverable draft is available.",
   "Recuperar borrador":"Recover draft",
   "Descartar borrador":"Discard draft",
@@ -160,7 +172,7 @@ export const EN={
   'No se pudo guardar el reporte: ':'Could not save the report: ',
   'Informe completo copiado. Podés pegarlo como texto.':'Full report copied. You can paste it as plain text.',
   'El informe está en inglés. Revisalo antes de compartirlo. Podés copiar el informe completo como texto. No se envía nada automáticamente.':'The report is in English. Review it before sharing. You can copy the entire report as plain text. Nothing is sent automatically.',
-  ...EXTRA_EN,...SMOKE_EN,...RIDER_EN,...PASSENGER_EN,
+  ...EXTRA_EN,...SMOKE_EN,...RIDER_EN,...PASSENGER_EN,...MOUNTED_EN,...VIEW_COLORS_EN,
   'Progreso por etapas':'Progress by stage',
   'Ahorrar RAM cargando los catálogos solo cuando se usan':'Save RAM by loading catalogs only when needed',
   'Aviso sonoro al terminar de construir o cargar un vehículo':'Play a sound when vehicle building or loading finishes',

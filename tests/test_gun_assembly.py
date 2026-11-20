@@ -335,9 +335,24 @@ class GunAssemblyTests(unittest.TestCase):
         resources.resolve_reference=lambda *a:(_ for _ in ()).throw(FileNotFoundError())
         found=_ammunition(resources,'bulletrus_305',{})
         self.assertEqual(found['definition'],'set/stuff/shell/bulletrus_305.he.ammo')
-        files['set/stuff/shell/bulletrus_305.ap.ammo']=files['set/stuff/shell/bulletrus_305.he.ammo']
+        files['set/stuff/shell/bulletrus_305.ap.ammo']=b'{from "pattern shell" {entity "shell_305_ap"} {mass 400}}'
         resources.entries['set/stuff/shell/bulletrus_305.ap.ammo']=SimpleNamespace(path='set/stuff/shell/bulletrus_305.ap.ammo')
         with self.assertRaises(Exception):_ammunition(resources,'bulletrus_305',{})
+
+    def test_ammunition_is_found_by_tags_like_the_game_does(self):
+        # MACE's 37 mm trench gun carries "bullet_37x257 ap"; the files are one
+        # per nation (bullet_37x257.eng.ap, .fin.ap) that differ only in the shell model.
+        from types import SimpleNamespace
+        from workshop.gun_assembly import _ammunition
+        files={'set/stuff/shell/bullet_37x257.eng.ap.ammo':b'{from "pattern shell" {entity "eng_ap"} {mass 1.31}}',
+               'set/stuff/shell/bullet_37x257.fin.ap.ammo':b'{from "pattern shell" {entity "fin_ap"} {mass 1.31}}',
+               'set/stuff/shell/bullet_37x257.ger.aphe.ammo':b'{from "pattern shell" {entity "ger_aphe"} {mass 1.4}}',
+               'set/stuff/shell/shell.pattern':b'{bullet {entity "generic"}}'}
+        resources=SimpleNamespace(entries={k:SimpleNamespace(path=k) for k in files},read=files.__getitem__)
+        resources.resolve_reference=lambda *a:(_ for _ in ()).throw(FileNotFoundError())
+        found=_ammunition(resources,'bullet_37x257 ap',{})
+        self.assertEqual(found['definition'],'set/stuff/shell/bullet_37x257.eng.ap.ammo')
+        self.assertEqual(_ammunition(resources,'bullet_37x257 aphe',{})['definition'],'set/stuff/shell/bullet_37x257.ger.aphe.ammo')
 
     def test_barrel_is_the_visible_piece_nearest_the_socket(self):
         # StuG III / KV-2 / SU-76: "barrel only" kept the mantlet; MB-2-12 its cradle.

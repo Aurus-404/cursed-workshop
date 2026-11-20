@@ -748,6 +748,26 @@ def inventory_weapon_meshes(resources, template_id, model):
     return meshes,warnings
 
 
+def internal_spot(model, seat):
+    """The bone that best shows where a crewman with no seat bone works.
+
+    A tank's crew sit inside, with no seat in the model. Point at the weapon
+    the place works (its link bone, as seat_markers lists them), else at a
+    hatch, cupola or visor named after the role; None when the model names
+    nothing for it.
+    """
+    for name in seat.get("near") or []:
+        if name in model["bones"]:
+            return name
+    role = re.sub(r"\d+$", "", str(seat.get("place") or "")).casefold()
+    if role:
+        for name in model["bones"]:
+            low = name.casefold()
+            if role in low and any(word in low for word in ("hatch", "cupola", "visor")):
+                return name
+    return None
+
+
 def build_preview(resources, template_id, part="full", mount_name=None, seats=None, *, include_inventory=False) -> dict:
     """seats: [{"place","group","bone"}] (compiler.seat_markers) placed like the meshes."""
     if part not in ("full", "hull", "turret"):
@@ -845,13 +865,20 @@ def build_preview(resources, template_id, part="full", mount_name=None, seats=No
         module_roles = set().union(set(), *(_place_roles(p, implicit_gunner=True) for p in module_places))
         module_roles |= selected & {"gunner", "commander", "charger"}
         module_roles.discard("driver")
-    seat_points, internal = [], 0
+    seat_points, internal, inside = [], 0, []
     for seat in seats or []:
         if module_roles is not None:
             seat = {**seat, "weapon": seat["place"] in module_roles}
         bone = model["bones"].get(seat["bone"]) if seat["bone"] else None
         if bone is None:
             internal += seat["group"] == "crew"  # tank crews sit inside, without a seat bone
+            if seat["group"] == "crew":
+                spot = internal_spot(model, seat)
+                # Marked with the part that draws the spot; an unknown spot stays with the chassis.
+                keep = (bool(spot) and spot in selected) if part == "turret" else (not spot or spot not in selected) if part == "hull" else True
+                if keep:
+                    inside.append({"place": seat["place"], "bone": spot,
+                                   "position": point(multiply(adjustment, model["bones"][spot]["world"]), [0, 0, 0]) if spot else None})
             continue
         # A weapon's crew travels with the module even when its seat bone hangs
         # elsewhere in the source model (a Pak's loaders stand beside the gun).
@@ -905,6 +932,16 @@ def build_preview(resources, template_id, part="full", mount_name=None, seats=No
         joints = weapon_joints(model, root, adjustment, visible, defines=defines)
     except (ValueError, KeyError, OSError) as error:
         warnings.append({'code': 'joints_unavailable', 'message': str(error)})
+    # Turrets drawn as part of a whole vehicle (Edit) keep the turret color in
+    # the plain view: their meshes hang from a turret ring of the model.
+    if part in ('hull', 'full'):
+        rings = set()
+        for ring in replaceable_mounts(model):
+            if ring in model['bones']:
+                rings |= descendants(model['bones'], ring)
+        for mesh in meshes:
+            if mesh.get('bone') in rings:
+                mesh['turret_branch'] = True
     # Armour volumes for View > Armour: the same parts and space as the meshes.
     # A view aid only: it never blocks the preview.
     armor = []
@@ -926,7 +963,7 @@ def build_preview(resources, template_id, part="full", mount_name=None, seats=No
             "module_mounts": modules,
             "anchor": model["anchor"], "anchor_name": model["anchor_name"], "mounts": (replaceable_mounts(model) if part == 'hull' else model["mounts"]) + options,
             "seat": seat, "carried": bool(part == "turret" and carried),
-            "seats": seat_points, "internal_crew": internal, "hull_floor": hull_floor, "mount_parent": mount_parent, "module_hosts": module_hosts,
+            "seats": seat_points, "internal_crew": internal, "internal_seats": inside, "hull_floor": hull_floor, "mount_parent": mount_parent, "module_hosts": module_hosts,
             "bounds": bounds_of(positions), "diagnostics": warnings,
             "armor": armor,
             "bones": [{"name": name, "parent": bone["parent"], "position": point(bone["world"], [0, 0, 0])}

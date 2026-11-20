@@ -81,8 +81,13 @@ assert.deepEqual(state.transform.joint_limits,{turret:{gun:[-20,30]}});assert.eq
 $('joint-min').value='100';$('joint-min').onchange();assert.deepEqual(state.transform.joint_limits.turret.gun,[-20,30]);
 // Serialized recipes restore native-key overrides, and changing edit part hides its arc.
 state.transform=JSON.parse(JSON.stringify(state.transform));editor.refresh();assert.equal($('joint-max').value,30);
-state.edit='hull';editor.refresh();assert.ok(groups.turret.children.every(c=>c.visible===false));
-state.edit='turret';editor.refresh();$('joint-reset').onclick();assert.equal($('joint-min').value,-10);
+// One list for the whole vehicle: a hull MG's joint sits beside the turret's;
+// picking it moves the arc (and its limits) to the chassis.
+state.previews.hull={joints:[{bone:'mgun_rot',limits:[-15,15],matrix,weapons:['mgun']}]};state.edit='hull';editor.refresh();
+assert.deepEqual($('joint-select').options.map(o=>o.value),['turret:gun','hull:mgun_rot']);assert.equal($('joint-select').value,'turret:gun','the picked joint stays');
+$('joint-select').value='hull:mgun_rot';$('joint-select').onchange();assert.ok(groups.turret.children.every(c=>c.visible===false));
+$('joint-min').value='-5';$('joint-max').value='5';$('joint-min').onchange();assert.deepEqual(state.transform.joint_limits.hull.mgun_rot,[-5,5]);
+$('joint-select').value='turret:gun';$('joint-select').onchange();$('joint-reset').onclick();assert.equal($('joint-min').value,-10);
 assert.equal(state.transform.joint_limits.turret.gun,undefined);
 console.log('Model editor: anatomical handedness on reflected seats/hosts, UV materials, native-axis arcs, limits, invalid input, recipe restore and reset passed.');
 // Live pivot changes alter the selected joint centre, not its axes or a

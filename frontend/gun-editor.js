@@ -1,7 +1,14 @@
 import {t} from './i18n.js';
+import {mountedSlots,weaponGroups} from './mounted-weapon-editor.js';
 
-export function gunEditor({state,$,job,displayPart,updateSelection,selectEdit,remember,reportError,design}){
+export function gunEditor({state,$,job,displayPart,updateSelection,selectEdit,remember,reportError,design,mounted:mountedTool=()=>null}){
   let revision=0;const catalogs={};
+  // "Elegir MG / fusil AT": the donor is a mountable infantry weapon instead of
+  // another unit. The recipient gun becomes a mountable slot holding it
+  // (transform.mounted_weapons.slots), as the Universal Carrier's front Bren.
+  let mountable=false,slotPlace='',slotChoice='',weapons=null;
+  const mounted=()=>{try{return mountedTool();}catch{return null;}};
+  const slotRows=()=>mountedSlots(state.transform);
   const active=()=>$('operation-select').value==='gun';
   // A turret kept in the depot gives its guns; a chassis, or a catalog part, is not one.
   const storedTurret=u=>!!u?.depot&&!u.creative&&['turret','gun'].includes(u.part);
@@ -16,7 +23,7 @@ export function gunEditor({state,$,job,displayPart,updateSelection,selectEdit,re
     $('gun-save').disabled=!!(state.busy||!state.transform.gun_swap?.recipient_place||!state.transform.gun_swap?.donor_place||state.turret?.designPlaceholder);
     $('gun-save-position').classList.toggle('hidden',!active()||!state.transform.gun_swap);
     $('gun-save-position').disabled=$('gun-save').disabled;
-    for(const id of ['gun-edit-change','gun-remove-change','gun-clear-changes'])$(id).disabled=state.busy||!saved().length;
+    for(const id of ['gun-edit-change','gun-remove-change','gun-clear-changes'])$(id).disabled=state.busy||!saved().length&&!slotRows().length;
     $('gun-discard').disabled=state.busy||!state.transform.gun_swap;
     $('gun-barrel-only').checked=!!state.transform.gun_swap?.barrel_only;$('gun-barrel-only').disabled=state.busy||!state.transform.gun_swap?.donor_place;
     $('gun-keep-mantlet').checked=!state.transform.gun_swap?.drop_mantlet;$('gun-keep-mantlet').disabled=state.busy||!state.transform.gun_swap?.donor_place;
@@ -26,12 +33,58 @@ export function gunEditor({state,$,job,displayPart,updateSelection,selectEdit,re
     $('gun-saved').replaceChildren(...saved().map((row,i)=>{
       const verified=state.designWeapons?.find(w=>w.recipient_place===row.recipient_place&&w.donor_template===row.donor_template&&w.donor_place===row.donor_place);
       const weapon=verified?.label||label('turret',row.donor_place),source=(state.campaign?.units||[]).find(u=>u.eid===row.donor_eid)?.label||(state.campaign?.depot||[]).find(d=>d.id===row.donor_depot)?.label||row.donor_template||'';
-      return new Option(`${i+1}. ${row.recipient_place} ← ${weapon}${source?' · '+source:''}`,String(i));}));
-    $('gun-saved').value=selectedChange!==''&&saved()[Number(selectedChange)]?selectedChange:saved().length?'0':'';
+      return new Option(`${i+1}. ${row.recipient_place} ← ${weapon}${source?' · '+source:''}`,String(i));}),
+      ...slotRows().map((row,i)=>new Option(`${saved().length+i+1}. ${row.place} ← ${mounted()?.weaponLabel(row.item)||row.item} · ${t('MG / fusil AT')}`,'slot:'+row.place)));
+    const listed=[...saved().map((_,i)=>String(i)),...slotRows().map(row=>'slot:'+row.place)];
+    $('gun-saved').value=listed.includes(selectedChange)?selectedChange:listed[0]||'';
     if(active())$('operation-count').textContent=t(storedTurret(state.turret)?'Vehículo + pieza del Depósito → vehículo':'2 vehículos → 1 vehículo');
     for(const [part,id] of [['hull','gun-recipient'],['turret','gun-donor']])if(!state[part]){delete catalogs[part];$(id).replaceChildren(new Option(t(part==='hull'?'Elegí primero el receptor':'Elegí primero el donante'),''));$(id).disabled=true;}
     $('assembly-step').textContent=t(active()?(!state.hull?'Elegí el vehículo receptor.':!state.turret||state.turret.designPlaceholder?'Elegí Donante y seleccioná otra unidad.':!state.transform.gun_swap?.recipient_place||!state.transform.gun_swap?.donor_place?'Elegí dos cañones compatibles para continuar.':'Ajustá el cañón desde Posición y montaje. Volvé al menú para construir.'):$('operation-select').value==='support'?'Elegí un vehículo y después Servicio y carga.':'Elegí el chasis y la torreta en la lista.');
+    mountableControls();
   }
+  // The recipient guns that can take an infantry weapon, the MGs and AT rifles,
+  // and the controls a unit donor alone uses, hidden.
+  function mountableControls(){
+    const on=active()&&mountable;state.gunMountable=on;
+    $('gun-mountable').textContent=t(on?'Usar otra unidad como donante':'Elegir MG / fusil AT');
+    $('gun-mountable').disabled=!!(state.busy||!state.hull);
+    for(const id of ['gun-donor-field','gun-barrel-only-field','gun-keep-mantlet-field','gun-note','gun-blocked'])$(id).classList.toggle('hidden',on);
+    $('gun-mountable-field').classList.toggle('hidden',!on);
+    $('gun-mountable-place').classList.toggle('hidden',!on);
+    if(!on)return;
+    const places=state.hull?mounted()?.slotPlaces()||[]:[];
+    if(!places.some(s=>s.place===slotPlace))slotPlace=places.find(s=>!slotRows().some(r=>r.place===s.place))?.place||places[0]?.place||'';
+    const gun=place=>catalogs.hull?.weapons.find(w=>w.place===place);
+    const name=s=>{const weapon=gun(s.place)?.label||s.weapon?.replaceAll('_',' ')||'';
+      return (weapon?weapon+' · ':'')+s.place+(s.mountable?' · '+t('hueco montable'):'');};
+    $('gun-recipient').replaceChildren(...(places.length?places.map(s=>new Option(name(s),s.place))
+      :[new Option(t(state.hull?'Ningún arma de este vehículo admite una MG o un fusil AT.':'Elegí primero el receptor'),'')]));
+    $('gun-recipient').value=slotPlace;$('gun-recipient').disabled=!!(state.busy||!places.length);
+    const select=$('gun-mountable-item');select.replaceChildren(new Option(t(weapons?'Elegí un arma':'Leyendo armas montables…'),''));
+    for(const [label,list] of weaponGroups(weapons||[])){const group=document.createElement('optgroup');group.label=label;
+      for(const w of list)group.append(new Option(w.label+' ('+w.id+')',w.id));select.append(group);}
+    select.value=slotChoice;select.disabled=!!(state.busy||!slotPlace||!weapons);
+    const current=slotRows().find(r=>r.place===slotPlace)?.item||'';
+    $('gun-save').disabled=!!(state.busy||!slotPlace||!slotChoice||slotChoice===current);
+    $('gun-discard').disabled=!!(state.busy||slotChoice===current);
+    $('gun-mountable-place').disabled=!!(state.busy||!mounted()?.placeable(slotPlace));
+    $('gun-edit-change').disabled=state.busy||!slotRows().length&&!saved().length;
+    $('assembly-step').textContent=t(!state.hull?'Elegí el vehículo receptor.':!slotPlace?'Ningún arma de este vehículo admite una MG o un fusil AT.'
+      :!current||slotChoice!==current?'Elegí la MG o el fusil AT y guardá el cambio.':'La tripulación puede cambiar el arma del hueco en batalla.');
+    $('operation-count').textContent=t('Vehículo + MG / fusil AT → vehículo');
+  }
+  // Switching donor kinds drops the unsaved change of the other kind.
+  async function setMountable(value,place){
+    if(value){
+      if(state.transform.gun_swap){restoreEdited();delete state.transform.gun_swap;state.transform.turret={position:[0,0,0],rotation:[0,0,0]};if(design?.active())design.placeholder();}
+      mountable=true;if(place)slotPlace=place;slotChoice=slotRows().find(r=>r.place===slotPlace)?.item||'';controls();
+      if(!weapons)weapons=await mounted()?.weapons()||[];
+      if(!slotChoice)slotChoice=slotRows().find(r=>r.place===slotPlace)?.item||'';
+      await refresh();controls();return;
+    }
+    mountable=false;slotChoice='';await catalog('hull');await catalog('turret');await refresh();controls();
+  }
+  async function saveSlot(){if(!slotPlace||!slotChoice)return;await mounted()?.changeSlot(slotPlace,slotChoice);controls();}
   async function catalog(part){
     const unit=state[part];if(!unit)return;
     if(unit.designPlaceholder&&part==='turret'){selectEmpty();return;}
@@ -81,6 +134,7 @@ export function gunEditor({state,$,job,displayPart,updateSelection,selectEdit,re
     // A save vehicle as recipient is designed in the campaign (a catalog gun
     // joins it costing no unit); a catalog recipient (creative mode) builds
     // for the shop, where every part only names its model.
+    if(part==='turret'&&mountable){mountable=false;slotChoice='';}
     const owned=u=>!!u?.eid&&!u.depot&&!u.designPlaceholder;
     const designable=u=>owned(u)||!!u?.creative;
     const designed=!!design&&(part==='hull'?designable(unit):designable(state.hull));
@@ -112,7 +166,9 @@ export function gunEditor({state,$,job,displayPart,updateSelection,selectEdit,re
     await catalog('hull');await catalog('turret');await refresh();
   }
   for(const [id,key] of [['gun-recipient','recipient_place'],['gun-donor','donor_place']]){
-    $(id).onchange=async()=>{const value=$(id).value;remember();try{
+    $(id).onchange=async()=>{const value=$(id).value;
+      if(mountable&&key==='recipient_place'){slotPlace=value;slotChoice=slotRows().find(r=>r.place===value)?.item||'';controls();return;}
+      remember();try{
       if(key==='recipient_place'&&value!==state.transform.gun_swap?.recipient_place){
         // Reopening a saved slot restores its own donor, placement and pivot.
         // Discarding this edit must be able to restore the previous saved row.
@@ -153,18 +209,28 @@ export function gunEditor({state,$,job,displayPart,updateSelection,selectEdit,re
     await catalog('hull');await catalog('turret');await refresh();controls();
   }
   const run=fn=>async()=>{try{await fn();}catch(error){if(error.name!=='AbortError')reportError(error);}};
-  $('gun-save').onclick=run(save);$('gun-save-position').onclick=run(save);
+  $('gun-save').onclick=run(()=>mountable?saveSlot():save());$('gun-save-position').onclick=run(save);
+  $('gun-mountable').onclick=run(()=>setMountable(!mountable));
+  $('gun-mountable-item').onchange=()=>{slotChoice=$('gun-mountable-item').value;controls();};
+  $('gun-mountable-place').onclick=run(()=>{mounted()?.placeSlot(slotPlace);});
   // Barrel only: an emplacement's breech, cradle and shield stay out of the turret.
   $('gun-keep-mantlet').onchange=run(async()=>{if(!state.transform.gun_swap)return;remember();
     if($('gun-keep-mantlet').checked)delete state.transform.gun_swap.drop_mantlet;else state.transform.gun_swap.drop_mantlet=true;await refresh();controls();});
   $('gun-barrel-only').onchange=run(async()=>{if(!state.transform.gun_swap)return;remember();
     if($('gun-barrel-only').checked)state.transform.gun_swap.barrel_only=true;else delete state.transform.gun_swap.barrel_only;await refresh();controls();});
-  $('gun-discard').onclick=run(async()=>{remember();delete state.transform.gun_swap;
+  $('gun-discard').onclick=run(async()=>{if(mountable){slotChoice=slotRows().find(r=>r.place===slotPlace)?.item||'';controls();return;}
+    remember();delete state.transform.gun_swap;
     if(design?.active()&&state.transform.gun_edit){saved().splice(state.transform.gun_edit.index,0,state.transform.gun_edit.row);delete state.transform.gun_edit;design.placeholder();}
     state.transform.turret={position:[0,0,0],rotation:[0,0,0]};await catalog('hull');await catalog('turret');await refresh();controls();});
-  $('gun-edit-change').onclick=run(async()=>{remember();await editChange(Number($('gun-saved').value));});
-  $('gun-remove-change').onclick=run(async()=>{remember();saved().splice(Number($('gun-saved').value),1);await catalog('hull');await catalog('turret');await refresh();controls();});
+  // A saved MG / AT rifle change reads "slot:<recipient gun>" in the list.
+  const slotOf=value=>value?.startsWith('slot:')?value.slice(5):null;
+  $('gun-edit-change').onclick=run(async()=>{const place=slotOf($('gun-saved').value);if(place){await setMountable(true,place);return;}
+    if(mountable)await setMountable(false);remember();await editChange(Number($('gun-saved').value));});
+  $('gun-remove-change').onclick=run(async()=>{const place=slotOf($('gun-saved').value);
+    if(place){await mounted()?.changeSlot(place,'');if(place===slotPlace)slotChoice='';controls();return;}
+    remember();saved().splice(Number($('gun-saved').value),1);await catalog('hull');await catalog('turret');await refresh();controls();});
   $('gun-clear-changes').onclick=run(async()=>{remember();if(design?.active())design.draft().guns=[];else state.transform.gun_swaps=[];delete state.transform.gun_swap;delete state.transform.gun_edit;
+    if(state.transform.mounted_weapons?.slots){delete state.transform.mounted_weapons.slots;if(!state.transform.mounted_weapons.added?.length)delete state.transform.mounted_weapons;slotChoice='';await mounted()?.restore();}
     state.transform.turret={position:[0,0,0],rotation:[0,0,0]};await catalog('hull');await catalog('turret');await refresh();controls();});
   // The bones a weapon place takes with it, for marking it in the 3D view.
   const bones=(part,place)=>catalogs[part]?.weapons?.find(row=>row.place===place)?.bones||null;

@@ -7,10 +7,11 @@ let busy=false,support=false,ready=true;
 const events=[],recipe={commander_mg:{item:'base_weapon',position:[1,2,3]},smoke_launchers:[{tubes:3}]};
 const nav=inspectorNavigation({busy:()=>busy,support:()=>support,ready:()=>ready,
   onEnter:(tool,part)=>events.push(['enter',tool,part]),onLeave:tool=>events.push(['leave',tool])});
-assert.equal(nav.open('commander'),false,'commander is reached through Turret');
-assert.ok(nav.select('turret'));assert.ok(nav.open('commander'));
+// One menu for the whole vehicle: no Chassis/Turret tab hides a tool.
+assert.equal(nav.select,undefined);assert.ok(nav.available('mobility')&&nav.available('commander'));
+assert.ok(nav.open('commander'));
 assert.equal(nav.part(),'commander_mg');assert.ok(nav.pose());
-assert.equal(nav.select('hull'),false);assert.equal(nav.open('smoke'),false);
+assert.equal(nav.open('smoke'),false);
 assert.equal(nav.accepts('smoke_launchers'),false,'late callbacks cannot select another tool');
 busy=true;assert.equal(nav.finish(),false);busy=false;
 const before=structuredClone(recipe);assert.ok(nav.finish());assert.deepEqual(recipe,before);
@@ -18,7 +19,7 @@ assert.deepEqual(events,[['enter','commander','commander_mg'],['leave','commande
 assert.ok(nav.open('joints'));assert.equal(nav.pose(),false);assert.ok(nav.accepts('turret'));
 nav.reset();assert.equal(nav.tool,null);
 ready=false;assert.equal(nav.open('position'),false);ready=true;
-support=true;assert.equal(nav.open('commander'),false);assert.ok(nav.select('hull'));
+support=true;assert.equal(nav.open('commander'),false);
 assert.ok(nav.open('cargo'));assert.equal(nav.part(),'turret');nav.finish();
 assert.ok(nav.open('crew'));assert.equal(nav.part(),'turret');nav.finish();
 for(const tool of ['armor','smoke']){assert.ok(nav.open(tool));assert.equal(nav.open('position'),false);nav.finish();}
@@ -42,14 +43,22 @@ const state={transform:structuredClone(recipe),hull:{},turret:{},busy:false};
 let attached=null,cleared=0;
 const menus=inspectorMenus({document,state,support:()=>false,onEnter:(_,part)=>attached=part,
   onLeave(){attached=null;cleared++;},onChange(){if(!menus.navigation.tool)$('build-button').disabled=false;}});
-const buttons=$('inspector-home').children;
+// Tools sit in folding categories; Weapons without a turret beside Operation and parts.
+const walk=node=>[node,...node.children.flatMap(walk)];
+const buttons=Object.keys(INSPECTOR_TOOLS).map(key=>walk($('inspector-home')).find(n=>n.attributes['aria-controls']==='inspector-panel-'+key));
+assert.ok(buttons.every(Boolean),'every tool is in a category');
+const categoryOf=key=>buttons[Object.keys(INSPECTOR_TOOLS).indexOf(key)].parentElement;
+assert.equal(categoryOf('mounted'),categoryOf('operation'));assert.equal(categoryOf('mounted').dataset.category,'weapons');
+assert.equal(categoryOf('operation').children.filter(n=>n.attributes['aria-controls'])[0],buttons[Object.keys(INSPECTOR_TOOLS).indexOf('operation')],'Operation and parts leads its category');
+assert.equal(categoryOf('crew'),categoryOf('passengers'));assert.notEqual(categoryOf('crew'),categoryOf('operation'));
+menus.render();assert.equal(categoryOf('mobility').classList.contains('hidden'),false,'a category with a usable tool shows');
 const visibleTools=()=>Object.entries(INSPECTOR_TOOLS).filter(([key])=>!$('inspector-panel-'+key).classList.contains('hidden'));
 assert.equal(visibleTools().length,0);assert.ok($('inspector-tool').classList.contains('hidden'));
-$('edit-turret').onclick();buttons[Object.keys(INSPECTOR_TOOLS).indexOf('commander')].onclick();
+buttons[Object.keys(INSPECTOR_TOOLS).indexOf('commander')].onclick();
 assert.equal(menus.navigation.tool,'commander');assert.equal(attached,'commander_mg');
 assert.deepEqual(visibleTools().map(([key])=>key),['commander']);
 assert.ok($('inspector-build').classList.contains('hidden'));assert.ok($('build-button').disabled);
-assert.ok($('edit-hull').disabled&&$('operation-select').disabled&&$('pick-edit').disabled);
+assert.ok($('operation-select').disabled&&$('pick-edit').disabled);
 assert.equal($('cmd-parent').parentElement.parentElement,$('working-target-slot'),'commander context appears above the tool');
 assert.equal($('armor-list').parentElement.parentElement,$('working-target-slot'),'armor uses the existing placed-part selector at the top');
 assert.equal($('pose-actions').parentElement.id,'pose-actions-home');
@@ -66,7 +75,9 @@ buttons[Object.keys(INSPECTOR_TOOLS).indexOf('armor')].onclick();
 assert.equal($('pose-actions').parentElement.id,'armor-pose-slot');
 $('inspector-finish').onclick();
 buttons[Object.keys(INSPECTOR_TOOLS).indexOf('smoke')].onclick();assert.deepEqual(visibleTools().map(([key])=>key),['smoke']);
-$('inspector-finish').onclick();assert.equal(menus.navigation.section,'turret');
+$('inspector-finish').onclick();
+buttons[Object.keys(INSPECTOR_TOOLS).indexOf('mounted')].onclick();assert.ok($('pose-pivot').classList.contains('hidden'),'a turretless weapon has no pivot to move');
+$('inspector-finish').onclick();buttons[Object.keys(INSPECTOR_TOOLS).indexOf('smoke')].onclick();assert.equal($('pose-pivot').classList.contains('hidden'),false);$('inspector-finish').onclick();
 buttons[Object.keys(INSPECTOR_TOOLS).indexOf('joints')].onclick();assert.ok($('inspector-transforms').classList.contains('hidden'),'joint tool cannot move the entire turret');
 menus.navigation.reset();assert.equal(visibleTools().length,0);
 state.editing={eid:1};menus.render();assert.ok($('gun-donor').disabled,'recipe edit must retain its existing donor lock');

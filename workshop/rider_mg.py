@@ -48,12 +48,27 @@ def _machine_gun(root, place, guns):
                for e in root.find_all('extender') if e.args == ['inventory'] for w in e.find_all('weapon'))
 
 
+def _any_machine_gun(index, place):
+    """A place firing machine guns (set/stuff/mgun), mountable or not: the Fi 156's
+    rear MG 15 is no infantry weapon, but its gunner's pose is an MG operator's."""
+    from .registration import _stuff_definition, RegistrationError
+    weapons = [w.args[0] for w in place.find_all('weapon') if w.args]
+    try:
+        return bool(weapons) and all(_stuff_definition(index, w).casefold().startswith('set/stuff/mgun/') for w in weapons)
+    except (RegistrationError, FileNotFoundError, ValueError):
+        return False
+
+
 def _discover(index):
     """Stock MG mounts and every MG operator pose, in one pass.
 
     Mounts (their meshes are copied) come only from the stock game without
-    DLC. Poses are the shared human animations of the stock registry; DLC
-    vehicles may name them too, since an animation is no DLC content.
+    DLC, and only for MGs a player can mount. Poses are the shared human
+    animations of the stock registry, from the gunner of any machine gun: DLC
+    vehicles may name them too, since an animation is no DLC content, and so
+    may an MG nobody can take off its aircraft. A pose that left the list
+    because its MG did stopped every vehicle built with it from updating
+    (seat_fi156_gunner).
     """
     from .commander_mg import _stock, _blocked
     from .compiler import _load_entity, _crew_expansion, _expand_weapon_seats, _append_inherited_crew
@@ -82,9 +97,10 @@ def _discover(index):
             _crew_expansion(source, root)
             weapon_places = [p for w in root.find_all('Weaponry') for p in w.find_all('place')
                              if p.args and p.find('gunner') is not None and len(p.find('gunner').args) == 1
-                             and _machine_gun(root, p, guns)]
+                             and (_machine_gun(root, p, guns) or _any_machine_gun(source, p))]
             if not weapon_places:
                 continue
+            mountable = {id(p) for p in weapon_places if _machine_gun(root, p, guns)}
             operators = {p.find('gunner').args[0] for p in weapon_places}
             _expand_weapon_seats(source, root, operators)
             declared = {}
@@ -119,7 +135,8 @@ def _discover(index):
                                                    'begin': climb, 'reverse': leave})
                 seat = declared.get(operator, {})
                 link = place.find('LinkBone') or place.find('linkbone')
-                if not stock or link is None or not link.args or not seat.get('linkbone'):
+                if (not stock or id(place) not in mountable or link is None or not link.args
+                        or not seat.get('linkbone')):
                     continue
                 ancestors, current = [], link.args[0]
                 while current in bones:
